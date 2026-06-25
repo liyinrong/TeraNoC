@@ -578,6 +578,7 @@ perfetto-gen:
 		--slices $(slices) $(if $(preload),--elf $(preload),) \
 		$(if $(wildcard $(buildpath)/noc_profiling),--noc $(buildpath)/noc_profiling,) \
 		$(if $(wildcard $(buildpath)/spm_profiling),--spm $(buildpath)/spm_profiling,) \
+		$(if $(wildcard $(buildpath)/redmule_profiling),--redmule $(buildpath)/redmule_profiling,) \
 		$(if $(wildcard $(buildpath)/spatz_profiling),--spatz $(buildpath)/spatz_profiling,) \
 		--noc-slices $(noc_slices) $(if $(filter 1,$(free_range)),--free-range,) \
 		$(if $(filter 1,$(flows)),--flows,) \
