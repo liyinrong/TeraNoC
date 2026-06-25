@@ -41,6 +41,15 @@ do ../scripts/questa/wave_core.tcl 1 0 0 $NumY
 do ../scripts/questa/wave_core.tcl 1 1 1 $NumY
 do ../scripts/questa/wave_core.tcl [expr [examine -radix dec mempool_pkg::NumGroups]-1] [expr [examine -radix dec mempool_pkg::NumTilesPerGroup]-1] [expr [examine -radix dec mempool_pkg::NumCoresPerTile]-1] $NumY
 
+# Group 0 / Tile 0 RedMulE tensor core (only present when NumRMTiles > 0)
+if {[examine -radix dec mempool_pkg::NumRMTiles] > 0} {
+    add wave -noupdate -group redmule /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[0\]/gen_groups_y\[0\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles\[0\]/i_tile/gen_redmule/i_redmule_top/i_control/current
+    add wave -noupdate -group redmule /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[0\]/gen_groups_y\[0\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles\[0\]/i_tile/gen_redmule/i_redmule_top/busy_o
+    add wave -noupdate -group redmule /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[0\]/gen_groups_y\[0\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles\[0\]/i_tile/gen_redmule/redmule_evt
+    add wave -noupdate -group redmule /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[0\]/gen_groups_y\[0\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles\[0\]/i_tile/gen_redmule/i_redmule_top/i_scheduler/current_state
+    add wave -noupdate -group redmule /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[0\]/gen_groups_y\[0\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles\[0\]/i_tile/gen_redmule/i_redmule_top/i_scheduler/stall_engine
+}
+
 # Add groups
 set DmaBurstLen [examine -radix dec mempool_pkg::DmaBurstLen]
 set Interleave [examine -radix dec mempool_pkg::Interleave]
