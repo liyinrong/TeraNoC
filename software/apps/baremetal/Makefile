@@ -26,10 +26,14 @@ FP_APPS := $(foreach suf, $(FP_SUFFIXES), $(filter %_$(suf), $(ALL)))
 # config and the LLVM toolchain (RVV codegen); the config is selected by the
 # user (no automatic override).
 SPATZ_APPS := $(filter sp_%, $(ALL))
+# RedMulE apps are screened by the `rm_` prefix. They need a RedMulE-equipped
+# config (e.g. tensorpool*) and the LLVM toolchain (fp16); the config is
+# selected by the user (no automatic override).
+REDMULE_APPS := $(filter rm_%, $(ALL))
 
 # Default compiler per app type: gcc for integer apps, llvm for floating-point
 # and vector apps. Still overridable on the command line.
-ifneq ($(filter $(FP_APPS) $(SPATZ_APPS) all_llvm all_spatz,$(MAKECMDGOALS)),)
+ifneq ($(filter $(FP_APPS) $(SPATZ_APPS) $(REDMULE_APPS) all_llvm all_spatz all_redmule,$(MAKECMDGOALS)),)
   COMPILER ?= llvm
 endif
 
@@ -39,9 +43,10 @@ include $(RUNTIME_DIR)/runtime.mk
 BINARIES := $(addprefix $(BIN_DIR)/,$(APPS))
 
 # gcc builds the integer apps (`all`), llvm the floating-point apps
-# (`all_llvm`); the vector apps go through `all_spatz`.
-ALL_GCC := $(filter-out $(FP_APPS) $(SPATZ_APPS), $(ALL))
-ALL_LLVM := $(filter-out $(I_APPS) $(SPATZ_APPS), $(ALL))
+# (`all_llvm`); the vector apps go through `all_spatz`, the RedMulE apps
+# through `all_redmule`.
+ALL_GCC := $(filter-out $(FP_APPS) $(SPATZ_APPS) $(REDMULE_APPS), $(ALL))
+ALL_LLVM := $(filter-out $(I_APPS) $(SPATZ_APPS) $(REDMULE_APPS), $(ALL))
 
 # Make all applications
 all: $(ALL_GCC)
@@ -51,6 +56,9 @@ all_llvm: $(ALL_LLVM)
 
 # Make all Spatz vector apps (uses LLVM by default; pass a Spatz config)
 all_spatz: $(SPATZ_APPS)
+
+# Make all RedMulE apps (uses LLVM by default; pass a RedMulE config)
+all_redmule: $(REDMULE_APPS)
 
 $(APPS): % : $(BIN_DIR)/% $(APPS_DIR)/Makefile $(shell find $(RUNTIME_DIR)/**.{S,c,h,ld} -type f)
 
