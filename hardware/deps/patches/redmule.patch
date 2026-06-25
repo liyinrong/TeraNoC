@@ -1,0 +1,149 @@
+diff --git a/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv b/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
+index d6d00ae..8f3345e 100644
+--- a/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
++++ b/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
+@@ -155,8 +155,11 @@ module redmule_memory_scheduler
+   // for the Y stream source
+   assign cntrl_streamer_o.y_stream_source_ctrl.req_start = cntrl_scheduler_i.first_load && reg_file_i.hwpe_params[OP_SELECTION][0] && flgs_streamer_i.y_stream_source_flags.ready_start;
+   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.base_addr = reg_file_i.hwpe_params[Z_ADDR];
+-  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.tot_len = reg_file_i.hwpe_params[Z_TOT_LEN];
+-  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_len = W;
++  // Y/Z move the M dimension on d0 (d0_len columns) over the K tiles on d1. For a single
++  // M-tile (x_rows_iter==1) only num_x_reads of the W columns are real M rows, so clamp
++  // d0_len and tot_len to the valid count; multi-M-tile keeps the full tiled length.
++  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.tot_len = (reg_file_i.hwpe_params[X_ITERS][31:16] == 'd1) ? num_x_reads * reg_file_i.hwpe_params[W_ITERS][15:0] : reg_file_i.hwpe_params[Z_TOT_LEN];
++  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_len = num_x_reads;
+   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_stride = reg_file_i.hwpe_params[Z_D0_STRIDE];
+   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d1_len = reg_file_i.hwpe_params[W_ITERS][15:0];
+   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d1_stride = JMP;
+@@ -167,8 +170,8 @@ module redmule_memory_scheduler
+   // the Z stream sink
+   assign cntrl_streamer_o.z_stream_sink_ctrl.req_start = cntrl_scheduler_i.first_load && flgs_streamer_i.z_stream_sink_flags.ready_start;
+   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.base_addr = reg_file_i.hwpe_params[Z_ADDR];
+-  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.tot_len = reg_file_i.hwpe_params[Z_TOT_LEN];
+-  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_len = W;
++  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.tot_len = (reg_file_i.hwpe_params[X_ITERS][31:16] == 'd1) ? num_x_reads * reg_file_i.hwpe_params[W_ITERS][15:0] : reg_file_i.hwpe_params[Z_TOT_LEN];
++  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_len = num_x_reads;
+   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_stride = reg_file_i.hwpe_params[Z_D0_STRIDE];
+   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_len = reg_file_i.hwpe_params[W_ITERS][15:0];
+   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_stride = JMP;
+diff --git a/hardware/deps/redmule/rtl/redmule_scheduler.sv b/hardware/deps/redmule/rtl/redmule_scheduler.sv
+index f028c90..7d28750 100644
+--- a/hardware/deps/redmule/rtl/redmule_scheduler.sv
++++ b/hardware/deps/redmule/rtl/redmule_scheduler.sv
+@@ -417,7 +417,11 @@ module redmule_scheduler
+   assign y_push_counter_d = y_push_counter_q == y_height-1 ? '0 : y_push_counter_q + 1;
+   assign y_push_clr       = y_push_en && ~stall_engine && y_push_counter_q == y_height-1;
+ 
+-  assign y_width  = y_rows_iter_q == reg_file_i.hwpe_params[W_ITERS][31:16]-1 && reg_file_i.hwpe_params[LEFTOVERS][15:8] != '0 ? reg_file_i.hwpe_params[LEFTOVERS][15:8] : W;
++  // y_width/z_width count Z STORE columns = the M dimension (M -> ARRAY_WIDTH), so they
++  // must clamp on the X-rows (M) leftover like cntrl_x_buffer_o.width does (line 149),
++  // NOT on the w_rows (N) leftover. Clamping on N left the Z store streaming W columns
++  // of which only x_rows_lftovr were valid, clobbering the neighbouring tile's Z.
++  assign y_width  = x_rows_iter_q == reg_file_i.hwpe_params[X_ITERS][31:16]-1 && reg_file_i.hwpe_params[LEFTOVERS][31:24] != '0 ? reg_file_i.hwpe_params[LEFTOVERS][31:24] : W;
+   assign y_height = y_cols_iter_q == reg_file_i.hwpe_params[W_ITERS][15:0]-1 && reg_file_i.hwpe_params[LEFTOVERS][7:0] != '0 ? reg_file_i.hwpe_params[LEFTOVERS][7:0] : D;
+ 
+   always_ff @(posedge clk_i or negedge rst_ni) begin : z_width_register
+@@ -565,11 +569,12 @@ module redmule_scheduler
+    *           FLAGS            *
+    ******************************/
+ 
+-  assign stall_engine = current_state == LOAD_W && (
++  assign stall_engine = (current_state == LOAD_W && (
+                           ~check_w_valid  && check_w_valid_en  ||
+                           ~check_x_full   && check_x_full_en   ||
+                           ~check_y_loaded && check_y_loaded_en
+-                        );
++                        ))
++                        || (z_wait_counter_q == PIPE_REGS && flgs_z_buffer_i.z_priority);
+ 
+   always_ff @(posedge clk_i or negedge rst_ni) begin : first_load_register
+     if(~rst_ni) begin
+diff --git a/hardware/deps/redmule/sw/hal_redmule.h b/hardware/deps/redmule/sw/hal_redmule.h
+index b809ed1..d7cd78e 100644
+--- a/hardware/deps/redmule/sw/hal_redmule.h
++++ b/hardware/deps/redmule/sw/hal_redmule.h
+@@ -8,23 +8,27 @@
+ #ifndef __HAL_REDMULE_H__
+ #define __HAL_REDMULE_H__
+-
++
++#include <stdint.h>
++
+ /* LOW-LEVEL HAL */
+ #define REDMULE_ADDR_BASE REDMULE_BASE_ADD
+ #define REDMULE_ADDR_SPACE 0x00000100
+-
+-#define HWPE_WRITE(value, offset) *(int *)(REDMULE_ADDR_BASE + offset) = value
+-#define HWPE_READ(offset) *(int *)(REDMULE_ADDR_BASE + offset)
+-
+-static inline void redmule_x_add_set(unsigned int value) {
++
++#define HWPE_REG32(offset) \
++  (*(volatile uint32_t *)((uintptr_t)REDMULE_ADDR_BASE + (uintptr_t)(offset)))
++#define HWPE_WRITE(value, offset) (HWPE_REG32(offset) = (uint32_t)(value))
++#define HWPE_READ(offset) HWPE_REG32(offset)
++
++static inline void redmule_x_add_set(uint32_t value) {
+   HWPE_WRITE(value, REDMULE_REG_OFFS + REDMULE_REG_X_PTR);
+ }
+-
+-static inline void redmule_w_add_set(unsigned int value) {
++
++static inline void redmule_w_add_set(uint32_t value) {
+   HWPE_WRITE(value, REDMULE_REG_OFFS + REDMULE_REG_W_PTR);
+ }
+-
+-static inline void redmule_z_add_set(unsigned int value) {
++
++static inline void redmule_z_add_set(uint32_t value) {
+   HWPE_WRITE(value, REDMULE_REG_OFFS + REDMULE_REG_Z_PTR);
+ }
+-
++
+ static inline void redmule_mcfg_set(uint32_t mcfg0, uint32_t mcfg1) {
+@@ -55,12 +59,11 @@ static inline unsigned int redmule_get_meta_uncorrectable_count() {
+ static inline void hwpe_trigger_job() { HWPE_WRITE(0, REDMULE_TRIGGER); }
+-
+-static inline int hwpe_acquire_job() { return HWPE_READ(REDMULE_ACQUIRE); }
+-
++
++static inline int hwpe_acquire_job() { return (int32_t)HWPE_READ(REDMULE_ACQUIRE); }
++
+ static inline unsigned int hwpe_get_status() { return HWPE_READ(REDMULE_STATUS); }
+-
++
+ static inline void hwpe_soft_clear() {
+-  volatile int i;
+   HWPE_WRITE(0, REDMULE_SOFT_CLEAR);
+ }
+-
++
+ static inline void hwpe_cg_enable() { return; }
+@@ -73,15 +76,15 @@ void redmule_cfg(unsigned int x, unsigned int w, unsigned int z, uint16_t m_size
+   uint32_t mcfg_reg0 = 0;
+   uint32_t mcfg_reg1 = 0;
+   uint32_t arith_reg = 0;
+-
+-  mcfg_reg0 = (k_size << 16) | (m_size << 0);
+-  mcfg_reg1 = (w_col_off << 16) | (n_size << 0);
+-
+-  arith_reg = (gemm_op << 10) | (gemm_fmt << 7);
+-
+-  redmule_x_add_set((unsigned int)x);
+-  redmule_w_add_set((unsigned int)w);
+-  redmule_z_add_set((unsigned int)z);
+-  redmule_mcfg_set((unsigned int)mcfg_reg0, (unsigned int)mcfg_reg1);
+-  redmule_arith_set((unsigned int)arith_reg);
++
++  mcfg_reg0 = ((uint32_t)k_size << 16) | (uint32_t)m_size;
++  mcfg_reg1 = ((uint32_t)w_col_off << 16) | (uint32_t)n_size;
++
++  arith_reg = ((uint32_t)gemm_op << 10) | ((uint32_t)gemm_fmt << 7);
++
++  redmule_x_add_set(x);
++  redmule_w_add_set(w);
++  redmule_z_add_set(z);
++  redmule_mcfg_set(mcfg_reg0, mcfg_reg1);
++  redmule_arith_set(arith_reg);
+ }
