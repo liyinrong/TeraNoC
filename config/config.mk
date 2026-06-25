@@ -95,6 +95,12 @@ spm_profiling ?= 0
 # Enable the interconnect access pattern profiling
 noc_profiling ?= 0
 
+# Number of RedMulE tensor-core tiles in the cluster
+num_redmule_tiles ?= 0
+redmule_height ?= 0
+redmule_width  ?= 0
+redmule_regs   ?= 0
+
 # Enable the Spatz vector unit (RVV)
 spatz ?= 0
 
@@ -104,3 +110,8 @@ n_ipu ?= 1
 vlen  ?= 0
 rvf   ?= 0
 rvd   ?= 0
+
+# Spatz cores and a RedMulE engine can share a tile: the per-core data ports
+# (NumDataPortsPerCore) and the RedMulE master ports are flattened onto one
+# local-port axis (RedMulE slots start at NumSoCPorts), and MetaIdWidth is the
+# max over snitch/Spatz/RedMulE. See config/minpool_spatz4_redmule.mk.
