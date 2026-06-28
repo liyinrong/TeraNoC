@@ -25,3 +25,26 @@ index b45cde3..a0ace6e 100644
    );
    logic [8:0] read_len;
    assign idq_inp_req  = alloc_req_i & alloc_gnt_o;
+diff --git a/hardware/deps/cluster_icache/src/snitch_read_only_cache.sv b/hardware/deps/cluster_icache/src/snitch_read_only_cache.sv
+index 5da1490..b0b47be 100644
+--- a/hardware/deps/cluster_icache/src/snitch_read_only_cache.sv
++++ b/hardware/deps/cluster_icache/src/snitch_read_only_cache.sv
+@@ -60,7 +60,6 @@ module snitch_read_only_cache
+ 
+   `include "axi/typedef.svh"
+   `include "common_cells/registers.svh"
+-  import cf_math_pkg::idx_width;
+ 
+   // Check for supported parameters
+   if (AxiDataWidth < 32) $error("snitch_read_only_cache: AxiDataWidth must be larger than 32.");
+@@ -74,8 +73,9 @@ module snitch_read_only_cache
+   // AXI Demux
+   // --------------------------------------------------
+   localparam int unsigned NoMstPorts = 2;
++  localparam int unsigned NoMstPortsIdxWidth = (NoMstPorts > 1) ? $clog2(NoMstPorts) : 1;
+ 
+-  typedef logic [idx_width(NoMstPorts)-1:0] index_t;
++  typedef logic [NoMstPortsIdxWidth-1:0] index_t;
+   typedef enum index_t {
+     Cache  = 1,
+     Bypass = 0
