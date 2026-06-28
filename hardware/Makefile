@@ -27,15 +27,21 @@ dpi_library      ?= work-dpi
 # Top level module to compile
 top_level        ?= mempool_tb
 # QuestaSim Configuration
-questa_version   ?= 2023.4-zr
+questa_version   ?= 2025.3-zr
 questa_cmd       ?= questa-$(questa_version)
 questa_args      ?=
 questa_config    ?=
+questa_sim_args  ?= -voptargs=+acc
+questa_simc_args ?= -c
 # VCS Configuration
-vcs_version      ?= 2024.09-zr
+vcs_version      ?= 2025.06-dz
 vcs_cmd          ?= vcs-$(vcs_version)
 vcs_config       ?=
 vcs_gui          ?= -verdi
+vcs_debug_config ?= -debug_access+all -kdb
+vcs_opt_config   ?=
+vlogan_debug_args ?= -kdb
+vlogan_opt_args   ?=
 # Path to the application binaries
 app_path         ?= $(abspath $(ROOT_DIR)/../software/bin)
 # Bender
@@ -47,6 +53,8 @@ verilator_files  ?= $(verilator_build)/files
 verilator_top    ?= mempool_tb_verilator
 # Python
 python           ?= python3
+# DPI C++ compilation
+dpi_cxxflags     ?= -O2
 # Enable Snitch tracing
 snitch_trace     ?= 1
 # DRAMSys Integration
@@ -93,7 +101,7 @@ questa_args += -suppress vsim-12070
 # ============================================================================
 # VCS Options
 # ============================================================================
-vlogan_args += -assert svaext +v2k -override_timescale=1ns/1ps -kdb
+vlogan_args += -assert svaext +v2k -override_timescale=1ns/1ps
 ifdef preload
   vcs_args += +PRELOAD=$(preload)
 endif
@@ -351,13 +359,13 @@ $(buildpath)/compile.tcl: $(SPATZ_PKG) $(bender) $(config_mk) Makefile $(MEMPOOL
 .PHONY: sim
 sim: clean-dasm compile
 	cd $(buildpath) && \
-	$(questa_cmd) vsim -voptargs=+acc $(questa_args) $(library).$(top_level) -do "set config ${config}" -do ../scripts/questa/run.tcl
+	$(questa_cmd) vsim $(questa_sim_args) $(questa_args) $(library).$(top_level) -do "set config ${config}" -do ../scripts/questa/run.tcl
 	./scripts/return_status.sh $(buildpath)/transcript
 
 .PHONY: simc
 simc: clean-dasm compile
 	cd $(buildpath) && \
-	$(questa_cmd) vsim -c $(questa_args) $(library).$(top_level) -do "run -a"
+	$(questa_cmd) vsim $(questa_simc_args) $(questa_args) $(library).$(top_level) -do "run -a"
 	./scripts/return_status.sh $(buildpath)/transcript
 
 # DPIs
@@ -366,7 +374,7 @@ dpi: $(buildpath)/$(dpi_library)/mempool_dpi.so
 
 $(buildpath)/$(dpi_library)/%.o: tb/dpi/%.cpp
 	mkdir -p $(buildpath)/$(dpi_library)
-	$(CXX) -shared -fPIC -std=c++11 -Bsymbolic -c $< -I$(QUESTASIM_HOME)/include -o $@
+	$(CXX) $(dpi_cxxflags) -shared -fPIC -std=c++11 -Bsymbolic -c $< -I$(QUESTASIM_HOME)/include -o $@
 
 $(buildpath)/$(dpi_library)/mempool_dpi.so: $(dpi)
 	mkdir -p $(buildpath)/$(dpi_library)
@@ -376,28 +384,37 @@ $(buildpath)/$(dpi_library)/mempool_dpi.so: $(dpi)
 # VCS          #
 ################
 # Elaboration
-.PHONY: elabvcs
+.PHONY: elabvcs elabvcs_debug
 elabvcs: dpivcs $(buildpath) $(buildpath)/compilevcs.sh
 $(buildpath)/compilevcs.sh: $(SPATZ_PKG) $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
-	$(bender) script vcs --vlogan-bin="$(vcs_cmd) vlogan" --vlog-arg="$(vlogan_args)" $(vlog_defs) -t rtl -t mempool_vsim $(bender_defs) > $(buildpath)/compilevcs.sh
+	$(bender) script vcs --vlogan-bin="$(vcs_cmd) vlogan" --vlog-arg="$(vlogan_args) $(vlogan_opt_args)" $(vlog_defs) -t rtl -t mempool_vsim $(bender_defs) > $(buildpath)/compilevcs.sh
 	echo "exit" >> $(buildpath)/compilevcs.sh
 	# Call VCS
 	cd $(buildpath) && \
 	chmod +x compilevcs.sh && \
 	./compilevcs.sh
 
+elabvcs_debug: dpivcs $(buildpath) $(buildpath)/compilevcs_debug.sh
+$(buildpath)/compilevcs_debug.sh: $(SPATZ_PKG) $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
+	$(bender) script vcs --vlogan-bin="$(vcs_cmd) vlogan" --vlog-arg="$(vlogan_args) $(vlogan_debug_args)" $(vlog_defs) -t rtl -t mempool_vsim $(bender_defs) > $(buildpath)/compilevcs_debug.sh
+	echo "exit" >> $(buildpath)/compilevcs_debug.sh
+	# Call VCS
+	cd $(buildpath) && \
+	chmod +x compilevcs_debug.sh && \
+	./compilevcs_debug.sh
+
 # Compilation
 .PHONY: compile_vcs_simv compile_vcs_simvopt
 
-compile_vcs_simv: update-floogen elabvcs $(buildpath)/mempool_simv
-$(buildpath)/mempool_simv: $(buildpath)/compilevcs.sh $(buildpath)/$(dpi_library)/mempool_vcs_dpi.so
+compile_vcs_simv: update-floogen elabvcs_debug $(buildpath)/mempool_simv
+$(buildpath)/mempool_simv: $(buildpath)/compilevcs_debug.sh $(buildpath)/$(dpi_library)/mempool_vcs_dpi.so
 	cd $(buildpath) && \
-	$(vcs_cmd) vcs -full64 $(top_level) -cc $(CC) -cpp $(CXX) -ld $(CXX) $(dpi_library)/mempool_vcs_dpi.so $(vcs_config) -debug_access+all -kdb -assert disable_cover -o mempool_simv
+	$(vcs_cmd) vcs -full64 $(top_level) -cc $(CC) -cpp $(CXX) -ld $(CXX) $(dpi_library)/mempool_vcs_dpi.so $(vcs_config) $(vcs_debug_config) -assert disable_cover -o mempool_simv
 
 compile_vcs_simvopt: update-floogen elabvcs $(buildpath)/mempool_simvopt
 $(buildpath)/mempool_simvopt: $(buildpath)/compilevcs.sh $(buildpath)/$(dpi_library)/mempool_vcs_dpi.so
 	cd $(buildpath) && \
-	$(vcs_cmd) vcs -full64 $(top_level) -cc $(CC) -cpp $(CXX) -ld $(CXX) $(dpi_library)/mempool_vcs_dpi.so $(vcs_config) -assert disable_cover -o mempool_simvopt
+	$(vcs_cmd) vcs -full64 $(top_level) -cc $(CC) -cpp $(CXX) -ld $(CXX) $(dpi_library)/mempool_vcs_dpi.so $(vcs_config) $(vcs_opt_config) -assert disable_cover -o mempool_simvopt
 
 # Simulation
 simvcs: clean-dasm compile_vcs_simv
@@ -421,7 +438,7 @@ dpivcs: $(buildpath)/$(dpi_library)/mempool_vcs_dpi.so
 
 $(buildpath)/$(dpi_library)/%_vcs.o: tb/dpi/%.cpp
 	mkdir -p $(buildpath)/$(dpi_library)
-	$(CXX) -shared -fPIC -std=c++11 -Bsymbolic -c $< -I$(VCS_HOME)/include -o $@
+	$(CXX) $(dpi_cxxflags) -shared -fPIC -std=c++11 -Bsymbolic -c $< -I$(VCS_HOME)/include -o $@
 
 $(buildpath)/$(dpi_library)/mempool_vcs_dpi.so: $(dpi_vcs)
 	mkdir -p $(buildpath)/$(dpi_library)
