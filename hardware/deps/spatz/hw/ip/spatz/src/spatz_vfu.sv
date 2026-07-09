@@ -133,12 +133,17 @@ module spatz_vfu
   assign operands_ready = op1_is_ready && op2_is_ready && op3_is_ready && (!spatz_req.op_arith.is_scalar || vfu_rsp_ready_i) && !stall;
 
   // Valid operations
+  // A scalar op produces one ELEN-wide element (4 bytes for ELEN=32, i.e. 4'hf),
+  // regardless of vsew — so keying the mask off vsew==EW_32 wrongly expects 8'hff
+  // for e8/e16 scalars (e.g. vmv.x.s, fcvt.h.s), which never matches the produced
+  // result and deadlocks the VFU. Only a true EW_64 scalar spans 8 bytes.
   logic [N_FU*ELENB-1:0] valid_operations;
-  assign valid_operations = (spatz_req.op_arith.is_scalar || spatz_req.op_arith.is_reduction) ? (spatz_req.vtype.vsew == EW_32 ? 4'hf : 8'hff) : '1;
+  assign valid_operations = spatz_req.op_arith.is_scalar    ? (spatz_req.vtype.vsew == EW_64 ? 8'hff : 4'hf) :
+                            spatz_req.op_arith.is_reduction ? (spatz_req.vtype.vsew == EW_32 ? 4'hf : 8'hff) : '1;
 
-  // Pending results
+  // Pending results (wb is set only for scalar results written back).
   logic [N_FU*ELENB-1:0] pending_results;
-  assign pending_results = result_tag.wb ? (spatz_req.vtype.vsew == EW_32 ? 4'hf : 8'hff) : '1;
+  assign pending_results = result_tag.wb ? (spatz_req.vtype.vsew == EW_64 ? 8'hff : 4'hf) : '1;
 
   // Did we issue a microoperation?
   logic word_issued;
