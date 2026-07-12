@@ -1,3 +1,16 @@
+diff --git a/hardware/deps/redmule/rtl/redmule_complex.sv b/hardware/deps/redmule/rtl/redmule_complex.sv
+index 8354bf4..752257e 100644
+--- a/hardware/deps/redmule/rtl/redmule_complex.sv
++++ b/hardware/deps/redmule/rtl/redmule_complex.sv
+@@ -78,7 +78,7 @@ module redmule_complex
+   output core_inst_req_t               core_inst_req_o   ,
+   input  core_data_rsp_t               core_data_rsp_i   ,
+   output core_data_req_t               core_data_req_o   ,
+-  hci_outstanding_intf.initiator              tcdm
++  hci_variablelatency_intf.initiator          tcdm
+ );
+ 
+ localparam int unsigned XExt = (CoreType == CV32X) ? 1 : 0;
 diff --git a/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv b/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
 index d6d00ae..8f3345e 100644
 --- a/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
@@ -28,7 +41,7 @@ index d6d00ae..8f3345e 100644
    assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_len = reg_file_i.hwpe_params[W_ITERS][15:0];
    assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_stride = JMP;
 diff --git a/hardware/deps/redmule/rtl/redmule_scheduler.sv b/hardware/deps/redmule/rtl/redmule_scheduler.sv
-index f028c90..7d28750 100644
+index f028c90..ca27c21 100644
 --- a/hardware/deps/redmule/rtl/redmule_scheduler.sv
 +++ b/hardware/deps/redmule/rtl/redmule_scheduler.sv
 @@ -417,7 +417,11 @@ module redmule_scheduler
@@ -44,7 +57,20 @@ index f028c90..7d28750 100644
    assign y_height = y_cols_iter_q == reg_file_i.hwpe_params[W_ITERS][15:0]-1 && reg_file_i.hwpe_params[LEFTOVERS][7:0] != '0 ? reg_file_i.hwpe_params[LEFTOVERS][7:0] : D;
  
    always_ff @(posedge clk_i or negedge rst_ni) begin : z_width_register
-@@ -565,11 +569,12 @@ module redmule_scheduler
+@@ -559,17 +563,24 @@ module redmule_scheduler
+   // Check if the new Y rows are loaded and ready to be pushed
+   // Only enable this check when the results of an iteration are available
+   assign check_y_loaded    = flgs_z_buffer_i.loaded;
+-  assign check_y_loaded_en = z_wait_counter_q == PIPE_REGS && ~w_done;
++  // Gate on Y actually being used (OP_SELECTION[0]): a bias-less GEMM never streams Y, so the
++  // z-buffer never reaches `loaded` and the engine writes Z directly (EMPTY->PUSHED). Without this
++  // gate the check races w_done: fast memory finishes W before the check window and skips it, but
++  // high-latency (mesh) memory trips the window while W is still loading and deadlocks LOAD_W
++  // waiting for a Y that never comes. Behaviour is unchanged when Y is used.
++  assign check_y_loaded_en = z_wait_counter_q == PIPE_REGS && ~w_done
++                          && reg_file_i.hwpe_params[OP_SELECTION][0];
+ 
+   /******************************
     *           FLAGS            *
     ******************************/
  
@@ -63,87 +89,74 @@ diff --git a/hardware/deps/redmule/sw/hal_redmule.h b/hardware/deps/redmule/sw/h
 index b809ed1..d7cd78e 100644
 --- a/hardware/deps/redmule/sw/hal_redmule.h
 +++ b/hardware/deps/redmule/sw/hal_redmule.h
-@@ -8,23 +8,27 @@
+@@ -8,22 +8,26 @@
  #ifndef __HAL_REDMULE_H__
  #define __HAL_REDMULE_H__
--
-+
+ 
 +#include <stdint.h>
 +
  /* LOW-LEVEL HAL */
  #define REDMULE_ADDR_BASE REDMULE_BASE_ADD
  #define REDMULE_ADDR_SPACE 0x00000100
--
+ 
 -#define HWPE_WRITE(value, offset) *(int *)(REDMULE_ADDR_BASE + offset) = value
 -#define HWPE_READ(offset) *(int *)(REDMULE_ADDR_BASE + offset)
--
--static inline void redmule_x_add_set(unsigned int value) {
-+
 +#define HWPE_REG32(offset) \
 +  (*(volatile uint32_t *)((uintptr_t)REDMULE_ADDR_BASE + (uintptr_t)(offset)))
 +#define HWPE_WRITE(value, offset) (HWPE_REG32(offset) = (uint32_t)(value))
 +#define HWPE_READ(offset) HWPE_REG32(offset)
-+
+ 
+-static inline void redmule_x_add_set(unsigned int value) {
 +static inline void redmule_x_add_set(uint32_t value) {
    HWPE_WRITE(value, REDMULE_REG_OFFS + REDMULE_REG_X_PTR);
  }
--
+ 
 -static inline void redmule_w_add_set(unsigned int value) {
-+
 +static inline void redmule_w_add_set(uint32_t value) {
    HWPE_WRITE(value, REDMULE_REG_OFFS + REDMULE_REG_W_PTR);
  }
--
+ 
 -static inline void redmule_z_add_set(unsigned int value) {
-+
 +static inline void redmule_z_add_set(uint32_t value) {
    HWPE_WRITE(value, REDMULE_REG_OFFS + REDMULE_REG_Z_PTR);
  }
--
-+
- static inline void redmule_mcfg_set(uint32_t mcfg0, uint32_t mcfg1) {
-@@ -55,12 +59,11 @@ static inline unsigned int redmule_get_meta_uncorrectable_count() {
+ 
+@@ -54,12 +58,11 @@ static inline unsigned int redmule_get_meta_uncorrectable_count() {
+ 
  static inline void hwpe_trigger_job() { HWPE_WRITE(0, REDMULE_TRIGGER); }
--
+ 
 -static inline int hwpe_acquire_job() { return HWPE_READ(REDMULE_ACQUIRE); }
--
-+
 +static inline int hwpe_acquire_job() { return (int32_t)HWPE_READ(REDMULE_ACQUIRE); }
-+
+ 
  static inline unsigned int hwpe_get_status() { return HWPE_READ(REDMULE_STATUS); }
--
-+
+ 
  static inline void hwpe_soft_clear() {
 -  volatile int i;
    HWPE_WRITE(0, REDMULE_SOFT_CLEAR);
  }
--
-+
- static inline void hwpe_cg_enable() { return; }
-@@ -73,15 +76,15 @@ void redmule_cfg(unsigned int x, unsigned int w, unsigned int z, uint16_t m_size
-   uint32_t mcfg_reg0 = 0;
+ 
+@@ -74,16 +77,16 @@ void redmule_cfg(unsigned int x, unsigned int w, unsigned int z, uint16_t m_size
    uint32_t mcfg_reg1 = 0;
    uint32_t arith_reg = 0;
--
+ 
 -  mcfg_reg0 = (k_size << 16) | (m_size << 0);
 -  mcfg_reg1 = (w_col_off << 16) | (n_size << 0);
--
++  mcfg_reg0 = ((uint32_t)k_size << 16) | (uint32_t)m_size;
++  mcfg_reg1 = ((uint32_t)w_col_off << 16) | (uint32_t)n_size;
+ 
 -  arith_reg = (gemm_op << 10) | (gemm_fmt << 7);
--
++  arith_reg = ((uint32_t)gemm_op << 10) | ((uint32_t)gemm_fmt << 7);
+ 
 -  redmule_x_add_set((unsigned int)x);
 -  redmule_w_add_set((unsigned int)w);
 -  redmule_z_add_set((unsigned int)z);
 -  redmule_mcfg_set((unsigned int)mcfg_reg0, (unsigned int)mcfg_reg1);
 -  redmule_arith_set((unsigned int)arith_reg);
-+
-+  mcfg_reg0 = ((uint32_t)k_size << 16) | (uint32_t)m_size;
-+  mcfg_reg1 = ((uint32_t)w_col_off << 16) | (uint32_t)n_size;
-+
-+  arith_reg = ((uint32_t)gemm_op << 10) | ((uint32_t)gemm_fmt << 7);
-+
 +  redmule_x_add_set(x);
 +  redmule_w_add_set(w);
 +  redmule_z_add_set(z);
 +  redmule_mcfg_set(mcfg_reg0, mcfg_reg1);
 +  redmule_arith_set(arith_reg);
  }
+ 
+ #endif
