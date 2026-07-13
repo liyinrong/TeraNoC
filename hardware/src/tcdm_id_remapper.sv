@@ -51,6 +51,8 @@ module tcdm_id_remapper
 
     // Lock the output id if the request has not been taken yet
     logic id_lock_d, id_lock_q;
+    // Latched allocation, held stable while a stalled handshake is in flight.
+    meta_id_t locked_id_d, locked_id_q;
 
     typedef logic [cf_math_pkg::idx_width(NumIn)-1:0] id_t;
     id_t id;
@@ -63,6 +65,7 @@ module tcdm_id_remapper
     `FF(remapped_id_valid_q, remapped_id_valid_d, '0)
     `FF(id_q, id_d, '0)
     `FF(id_lock_q, id_lock_d, '0)
+    `FF(locked_id_q, locked_id_d, '0)
 
     lzc #(
       .WIDTH(RobDepth)
@@ -72,31 +75,31 @@ module tcdm_id_remapper
       .empty_o(no_free_id          )
     );
 
+    // Use the locked id if we are in output stall, otherwise use the next free id.
+    meta_id_t out_id;
+    assign out_id = id_lock_q ? locked_id_q : next_id;
+
     always_comb begin
       // Maintain state
       remapped_id_d       = remapped_id_q;
       remapped_id_valid_d = remapped_id_valid_q;
       id_d                = id_q;
       id_lock_d           = id_lock_q;
+      locked_id_d         = locked_id_q;
 
       if (req_valid_o && !req_ready_i) begin
-        // valid but not ready, we need to keep the id unchanged
+        // Valid but not ready: freeze the allocated id we are presenting so it
+        // stays stable across the stalled handshake.
         id_lock_d         = 1'b1;
+        locked_id_d       = out_id;
       end
 
       // Did we get a new request?
       if (req_valid_o && req_ready_i) begin
-        if (id_lock_q) begin
-          // the outstanding ID is already stored in req
-          remapped_id_d[req.id]        = req.id;
-          remapped_id_valid_d[req.id]  = 1'b1;
-          id_d[req.id]                 = id;
-          id_lock_d                    = 1'b0;
-        end else begin
-          remapped_id_d[next_id]       = req.id;
-          remapped_id_valid_d[next_id] = 1'b1;
-          id_d[next_id]                = id;
-        end
+        remapped_id_d[out_id]        = req.id;
+        remapped_id_valid_d[out_id]  = 1'b1;
+        id_d[out_id]                 = id;
+        id_lock_d                    = 1'b0;
       end
 
       // Did we sent a new response?
@@ -134,8 +137,7 @@ module tcdm_id_remapper
 
       // Forward the request
       req_o    = req;
-      if (!id_lock_q)
-        req_o.id = next_id;
+      req_o.id = out_id;
     end
 
     ////////////////
