@@ -1447,6 +1447,7 @@ module snitch
         if (RVV) begin
           if (FP_EN && RVD) begin
             illegal_inst = 1'b0;
+            write_rd        = 1'b0;
             opa_select      = Reg;
             is_acc          = 1'b1;
             acc_qvalid_o = valid_instr;
@@ -1466,6 +1467,7 @@ module snitch
         if (RVV) begin
           if (FP_EN && RVF) begin
             illegal_inst = 1'b0;
+            write_rd        = 1'b0;
             opa_select      = Reg;
             is_acc          = 1'b1;
             acc_qvalid_o = valid_instr;
