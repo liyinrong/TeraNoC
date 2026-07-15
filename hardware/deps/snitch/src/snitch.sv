@@ -3328,6 +3328,7 @@ module snitch
     .lsu_ptag_o   ( lsu_rd                ),
     .lsu_perror_o (                       ), // ignored for the moment
     .lsu_pvalid_o ( lsu_pvalid            ),
+    .lsu_pwrite_o (                       ),
     .lsu_pready_i ( lsu_pready            ),
     .lsu_empty_o  ( lsu_empty             ),
     .data_qaddr_o                          ,

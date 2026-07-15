@@ -33,6 +33,7 @@ module snitch_lsu
   output tag_t               lsu_ptag_o,
   output logic               lsu_perror_o,
   output logic               lsu_pvalid_o,
+  output logic               lsu_pwrite_o,
   input  logic               lsu_pready_i,
   output logic               lsu_empty_o,
   // Memory Interface Channel
@@ -243,6 +244,7 @@ module snitch_lsu
   assign lsu_ptag_o    = resp_metadata.tag;
   assign lsu_pvalid_o  = data_pvalid_i && !resp_metadata.write;
   assign data_pready_o = lsu_pready_i || resp_metadata.write;
+  assign lsu_pwrite_o  = id_table_pop && resp_metadata.write;
 
   // ----------------
   // SEQUENTIAL
