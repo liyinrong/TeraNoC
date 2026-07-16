@@ -41,7 +41,7 @@ index d6d00ae..8f3345e 100644
    assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_len = reg_file_i.hwpe_params[W_ITERS][15:0];
    assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_stride = JMP;
 diff --git a/hardware/deps/redmule/rtl/redmule_scheduler.sv b/hardware/deps/redmule/rtl/redmule_scheduler.sv
-index f028c90..ca27c21 100644
+index f028c90..efc7a44 100644
 --- a/hardware/deps/redmule/rtl/redmule_scheduler.sv
 +++ b/hardware/deps/redmule/rtl/redmule_scheduler.sv
 @@ -417,7 +417,11 @@ module redmule_scheduler
@@ -62,7 +62,7 @@ index f028c90..ca27c21 100644
    // Only enable this check when the results of an iteration are available
    assign check_y_loaded    = flgs_z_buffer_i.loaded;
 -  assign check_y_loaded_en = z_wait_counter_q == PIPE_REGS && ~w_done;
-+  // Gate on Y actually being used (OP_SELECTION[0]): a bias-less GEMM never streams Y, so the
++  // Gate on Y actually being used (OP_SELECTION[0]): MATMUL never streams Y, so the
 +  // z-buffer never reaches `loaded` and the engine writes Z directly (EMPTY->PUSHED). Without this
 +  // gate the check races w_done: fast memory finishes W before the check window and skips it, but
 +  // high-latency (mesh) memory trips the window while W is still loading and deadlocks LOAD_W
@@ -85,6 +85,122 @@ index f028c90..ca27c21 100644
  
    always_ff @(posedge clk_i or negedge rst_ni) begin : first_load_register
      if(~rst_ni) begin
+diff --git a/hardware/deps/redmule/rtl/redmule_streamer.sv b/hardware/deps/redmule/rtl/redmule_streamer.sv
+index f44d741..86f0a66 100644
+--- a/hardware/deps/redmule/rtl/redmule_streamer.sv
++++ b/hardware/deps/redmule/rtl/redmule_streamer.sv
+@@ -135,6 +135,12 @@ hci_core_rob #(
+ );
+ 
+ flags_fifo_t z_fifo_flags;
++hci_streamer_flags_t z_sink_flags;
++logic z_sink_done_pending_q;
++logic z_sink_done;
++logic [31:0] z_store_outstanding_q;
++logic z_store_req_fire;
++logic z_store_rsp_fire;
+ logic [NumStreamSources:0][$clog2(NumStreamSources+1)-1:0] priority_encoding;
+ assign priority_encoding[0] = 0;
+ assign priority_encoding[1] = 1;
+@@ -199,9 +205,61 @@ hci_core_sink #(
+   .tcdm                ( zstream2cast                ),
+   .stream              ( z_stream_i                  ),
+   .ctrl_i              ( ctrl_i.z_stream_sink_ctrl   ),
+-  .flags_o             ( flags_o.z_stream_sink_flags )
++  .flags_o             ( z_sink_flags                 )
+ );
+ 
++// The sink's done pulse only means that every Z store has entered i_z_fifo.
++// Keep the job active until that FIFO drains and all issued stores are
++// acknowledged; otherwise a following software clear can discard queued stores
++// or let the next job observe incomplete output.
++assign z_store_req_fire = virt_tcdm_rob[3].req && virt_tcdm_rob[3].gnt;
++assign z_store_rsp_fire = virt_tcdm_rob[3].r_valid && virt_tcdm_rob[3].r_ready;
++
++always_ff @(posedge clk_i or negedge rst_ni) begin : z_store_outstanding_reg
++  if (!rst_ni) begin
++    z_store_outstanding_q <= '0;
++  end else begin
++    case ({z_store_req_fire, z_store_rsp_fire})
++      2'b10: z_store_outstanding_q <= z_store_outstanding_q + 1'b1;
++      2'b01: begin
++        if (z_store_outstanding_q != '0) begin
++          z_store_outstanding_q <= z_store_outstanding_q - 1'b1;
++        end
++      end
++      default: z_store_outstanding_q <= z_store_outstanding_q;
++    endcase
++  end
++end
++
++`ifndef SYNTHESIS
++always_ff @(posedge clk_i) begin : z_store_outstanding_assert
++  if (rst_ni) begin
++    assert (!(z_store_rsp_fire && !z_store_req_fire && (z_store_outstanding_q == '0)))
++      else $error("RedMulE Z-store response arrived with no outstanding store");
++  end
++end
++`endif
++
++assign z_sink_done = (z_sink_done_pending_q || z_sink_flags.done) &&
++                     z_fifo_flags.empty && (z_store_outstanding_q == '0);
++
++always_ff @(posedge clk_i or negedge rst_ni) begin : z_sink_done_pending_reg
++  if (!rst_ni) begin
++    z_sink_done_pending_q <= 1'b0;
++  end else if (clear_i) begin
++    z_sink_done_pending_q <= 1'b0;
++  end else if (z_sink_done) begin
++    z_sink_done_pending_q <= 1'b0;
++  end else if (z_sink_flags.done) begin
++    z_sink_done_pending_q <= 1'b1;
++  end
++end
++
++always_comb begin : z_sink_flags_comb
++  flags_o.z_stream_sink_flags = z_sink_flags;
++  flags_o.z_stream_sink_flags.done = z_sink_done;
++end
++
+ // Store interface.
+ hci_core_intf #(
+   .WAIVE_RQ4_ASSERT  ( 1'b1 ),
+diff --git a/hardware/deps/redmule/rtl/redmule_top.sv b/hardware/deps/redmule/rtl/redmule_top.sv
+index 0cc9072..1579bc2 100644
+--- a/hardware/deps/redmule/rtl/redmule_top.sv
++++ b/hardware/deps/redmule/rtl/redmule_top.sv
+@@ -279,7 +279,7 @@ redmule_w_buffer #(
+   .w_buffer_i  ( w_buffer_fifo.data )
+ );
+ 
+-logic [Width-1:0][BITW-1:0] z_buffer_d, y_bias_q;
++logic [Width-1:0][BITW-1:0] z_buffer_d, y_bias_q, engine_bias;
+ redmule_z_buffer #(
+   .DW            ( DATAW              ),
+   .FpFormat      ( FpFormat           ),
+@@ -298,6 +298,13 @@ redmule_z_buffer #(
+   .z_strb_o      ( z_buffer_q.strb    )
+ );
+ 
++// MATMUL does not stream an initial Y/Z addend. The reusable Z buffer still
++// contains results from the preceding output traversal, so feeding it into the
++// first FMA would seed later traversals with stale data. GEMM keeps the loaded
++// addend; MATMUL starts every output traversal from +0 as architecturally
++// required.
++assign engine_bias = reg_file.hwpe_params[OP_SELECTION][0] ? y_bias_q : '0;
++
+ /*---------------------------------------------------------------*/
+ /* |                          Engine                           | */
+ /*---------------------------------------------------------------*/
+@@ -371,7 +378,7 @@ redmule_engine     #(
+   .rst_ni             ( rst_ni           ),
+   .x_input_i          ( x_buffer_q       ),
+   .w_input_i          ( w_buffer_q       ),
+-  .y_bias_i           ( y_bias_q         ),
++  .y_bias_i           ( engine_bias      ),
+   .z_output_o         ( z_buffer_d       ),
+   .fma_is_boxed_i     ( fma_is_boxed     ),
+   .noncomp_is_boxed_i ( noncomp_is_boxed ),
 diff --git a/hardware/deps/redmule/sw/hal_redmule.h b/hardware/deps/redmule/sw/hal_redmule.h
 index b809ed1..d7cd78e 100644
 --- a/hardware/deps/redmule/sw/hal_redmule.h
