@@ -73,6 +73,13 @@ SECTIONS {
     __l2_alloc_base = ALIGN(0x10);
   } > l2
 
+  /* Uninitialized L2 (NOLOAD): real-size weights reserved here carry no ELF
+     data, so a full Llama layer costs address space only (perf-only runs). */
+  .l2_bss (NOLOAD) : {
+    . = ALIGN(0x10);
+    *(.l2_bss)
+  } > l2
+
   .comment : {
     *(.comment)
   } > l2

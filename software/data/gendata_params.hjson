@@ -699,5 +699,180 @@
     ]
   },
 
+  // Minimal classic-Transformer benchmarks: causal equal-head attention and
+  // a two-linear ReLU FFN.  They intentionally omit all Llama-specific stages.
+  "llm_classic_ffn_prefill_f16": {
+    "type": "float16",
+    "defines": [
+      ("S", 128)
+      ("D", 256)
+      ("I", 1024)
+      ("LLM_PERF_ONLY", 0)
+    ]
+    "arrays": [
+      ("__fp16", "l2_x")
+      ("__fp16", "l2_w1")
+      ("__fp16", "l2_w2")
+      ("__fp16", "l2_y")
+    ]
+  },
+
+  "llm_classic_ffn_decode_f16": {
+    "type": "float16",
+    "defines": [
+      ("S", 32)
+      ("D", 256)
+      ("I", 1024)
+      ("LLM_PERF_ONLY", 0)
+    ]
+    "arrays": [
+      ("__fp16", "l2_x")
+      ("__fp16", "l2_w1")
+      ("__fp16", "l2_w2")
+      ("__fp16", "l2_y")
+    ]
+  },
+
+  "llm_classic_attention_prefill_f16": {
+    "type": "float16",
+    "defines": [
+      ("S", 128)
+      ("D", 256)
+      ("N_HEADS", 8)
+      ("HEAD_DIM", 32)
+      ("LLM_PERF_ONLY", 0)
+    ]
+    "arrays": [
+      ("__fp16", "l2_x")
+      ("__fp16", "l2_wq")
+      ("__fp16", "l2_wk")
+      ("__fp16", "l2_wv")
+      ("__fp16", "l2_wo")
+      ("__fp16", "l2_y")
+    ]
+  },
+
+  "llm_classic_attention_decode_f16": {
+    "type": "float16",
+    "defines": [
+      ("S", 32)
+      ("KV_LEN", 128)
+      ("D", 256)
+      ("N_HEADS", 8)
+      ("HEAD_DIM", 32)
+      ("LLM_PERF_ONLY", 0)
+    ]
+    "arrays": [
+      ("__fp16", "l2_x")
+      ("__fp16", "l2_k_cache")
+      ("__fp16", "l2_v_cache")
+      ("__fp16", "l2_wq")
+      ("__fp16", "l2_wk")
+      ("__fp16", "l2_wv")
+      ("__fp16", "l2_wo")
+      ("__fp16", "l2_y")
+    ]
+  },
+
+  // Dense-LLM benchmarks. Shape lives here; the FFN weight-streaming tile
+  // PANEL_I is derived from the config L1 budget by the generator when omitted
+  // (NUM_IP is always added). See mempool_llm_tiling.h.
+  "llm_ffn_prefill_f16": {
+    "type": "float16",
+    "defines": [
+      ("S", 256)
+      ("D", 256)
+      ("I", 896)
+      ("ROW_TILE", 256)
+      ("LLM_PERF_ONLY", 0)
+    ]
+    "arrays": [
+      ("__fp16", "l2_x")
+      ("__fp16", "l2_gamma")
+      ("__fp16", "l2_wg")
+      ("__fp16", "l2_wu")
+      ("__fp16", "l2_wd")
+      ("__fp16", "l2_y")
+    ]
+  },
+
+  "llm_ffn_decode_f16": {
+    "type": "float16",
+    "defines": [
+      ("S", 64)
+      ("D", 256)
+      ("I", 896)
+      ("ROW_TILE", 64)
+      ("LLM_PERF_ONLY", 0)
+    ]
+    "arrays": [
+      ("__fp16", "l2_x")
+      ("__fp16", "l2_gamma")
+      ("__fp16", "l2_wg")
+      ("__fp16", "l2_wu")
+      ("__fp16", "l2_wd")
+      ("__fp16", "l2_y")
+    ]
+  },
+
+  "llm_attention_prefill_f16": {
+    "type": "float16",
+    "defines": [
+      ("S", 128)
+      ("D", 256)
+      ("N_Q_HEADS", 8)
+      ("N_KV_HEADS", 2)
+      ("HEAD_DIM", 32)
+      ("QK_NORM", 0)
+      ("ROPE_THETA", 500000)
+      ("LLM_PERF_ONLY", 0)
+    ]
+    "arrays": [
+      ("__fp16", "l2_x")
+      ("__fp16", "l2_gamma")
+      ("__fp16", "l2_q_gamma")
+      ("__fp16", "l2_k_gamma")
+      ("__fp16", "l2_cos")
+      ("__fp16", "l2_sin")
+      ("__fp16", "l2_wq")
+      ("__fp16", "l2_wk")
+      ("__fp16", "l2_wv")
+      ("__fp16", "l2_wo")
+      ("__fp16", "l2_y")
+    ]
+  },
+
+  "llm_attention_decode_f16": {
+    "type": "float16",
+    "defines": [
+      ("S", 64)
+      ("KV_LEN", 256)
+      ("WINDOW_LEN", 0)
+      ("D", 256)
+      ("N_Q_HEADS", 8)
+      ("N_KV_HEADS", 2)
+      ("HEAD_DIM", 32)
+      ("QK_NORM", 0)
+      ("KV_CACHE_TOKEN_MAJOR", 0)
+      ("ROPE_THETA", 500000)
+      ("LLM_PERF_ONLY", 0)
+    ]
+    "arrays": [
+      ("__fp16", "l2_x")
+      ("__fp16", "l2_gamma")
+      ("__fp16", "l2_q_gamma")
+      ("__fp16", "l2_k_gamma")
+      ("__fp16", "l2_cos")
+      ("__fp16", "l2_sin")
+      ("__fp16", "l2_k_cache_t")
+      ("__fp16", "l2_v_cache")
+      ("__fp16", "l2_wq")
+      ("__fp16", "l2_wk")
+      ("__fp16", "l2_wv")
+      ("__fp16", "l2_wo")
+      ("__fp16", "l2_y")
+    ]
+  },
+
 
 }

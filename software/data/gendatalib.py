@@ -1154,3 +1154,789 @@ def generate_bandwidth(defines={}, my_type=np.int32):
     M = int(defines['M'])
     np.random.seed(42)
     return np.random.randint(-100, 100, size=M).astype(my_type), defines
+
+
+# ---------------------------------------------------------------------------
+# Dense-LLM benchmark data generators (FFN SwiGLU + attention, f16).
+#
+# These mirror the exact on-chip layouts and dtype flow of the baremetal
+# kernels in software/kernels/baremetal/mempool_llm_{ffn,attention}_f16.h so
+# the emitted golden output matches what the RedMulE + Spatz cluster computes:
+#   * f16 tensors, f32 accumulation inside RMSNorm/softmax/RoPE.
+#   * Wg/Wu are stored PANEL-MAJOR over the intermediate columns ([NUM_IP][D x
+#     PANEL_I]); Wd is NATURAL [I x D]. Wq/Wk/Wv are head-major [heads][D x
+#     HEAD_DIM]; Wo is [heads][HEAD_DIM x D].
+#   * RoPE uses the adjacent-pair (GPT-J/interleaved) convention with a
+#     precomputed cos/sin table; decode positions offset by the past length.
+#   * The K cache is stored transposed [n_kv][HEAD_DIM][len] for RedMulE Q@K^T.
+#
+# PANEL_I (the FFN weight-streaming tile) is the one tiling knob derived from
+# the L1 budget: pass L1_BYTES / PORT_WIDTH (the data generator acts as the
+# build-time tiling solver, see mempool_llm_tiling.h). If PANEL_I is given
+# explicitly it is honoured verbatim.
+# ---------------------------------------------------------------------------
+_LLM_F16 = np.float16
+_LLM_F32 = np.float32
+_LLM_F64 = np.float64
+_LLM_U32 = np.uint32
+_LLM_I32 = np.int32
+
+# tensorpool256_spatz4 has VLEN=512. RMSNorm uses e16,m1 for its inputs and
+# e32,m2 for its widening accumulator, so both views contain 32 elements.
+_LLM_RMS_LANES = 32
+
+
+def _llm_f32_literal(bits):
+    """Return one binary32 value from its instruction-stream bit pattern."""
+    return np.asarray(bits, dtype=_LLM_U32).view(_LLM_F32)[()]
+
+
+# Constants as encoded in the LLVM 14 toy-LLM ELFs.
+_LLM_ZERO = _llm_f32_literal(0x00000000)
+_LLM_HALF = _llm_f32_literal(0x3f000000)
+_LLM_ONE = _llm_f32_literal(0x3f800000)
+_LLM_ONE_AND_HALF = _llm_f32_literal(0x3fc00000)
+_LLM_TWO = _llm_f32_literal(0x40000000)
+_LLM_EXP_HI = _llm_f32_literal(0x42a00000)
+_LLM_EXP_LO = _llm_f32_literal(0xc2a00000)
+_LLM_LOG2E = _llm_f32_literal(0x3fb8aa3b)
+_LLM_NEG_LN2 = _llm_f32_literal(0xbf317218)
+_LLM_EXP_A3 = _llm_f32_literal(0x3e2aaaab)
+_LLM_EXP_A4 = _llm_f32_literal(0x3d2aaaab)
+_LLM_EXP_A5 = _llm_f32_literal(0x3c088889)
+
+
+def _llm_add_f32(a, b):
+    """One finite binary32 add, rounded once to RNE binary32."""
+    return (np.asarray(a, dtype=_LLM_F64) +
+            np.asarray(b, dtype=_LLM_F64)).astype(_LLM_F32)
+
+
+def _llm_mul_f32(a, b):
+    """One finite binary32 multiply, rounded once to RNE binary32."""
+    return (np.asarray(a, dtype=_LLM_F64) *
+            np.asarray(b, dtype=_LLM_F64)).astype(_LLM_F32)
+
+
+def _llm_fma_f32(a, b, c):
+    """One finite binary32 fused multiply-add with RNE binary32 output.
+
+    Binary64 is sufficient scratch precision for the bounded, normal toy-LLM
+    operands. Keeping this helper explicit prevents NumPy evaluation order
+    from silently replacing an instruction-level FMA with two operations.
+    """
+    return (np.asarray(a, dtype=_LLM_F64) *
+            np.asarray(b, dtype=_LLM_F64) +
+            np.asarray(c, dtype=_LLM_F64)).astype(_LLM_F32)
+
+
+def _llm_mul_f16(a, b):
+    """One finite binary16 multiply with RNE binary16 output."""
+    return (np.asarray(a, dtype=_LLM_F64) *
+            np.asarray(b, dtype=_LLM_F64)).astype(_LLM_F16)
+
+
+def _llm_seed_f32(magic, x):
+    x32 = np.asarray(x, dtype=_LLM_F32)
+    bits = x32.view(_LLM_U32).astype(np.uint64)
+    seed = (np.uint64(magic) - bits).astype(_LLM_U32)
+    return seed.view(_LLM_F32)
+
+
+def _llm_rsqrt(x):
+    """The compiled divide-free llm_rsqrt: seed plus three Newton steps."""
+    x32 = np.asarray(x, dtype=_LLM_F32)
+    xhalf = _llm_mul_f32(x32, _LLM_HALF)
+    shifted = x32.view(_LLM_U32) >> _LLM_U32(1)
+    seed = (np.uint64(0x5f3759df) -
+            shifted.astype(np.uint64)).astype(_LLM_U32)
+    y = seed.view(_LLM_F32)
+    for _ in range(3):
+        y2 = _llm_mul_f32(y, y)
+        correction = _llm_fma_f32(-xhalf, y2, _LLM_ONE_AND_HALF)
+        y = _llm_mul_f32(correction, y)
+    return y
+
+
+def _llm_recip_pos(x):
+    """The compiled positive-normal reciprocal seed plus four refinements."""
+    x32 = np.asarray(x, dtype=_LLM_F32)
+    y = _llm_seed_f32(0x7ef311c3, x32)
+    for _ in range(4):
+        correction = _llm_fma_f32(-x32, y, _LLM_TWO)
+        y = _llm_mul_f32(correction, y)
+    return y
+
+
+def _llm_exp_range_reduce(x):
+    """Shared scalar llm_expf clamp/range reduction from the target ELF."""
+    x32 = np.asarray(x, dtype=_LLM_F32)
+    x32 = np.maximum(np.minimum(x32, _LLM_EXP_HI),
+                     _LLM_EXP_LO).astype(_LLM_F32)
+    t = _llm_mul_f32(x32, _LLM_LOG2E)
+    bias = np.where(t >= _LLM_ZERO, _LLM_HALF, -_LLM_HALF)
+    k = np.trunc(_llm_add_f32(t, bias)).astype(_LLM_I32)
+    r = _llm_fma_f32(k.astype(_LLM_F32), _LLM_NEG_LN2, x32)
+    exponent = ((k + _LLM_I32(127)).astype(_LLM_U32) <<
+                _LLM_U32(23))
+    return r, exponent.view(_LLM_F32)
+
+
+def _llm_exp_ffn_parts(x):
+    """Return the FFN call context's Horner polynomial and power of two."""
+    r, power = _llm_exp_range_reduce(x)
+    poly = _llm_fma_f32(r, _LLM_EXP_A5, _LLM_EXP_A4)
+    poly = _llm_fma_f32(poly, r, _LLM_EXP_A3)
+    poly = _llm_fma_f32(poly, r, _LLM_HALF)
+    poly = _llm_fma_f32(poly, r, _LLM_ONE)
+    poly = _llm_fma_f32(poly, r, _LLM_ONE)
+    return poly, power
+
+
+def _llm_expf_softmax(x):
+    """llm_expf as reassociated in the materialized-softmax caller.
+
+    LLVM 14 with -O3 -ffast-math does not emit the FFN Horner topology here:
+    it builds p-1, then folds the final +1 into the power-of-two multiply.
+    The separate helper makes that call-context-specific executable behavior
+    visible and testable.
+    """
+    r, power = _llm_exp_range_reduce(x)
+    poly = _llm_fma_f32(r, _LLM_EXP_A5, _LLM_EXP_A4)
+    poly = _llm_fma_f32(poly, r, _LLM_EXP_A3)
+    poly = _llm_fma_f32(poly, r, _LLM_HALF)
+    poly = _llm_mul_f32(poly, r)
+    poly_minus_one = _llm_fma_f32(poly, r, r)
+    return _llm_fma_f32(poly_minus_one, power, power)
+
+
+def _llm_rmsnorm(x, gamma, eps=1e-5):
+    """Spatz VLEN=512 RMSNorm, including its lane reduction topology."""
+    x16 = np.asarray(x, dtype=_LLM_F16)
+    gamma16 = np.asarray(gamma, dtype=_LLM_F16)
+    dmodel = x16.shape[-1]
+    if gamma16.shape != (dmodel,):
+        raise ValueError("_llm_rmsnorm gamma must match the final x dimension")
+    if dmodel > _LLM_RMS_LANES and dmodel % _LLM_RMS_LANES != 0:
+        raise ValueError("exact RMSNorm oracle requires full 32-lane chunks")
+
+    rows = x16.reshape(-1, dmodel)
+    lane_count = min(dmodel, _LLM_RMS_LANES)
+    lanes = np.zeros((rows.shape[0], lane_count), dtype=_LLM_F32)
+    for begin in range(0, dmodel, _LLM_RMS_LANES):
+        values = rows[:, begin:begin + _LLM_RMS_LANES].astype(_LLM_F32)
+        width = values.shape[1]
+        lanes[:, :width] = _llm_fma_f32(
+            values, values, lanes[:, :width])
+
+    sumsq = np.zeros(rows.shape[0], dtype=_LLM_F32)
+    for lane in range(lane_count):
+        sumsq = _llm_add_f32(sumsq, lanes[:, lane])
+
+    inv_dmodel = _llm_recip_pos(_LLM_F32(dmodel))
+    mean_square = _llm_fma_f32(sumsq, inv_dmodel, _LLM_F32(eps))
+    rinv = _llm_rsqrt(mean_square).astype(_LLM_F16)
+    scaled = _llm_mul_f16(rows, rinv[:, None])
+    normalized = _llm_mul_f16(scaled, gamma16[None, :])
+    return normalized.reshape(x16.shape)
+
+
+def _llm_silu_mul(g, u):
+    """Compiled scalar SiLU(g)*u, including fast-math reassociation.
+
+    The target forms 1+exp with an FMA, completes three reciprocal Newton
+    steps, then distributes the fourth step across the caller's g*u product.
+    """
+    g32 = np.asarray(g, dtype=_LLM_F16).astype(_LLM_F32)
+    u32 = np.asarray(u, dtype=_LLM_F16).astype(_LLM_F32)
+    poly, power = _llm_exp_ffn_parts(-g32)
+    denominator = _llm_fma_f32(poly, power, _LLM_ONE)
+    reciprocal = _llm_seed_f32(0x7ef311c3, denominator)
+    for _ in range(3):
+        correction = _llm_fma_f32(
+            -denominator, reciprocal, _LLM_TWO)
+        reciprocal = _llm_mul_f32(correction, reciprocal)
+    correction = _llm_fma_f32(-denominator, reciprocal, _LLM_TWO)
+    result = _llm_mul_f32(g32, u32)
+    result = _llm_mul_f32(result, reciprocal)
+    result = _llm_mul_f32(result, correction)
+    return result.astype(_LLM_F16)
+
+
+def _llm_softmax_f16(scores):
+    """Materialized scalar softmax with the kernel's exact cast points."""
+    rows = np.asarray(scores, dtype=_LLM_F16)
+    if rows.ndim != 2 or rows.shape[1] == 0:
+        raise ValueError("_llm_softmax_f16 expects nonempty 2-D rows")
+    rows = rows.copy()
+
+    max_value = rows[:, 0].astype(_LLM_F32)
+    for column in range(1, rows.shape[1]):
+        max_value = np.maximum(
+            max_value, rows[:, column].astype(_LLM_F32))
+
+    total = np.zeros(rows.shape[0], dtype=_LLM_F32)
+    for column in range(rows.shape[1]):
+        delta = _llm_add_f32(
+            rows[:, column].astype(_LLM_F32), -max_value)
+        exp_value = _llm_expf_softmax(delta)
+        rows[:, column] = exp_value.astype(_LLM_F16)
+        total = _llm_add_f32(total, exp_value)
+
+    inverse = _llm_recip_pos(total)
+    for column in range(rows.shape[1]):
+        probability = _llm_mul_f32(
+            rows[:, column].astype(_LLM_F32), inverse)
+        rows[:, column] = probability.astype(_LLM_F16)
+    return rows
+
+
+def _llm_fma_f16(a, b, c):
+    """One finite binary16 fused multiply-add with RNE binary16 output.
+
+    Binary64 is host scratch precision for the product-plus-add only. The
+    returned binary16 value is the accumulator passed to the next RedMulE
+    contraction step.
+    """
+    return (a.astype(_LLM_F64) * b.astype(_LLM_F64) +
+            c.astype(_LLM_F64)).astype(_LLM_F16)
+
+
+def _llm_mm(a, b, addend=None):
+    """RedMulE binary16 product/GEMM in natural contraction order.
+
+    Bias-less products start from binary16 zero. The packaged LLM software
+    retains an explicit zero-destination GEMM for compatibility with older
+    RTL; current RTL MATMUL also initializes each traversal from zero.
+    ``addend`` supplies an existing binary16 output tile for true GEMM
+    accumulation. RedMulE rounds each fused multiply-add to binary16 and feeds
+    that value back, rather than accumulating a complete dot product in
+    binary32.
+    """
+    a = np.asarray(a, dtype=_LLM_F16)
+    b = np.asarray(b, dtype=_LLM_F16)
+    if a.ndim != 2 or b.ndim != 2 or a.shape[1] != b.shape[0]:
+        raise ValueError("_llm_mm expects compatible two-dimensional matrices")
+
+    shape = (a.shape[0], b.shape[1])
+    if addend is None:
+        acc = np.zeros(shape, dtype=_LLM_F16)
+    else:
+        acc = np.asarray(addend, dtype=_LLM_F16)
+        if acc.shape != shape:
+            raise ValueError("_llm_mm addend has incompatible shape")
+        acc = acc.copy()
+
+    for k in range(a.shape[1]):
+        acc = _llm_fma_f16(a[:, k:k + 1], b[k:k + 1, :], acc)
+    return acc
+
+
+def _llm_pick_panel_i(S, D, inter, l1_bytes, port_width, row_tiled=False):
+    """Largest PANEL_I dividing `inter` (multiple of PORT_WIDTH) whose resident
+    FFN working set fits ~90% of the L1 budget, preferring >=2 panels so the
+    weight stream can be double-buffered. l1_bytes==0 skips the fit check.
+
+    The legacy full-row path keeps x, h, out, and two weight-panel sets. The
+    constrained-L1 row-tiled path reuses its row activation buffer for the
+    partial output and holds one weight-panel set:
+      legacy: fixed=3*S*D+D, per-panel=2*S+6*D
+      tiled:  fixed=S*D+D,   per-panel=2*S+3*D
+    """
+    if row_tiled:
+        fixed = S * D + D
+        per_panel = 2 * S + 3 * D
+    else:
+        fixed = 3 * S * D + D
+        per_panel = 2 * S + 6 * D
+    # The C/link-time budget is 90% of L1 after the per-core stack region.
+    # The generator receives only total L1 bytes, so reserve 15% here. This is
+    # conservative relative to the exact per-core-stack-plus-10% calculation
+    # for the current 256-core configurations.
+    budget = int(0.85 * l1_bytes) // 2 if l1_bytes else (1 << 62)
+    step = port_width if (port_width and inter % port_width == 0) else 1
+    cands = [p for p in range(step, inter + 1, step) if inter % p == 0]
+    cands = cands or [inter]
+    fit = [p for p in cands if fixed + per_panel * p <= budget]
+    if not fit:
+        raise Exception(
+            "FFN shape S={} D={} I={} does not fit the L1 budget "
+            "({} bytes) even at PANEL_I={}".format(S, D, inter, l1_bytes,
+                                                   min(cands)))
+    multi = [p for p in fit if inter // p >= 2]
+    return max(multi) if multi else max(fit)
+
+
+def generate_llm_ffn(my_type=np.float16, defines={}):
+    """Dense-LLM SwiGLU FFN block: h=RMSNorm(x)*gamma; g=h@Wg; u=h@Wu;
+    a=SiLU(g)*u; out=a@Wd; y=out+x. Returns [x, gamma, Wg_pm, Wu_pm, Wd, y]."""
+    np.random.seed(42)
+    S = int(defines['S'])
+    D = int(defines['D'])
+    inter = int(defines['I'])
+    row_tile = int(defines.get('ROW_TILE', S))
+    l1_bytes = int(defines.pop('L1_BYTES', 0))
+    port_width = int(defines.pop('PORT_WIDTH', 32))
+
+    if row_tile <= 0 or row_tile > S or S % row_tile != 0:
+        raise Exception("ROW_TILE={} must be a positive divisor of S={}".format(
+            row_tile, S))
+
+    if 'PANEL_I' in defines:
+        PANEL = int(defines['PANEL_I'])
+    else:
+        PANEL = _llm_pick_panel_i(
+            row_tile, D, inter, l1_bytes, port_width, row_tile != S)
+        defines['PANEL_I'] = PANEL
+    if inter % PANEL != 0:
+        raise Exception("PANEL_I={} must divide I={}".format(PANEL, inter))
+    NUM_IP = inter // PANEL
+    defines['NUM_IP'] = NUM_IP
+
+    x = (np.random.rand(S, D) - 0.5).astype(_LLM_F16)
+    gamma = (np.random.rand(D) - 0.5).astype(_LLM_F16)
+    Wg = (np.random.rand(D, inter) - 0.5).astype(_LLM_F16)
+    Wu = (np.random.rand(D, inter) - 0.5).astype(_LLM_F16)
+    Wd = (np.random.rand(inter, D) - 0.5).astype(_LLM_F16)
+
+    h = _llm_rmsnorm(x, gamma)
+    g = np.empty((S, inter), dtype=_LLM_F16)
+    u = np.empty((S, inter), dtype=_LLM_F16)
+    for panel in range(NUM_IP):
+        begin = panel * PANEL
+        end = begin + PANEL
+        g[:, begin:end] = _llm_mm(h, Wg[:, begin:end])
+        u[:, begin:end] = _llm_mm(h, Wu[:, begin:end])
+    a = _llm_silu_mul(g, u)
+    out = None
+    for panel in range(NUM_IP):
+        begin = panel * PANEL
+        end = begin + PANEL
+        out = _llm_mm(a[:, begin:end], Wd[begin:end, :], out)
+    y = (out.astype(_LLM_F32) + x.astype(_LLM_F32)).astype(_LLM_F16)
+
+    # panel-major [NUM_IP][D x PANEL] for gate/up; natural [I x D] for down.
+    wg_pm = Wg.reshape(D, NUM_IP, PANEL).transpose(1, 0, 2).reshape(-1)
+    wu_pm = Wu.reshape(D, NUM_IP, PANEL).transpose(1, 0, 2).reshape(-1)
+    arrays = [x.reshape(-1), gamma, wg_pm, wu_pm, Wd.reshape(-1),
+              y.reshape(-1)]
+    return [a.astype(my_type) for a in arrays], defines
+
+
+def _llm_pick_classic_ffn_tiles(S, D, inter, l1_bytes, port_width, defines):
+    """Derive token/intermediate tiles for the classic two-linear FFN.
+
+    The resident f16 set is two token tiles (input/output), one intermediate
+    panel, and two double-buffered weight panels::
+
+      2*ROW_TILE*D + ROW_TILE*PANEL_I + 4*D*PANEL_I
+
+    Use a conservative 80% of physical L1.  This leaves room for per-core
+    stacks and runtime allocations even though the generator only receives the
+    physical L1 size.
+    """
+    budget = int(0.8 * l1_bytes) // 2 if l1_bytes else (1 << 62)
+    step = port_width if port_width else 1
+
+    row_cands = [r for r in range(step, S + 1, step) if S % r == 0]
+    panel_cands = [p for p in range(step, inter + 1, step)
+                   if inter % p == 0]
+    row_cands = row_cands or [S]
+    panel_cands = panel_cands or [inter]
+
+    if 'ROW_TILE' in defines:
+        row_cands = [int(defines['ROW_TILE'])]
+    if 'PANEL_I' in defines:
+        panel_cands = [int(defines['PANEL_I'])]
+
+    choices = []
+    for rows in row_cands:
+        if rows <= 0 or S % rows != 0 or rows % step != 0:
+            continue
+        for panel in panel_cands:
+            if (panel <= 0 or inter % panel != 0 or
+                    panel % step != 0):
+                continue
+            elems = (2 * rows * D + rows * panel +
+                     4 * D * panel)
+            if elems <= budget:
+                choices.append((rows, panel))
+
+    if not choices:
+        raise Exception(
+            "Classic FFN S={} D={} I={} has no ROW_TILE/PANEL_I that fits "
+            "the L1 budget ({} bytes)".format(S, D, inter, l1_bytes))
+
+    # Maximize row parallelism first, then prefer at least two I panels so the
+    # next weight set can be prefetched while the current panel computes.
+    best_rows = max(rows for rows, _ in choices)
+    panels = [p for rows, p in choices if rows == best_rows]
+    multi = [p for p in panels if inter // p >= 2]
+    best_panel = max(multi) if multi else max(panels)
+    defines['ROW_TILE'] = best_rows
+    defines['PANEL_I'] = best_panel
+    defines['NUM_IP'] = inter // best_panel
+    return defines
+
+
+def _llm_pick_classic_attention_tiles(S, D, num_heads, head_dim, past_len,
+                                      l1_bytes, port_width, defines):
+    """Derive FlashAttention query/key tiles for the classic MHA.
+
+    Projected K/V live in L2.  L1 retains one input/output row tile, one
+    D-by-HD projection weight, Q/K/V/Kt/context tiles, scores, and float32
+    online-softmax state.  Equal BM/BN keeps all RedMulE dimensions aligned.
+    """
+    del num_heads  # Heads are processed serially; they do not scale L1 use.
+    budget = int(0.8 * l1_bytes) // 2 if l1_bytes else (1 << 62)
+    step = port_width if port_width else 1
+    total_len = past_len + S
+
+    bm_cands = [r for r in range(step, S + 1, step) if S % r == 0]
+    bn_cands = [r for r in range(step, total_len + 1, step)
+                if total_len % r == 0]
+    bm_cands = bm_cands or [S]
+    bn_cands = bn_cands or [total_len]
+
+    if 'LLM_FLASH_BM' in defines:
+        bm_cands = [int(defines['LLM_FLASH_BM'])]
+    if 'LLM_FLASH_BN' in defines:
+        bn_cands = [int(defines['LLM_FLASH_BN'])]
+
+    choices = []
+    for bm in bm_cands:
+        if bm <= 0 or S % bm != 0 or bm % step != 0:
+            continue
+        for bn in bn_cands:
+            if (bn <= 0 or total_len % bn != 0 or
+                    bn % step != 0 or bn < bm):
+                continue
+            elems = (2 * bm * D + D * head_dim +
+                     2 * bm * head_dim + 3 * bn * head_dim +
+                     bm * bn + 4 * bm)
+            if elems <= budget:
+                choices.append((bm, bn))
+
+    if not choices:
+        raise Exception(
+            "Classic attention S={} L={} D={} has no BM/BN tile that fits "
+            "the L1 budget ({} bytes)".format(
+                S, past_len, D, l1_bytes))
+
+    # Query rows determine RedMulE parallelism.  Among equal-BM choices use
+    # the largest key tile to reduce online-softmax loop overhead.
+    best_bm = max(bm for bm, _ in choices)
+    best_bn = max(bn for bm, bn in choices if bm == best_bm)
+    defines['LLM_FLASH_BM'] = best_bm
+    defines['LLM_FLASH_BN'] = best_bn
+    return defines
+
+
+def generate_llm_classic_ffn(my_type=np.float16, defines={}):
+    """Classic Transformer FFN: ``y = ReLU(x @ W1) @ W2``.
+
+    W1 is emitted panel-major for L2 streaming; W2 remains row-major so every
+    contraction panel is contiguous.  There is deliberately no normalization,
+    gated activation, or residual addition.
+    """
+    np.random.seed(45)
+    S = int(defines['S'])
+    D = int(defines['D'])
+    inter = int(defines['I'])
+    l1_bytes = int(defines.pop('L1_BYTES', 0))
+    port_width = int(defines.pop('PORT_WIDTH', 32))
+    _llm_pick_classic_ffn_tiles(
+        S, D, inter, l1_bytes, port_width, defines)
+    panel = int(defines['PANEL_I'])
+    npanel = int(defines['NUM_IP'])
+
+    x = (np.random.rand(S, D) - 0.5).astype(_LLM_F16)
+    w1 = (np.random.rand(D, inter) - 0.5).astype(_LLM_F16)
+    w2 = (np.random.rand(inter, D) - 0.5).astype(_LLM_F16)
+
+    y = None
+    for p in range(npanel):
+        begin = p * panel
+        end = begin + panel
+        hidden = _llm_mm(x, w1[:, begin:end])
+        hidden = np.maximum(hidden, _LLM_F16(0.0)).astype(_LLM_F16)
+        y = _llm_mm(hidden, w2[begin:end, :], y)
+
+    w1_pm = w1.reshape(D, npanel, panel).transpose(1, 0, 2).reshape(-1)
+    arrays = [x.reshape(-1), w1_pm, w2.reshape(-1), y.reshape(-1)]
+    return [a.astype(my_type) for a in arrays], defines
+
+
+def generate_llm_classic_attention(my_type=np.float16, defines={}):
+    """Classic causal multi-head attention, with an optional decode cache.
+
+    This intentionally excludes RMSNorm, RoPE, GQA, QK-normalization,
+    sliding-window masking, and the residual.  Decode caches are token-major
+    per head so a FlashAttention key tile is contiguous in L2.
+    """
+    np.random.seed(46)
+    S = int(defines['S'])
+    D = int(defines['D'])
+    num_heads = int(defines['N_HEADS'])
+    head_dim = int(defines['HEAD_DIM'])
+    past_len = int(defines.get('KV_LEN', 0))
+    l1_bytes = int(defines.pop('L1_BYTES', 0))
+    port_width = int(defines.pop('PORT_WIDTH', 32))
+    if D != num_heads * head_dim:
+        raise Exception("Classic attention requires D == N_HEADS*HEAD_DIM")
+    _llm_pick_classic_attention_tiles(
+        S, D, num_heads, head_dim, past_len, l1_bytes, port_width, defines)
+
+    x = (np.random.rand(S, D) - 0.5).astype(_LLM_F16)
+    wq = (np.random.rand(num_heads, D, head_dim) - 0.5).astype(_LLM_F16)
+    wk = (np.random.rand(num_heads, D, head_dim) - 0.5).astype(_LLM_F16)
+    wv = (np.random.rand(num_heads, D, head_dim) - 0.5).astype(_LLM_F16)
+    wo = (np.random.rand(num_heads, head_dim, D) - 0.5).astype(_LLM_F16)
+
+    q = np.stack([_llm_mm(x, wq[h]) for h in range(num_heads)])
+    k_new = np.stack([_llm_mm(x, wk[h]) for h in range(num_heads)])
+    v_new = np.stack([_llm_mm(x, wv[h]) for h in range(num_heads)])
+    arrays = [x.reshape(-1)]
+
+    if past_len:
+        k_cache = (np.random.rand(num_heads, past_len, head_dim) -
+                   0.5).astype(_LLM_F16)
+        v_cache = (np.random.rand(num_heads, past_len, head_dim) -
+                   0.5).astype(_LLM_F16)
+        k = np.concatenate((k_cache, k_new), axis=1)
+        v = np.concatenate((v_cache, v_new), axis=1)
+        ctx = _llm_attn_core(q, k, v, num_heads, num_heads, head_dim,
+                             0, past_len, past_len + S, S)
+        arrays += [k_cache.reshape(-1), v_cache.reshape(-1)]
+    else:
+        ctx = _llm_attn_core(q, k_new, v_new, num_heads, num_heads,
+                             head_dim, 0, 0, S, S)
+
+    out = None
+    for h in range(num_heads):
+        out = _llm_mm(ctx[h], wo[h], out)
+    arrays += [wq.reshape(-1), wk.reshape(-1), wv.reshape(-1),
+               wo.reshape(-1), out.reshape(-1)]
+    return [a.astype(my_type) for a in arrays], defines
+
+
+def _llm_rope_tables(positions, head_dim, theta):
+    half = head_dim // 2
+    exps = -(2.0 * np.arange(half)) / head_dim
+    inv_freq = (theta ** exps).astype(_LLM_F32)
+    ang = np.outer(positions.astype(_LLM_F32), inv_freq)
+    return np.cos(ang).astype(_LLM_F16), np.sin(ang).astype(_LLM_F16)
+
+
+def _llm_apply_rope(x_pm, cos, sin, nheads, S, head_dim):
+    out = x_pm.astype(_LLM_F32).copy()
+    c = cos.astype(_LLM_F32)
+    s = sin.astype(_LLM_F32)
+    # Stage both lanes before either overlapping output view is updated.
+    x0 = out[:, :, 0:head_dim:2].copy()
+    x1 = out[:, :, 1:head_dim:2].copy()
+    x1_sin = _llm_mul_f32(x1, s[None])
+    x1_cos = _llm_mul_f32(x1, c[None])
+    out[:, :, 0:head_dim:2] = _llm_fma_f32(
+        x0, c[None], -x1_sin)
+    out[:, :, 1:head_dim:2] = _llm_fma_f32(
+        x0, s[None], x1_cos)
+    return out.astype(_LLM_F16)
+
+
+def _llm_attn_core(q, k, v, num_q, num_kv, head_dim, first_key_pos, past_len,
+                   attn_len, S):
+    """Causal GQA attention with the kernel's exact scale/mask/softmax flow:
+    llm_rsqrt scale, f16 score materialization, and scalar custom softmax."""
+    group = num_q // num_kv
+    scale = _llm_rsqrt(_LLM_F32(head_dim))
+    ctx = np.zeros((num_q, S, head_dim), _LLM_F16)
+    key_pos = first_key_pos + np.arange(attn_len)
+    for qh in range(num_q):
+        kvh = qh // group
+        sc = _llm_mul_f32(
+            _llm_mm(q[qh], k[kvh].T).astype(_LLM_F32), scale)
+        sc = sc.astype(_LLM_F16)
+        for i in range(S):
+            sc[i, key_pos > past_len + i] = _LLM_F16(-80.0)
+        p = _llm_softmax_f16(sc)
+        ctx[qh] = _llm_mm(p, v[kvh])
+    return ctx
+
+
+def generate_llm_attention(my_type=np.float16, defines={}):
+    """Dense-LLM Llama-style attention (prefill or decode). Decode is selected
+    by the presence of KV_LEN; it adds a random post-RoPE past K^T/V cache and
+    applies the sliding window WINDOW_LEN. KV_CACHE_TOKEN_MAJOR selects an
+    appendable [head][KV_LEN + S][HEAD_DIM] L2 layout for tiled decode; zero
+    preserves the legacy transposed-K, past-only layout."""
+    np.random.seed(43)
+    defines.pop('L1_BYTES', None)
+    defines.pop('PORT_WIDTH', None)
+    S = int(defines['S'])
+    D = int(defines['D'])
+    num_q = int(defines['N_Q_HEADS'])
+    num_kv = int(defines['N_KV_HEADS'])
+    head_dim = int(defines['HEAD_DIM'])
+    qk_norm = int(defines['QK_NORM'])
+    theta = float(defines['ROPE_THETA'])
+    decode = 'KV_LEN' in defines
+    past_len = int(defines['KV_LEN']) if decode else 0
+    window_len = int(defines.get('WINDOW_LEN', 0))
+    cache_token_major = int(defines.get('KV_CACHE_TOKEN_MAJOR', 0))
+
+    x = (np.random.rand(S, D) - 0.5).astype(_LLM_F16)
+    gamma = (np.random.rand(D) - 0.5).astype(_LLM_F16)
+    q_gamma = (np.random.rand(head_dim) - 0.5).astype(_LLM_F16)
+    k_gamma = (np.random.rand(head_dim) - 0.5).astype(_LLM_F16)
+    Wq = (np.random.rand(num_q, D, head_dim) - 0.5).astype(_LLM_F16)
+    Wk = (np.random.rand(num_kv, D, head_dim) - 0.5).astype(_LLM_F16)
+    Wv = (np.random.rand(num_kv, D, head_dim) - 0.5).astype(_LLM_F16)
+    Wo = (np.random.rand(num_q, head_dim, D) - 0.5).astype(_LLM_F16)
+
+    positions = np.arange(past_len, past_len + S)
+    cos, sin = _llm_rope_tables(positions, head_dim, theta)
+
+    h = _llm_rmsnorm(x, gamma)
+    q = np.stack([_llm_mm(h, Wq[i]) for i in range(num_q)])
+    k = np.stack([_llm_mm(h, Wk[i]) for i in range(num_kv)])
+    v = np.stack([_llm_mm(h, Wv[i]) for i in range(num_kv)])
+    if qk_norm:
+        q = _llm_rmsnorm(q.reshape(-1, head_dim), q_gamma).reshape(q.shape)
+        k = _llm_rmsnorm(k.reshape(-1, head_dim), k_gamma).reshape(k.shape)
+    q = _llm_apply_rope(q, cos, sin, num_q, S, head_dim)
+    k = _llm_apply_rope(k, cos, sin, num_kv, S, head_dim)
+
+    arrays = [x.reshape(-1), gamma, q_gamma, k_gamma, cos.reshape(-1),
+              sin.reshape(-1)]
+
+    if decode:
+        total_len = past_len + S
+        past_k = (np.random.rand(num_kv, past_len, head_dim) -
+                  0.5).astype(_LLM_F16)
+        past_v = (np.random.rand(num_kv, past_len, head_dim) -
+                  0.5).astype(_LLM_F16)
+        full_kt = np.empty((num_kv, head_dim, total_len), _LLM_F16)
+        full_v = np.empty((num_kv, total_len, head_dim), _LLM_F16)
+        full_kt[:, :, :past_len] = past_k.transpose(0, 2, 1)
+        full_v[:, :past_len, :] = past_v
+        for kvh in range(num_kv):
+            full_kt[kvh, :, past_len:] = k[kvh].T
+            full_v[kvh, past_len:, :] = v[kvh]
+
+        if cache_token_major:
+            # Tiled decode appends in place, so reserve the S future rows in
+            # the generated object and keep K contiguous by token for DMA.
+            k_cache = np.zeros((num_kv, total_len, head_dim), _LLM_F16)
+            v_cache = np.zeros((num_kv, total_len, head_dim), _LLM_F16)
+            k_cache[:, :past_len, :] = past_k
+            v_cache[:, :past_len, :] = past_v
+        else:
+            k_cache = past_k.transpose(0, 2, 1)
+            v_cache = past_v
+        if window_len == 0:
+            attn_len = total_len
+        else:
+            attn_len = min(total_len, window_len)
+        first_key_pos = total_len - attn_len
+        end = first_key_pos + attn_len
+        kw = full_kt[:, :, first_key_pos:end].transpose(0, 2, 1)
+        vw = full_v[:, first_key_pos:end, :]
+        ctx = _llm_attn_core(q, kw, vw, num_q, num_kv, head_dim, first_key_pos,
+                             past_len, attn_len, S)
+        arrays += [k_cache.reshape(-1), v_cache.reshape(-1)]
+    else:
+        ctx = _llm_attn_core(q, k, v, num_q, num_kv, head_dim, 0, 0, S, S)
+
+    out = None
+    for hh in range(num_q):
+        out = _llm_mm(ctx[hh], Wo[hh], out)
+    y = (out.astype(_LLM_F32) + x.astype(_LLM_F32)).astype(_LLM_F16)
+
+    arrays += [Wq.reshape(-1), Wk.reshape(-1), Wv.reshape(-1), Wo.reshape(-1),
+               y.reshape(-1)]
+    return [a.astype(my_type) for a in arrays], defines
+
+
+# ---------------------------------------------------------------------------
+# Perf-mode (real-size) dense-LLM data: derive the tiling and list the L2
+# arrays WITHOUT materializing any values. gendata_header.py emits these as
+# uninitialized .l2_bss declarations so a full Llama-3.1-8B layer (352 MB of
+# FFN weights) costs L2 address space only -- no giant header, no golden check.
+# ---------------------------------------------------------------------------
+def llm_perf_defines(app_name, defines):
+    """Perf-mode tiling defines: derive PANEL_I/NUM_IP for the FFN from the L1
+    budget; drop the generator-only L1_BYTES/PORT_WIDTH hints."""
+    l1 = int(defines.pop('L1_BYTES', 0))
+    pw = int(defines.pop('PORT_WIDTH', 32))
+    if app_name.startswith('llm_classic_ffn'):
+        _llm_pick_classic_ffn_tiles(
+            int(defines['S']), int(defines['D']), int(defines['I']),
+            l1, pw, defines)
+    elif app_name.startswith('llm_classic_attention'):
+        _llm_pick_classic_attention_tiles(
+            int(defines['S']), int(defines['D']), int(defines['N_HEADS']),
+            int(defines['HEAD_DIM']), int(defines.get('KV_LEN', 0)),
+            l1, pw, defines)
+    elif app_name.startswith('llm_ffn'):
+        S = int(defines['S'])
+        D = int(defines['D'])
+        inter = int(defines['I'])
+        row_tile = int(defines.get('ROW_TILE', S))
+        if row_tile <= 0 or row_tile > S or S % row_tile != 0:
+            raise Exception(
+                "ROW_TILE={} must be a positive divisor of S={}".format(
+                    row_tile, S))
+        if 'PANEL_I' not in defines:
+            defines['PANEL_I'] = _llm_pick_panel_i(
+                row_tile, D, inter, l1, pw, row_tile != S)
+        defines['NUM_IP'] = inter // int(defines['PANEL_I'])
+    return defines
+
+
+def llm_perf_arrays(app_name, defines):
+    """(name, count) of every L2 array a perf run reserves (no values)."""
+    d = defines
+    if app_name.startswith('llm_classic_ffn'):
+        S = int(d['S'])
+        D = int(d['D'])
+        inter = int(d['I'])
+        return [('l2_x', S * D), ('l2_w1', D * inter),
+                ('l2_w2', inter * D)]
+    if app_name.startswith('llm_classic_attention'):
+        S = int(d['S'])
+        D = int(d['D'])
+        heads = int(d['N_HEADS'])
+        head_dim = int(d['HEAD_DIM'])
+        arr = [('l2_x', S * D)]
+        if 'KV_LEN' in d:
+            kv = int(d['KV_LEN'])
+            arr += [('l2_k_cache', heads * kv * head_dim),
+                    ('l2_v_cache', heads * kv * head_dim)]
+        arr += [('l2_wq', heads * D * head_dim),
+                ('l2_wk', heads * D * head_dim),
+                ('l2_wv', heads * D * head_dim),
+                ('l2_wo', heads * head_dim * D)]
+        return arr
+    if app_name.startswith('llm_ffn'):
+        S = int(d['S'])
+        D = int(d['D'])
+        inter = int(d['I'])
+        return [('l2_x', S * D), ('l2_gamma', D), ('l2_wg', D * inter),
+                ('l2_wu', D * inter), ('l2_wd', inter * D)]
+    S = int(d['S'])
+    D = int(d['D'])
+    nq = int(d['N_Q_HEADS'])
+    nkv = int(d['N_KV_HEADS'])
+    hd = int(d['HEAD_DIM'])
+    half = hd // 2
+    arr = [('l2_x', S * D), ('l2_gamma', D), ('l2_q_gamma', hd),
+           ('l2_k_gamma', hd), ('l2_cos', S * half), ('l2_sin', S * half)]
+    if 'KV_LEN' in d:
+        kv = int(d['KV_LEN'])
+        cache_len = kv + S if int(d.get('KV_CACHE_TOKEN_MAJOR', 0)) else kv
+        arr += [('l2_k_cache_t', nkv * cache_len * hd),
+                ('l2_v_cache', nkv * cache_len * hd)]
+    arr += [('l2_wq', D * nq * hd), ('l2_wk', D * nkv * hd),
+            ('l2_wv', D * nkv * hd), ('l2_wo', nq * hd * D)]
+    return arr

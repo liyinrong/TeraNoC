@@ -27,6 +27,14 @@ header = """\
 """
 
 
+def format_fp16_literal(value):
+    """Return an exact finite binary16 value as a C99 hex literal."""
+    value_f16 = numpy.float16(value)
+    if not numpy.isfinite(value_f16):
+        raise ValueError("Cannot emit non-finite __fp16 data")
+    return float(value_f16).hex()
+
+
 def format_type(typ, value):
     """
     formats the type for printing in .h file.
@@ -49,7 +57,7 @@ def format_type(typ, value):
     elif typ == 'float':
         stringyfied_val = '({}) {:+.8f}'.format(typ, value)
     elif typ == '__fp16':
-        stringyfied_val = '({}) {:+.4f}'.format(typ, value)
+        stringyfied_val = '({}) {}'.format(typ, format_fp16_literal(value))
     elif typ == '__fp8':
         if not isinstance(value, ff.FlexFloat):
             value = numpy.array([value]).astype(numpy.double)
@@ -120,6 +128,22 @@ def print_file(header, defines, arrays, filename):
     print("Generate {}".format(filename))
 
 
+def print_perf_file(header, defines, decls, filename):
+    """Perf mode: emit shapes + uninitialized .l2_bss array declarations (no
+    values, no golden) so a real-size layer costs L2 address space only."""
+    output_string = header
+    for def_key, def_value in defines.items():
+        output_string += "#define {} ({})\n".format(def_key, def_value)
+    output_string += "\n"
+    for name, size in decls:
+        output_string += (
+            '__fp16 __attribute__((aligned(4 * NUM_BANKS), '
+            'section(".l2_bss"))) {}[{}];\n\n'.format(name, size))
+    with open(filename, "w") as file:
+        file.write(output_string)
+    print("Generate {} (perf)".format(filename))
+
+
 def get_type(type_string):
     """
     Gets the numpy type from the type specifyied in the json
@@ -147,6 +171,12 @@ if __name__ == '__main__':
         description='Generate data.h header files.')
     parser.add_argument('--app_name', type=str, help='Name of the app')
     parser.add_argument('--params', type=str, help='Name of the app')
+    # Total usable L1 bytes and RedMulE PORT_WIDTH of the active config; the
+    # LLM generators use them to derive the L1-fitting FFN tile (PANEL_I).
+    parser.add_argument('--l1-bytes', type=int, default=0,
+                        help='Total L1 bytes = NUM_BANKS*L1_BANK_SIZE')
+    parser.add_argument('--port-width', type=int, default=32,
+                        help='RedMulE PORT_WIDTH = REDMULE_H*(REDMULE_P+1)')
 
     # Parse the command-line arguments
     args = parser.parse_args()
@@ -162,6 +192,14 @@ if __name__ == '__main__':
         raw_arrays = data_args.get("arrays")
         arrays = ([ast.literal_eval(array) for array in raw_arrays]
                   if raw_arrays is not None else [])
+        # Feed the L1 budget to the dense-LLM generators (build-time tiling
+        # solver). The generators pop these so they are not emitted as defines.
+        if app_name.startswith("llm_"):
+            defnes["L1_BYTES"] = args.l1_bytes
+            defnes["PORT_WIDTH"] = args.port_width
+        # Real-size shapes set LLM_PERF_ONLY=1: reserve uninitialized weights,
+        # skip value/golden generation.
+        perf = int(defnes.get("LLM_PERF_ONLY", 0))
 
     # Determine output file name
     filename = os.path.dirname(os.path.abspath(__file__))
@@ -221,10 +259,22 @@ if __name__ == '__main__':
         "barriers_test": {"func": datalib.generate_barriers_test},
         "softmax_f8": {"func": datalib.generate_fsoftmax},
         "softmax_f16": {"func": datalib.generate_fsoftmax},
+        "llm_ffn_prefill_f16": {"func": datalib.generate_llm_ffn},
+        "llm_ffn_decode_f16": {"func": datalib.generate_llm_ffn},
+        "llm_classic_ffn_prefill_f16": {
+            "func": datalib.generate_llm_classic_ffn},
+        "llm_classic_ffn_decode_f16": {
+            "func": datalib.generate_llm_classic_ffn},
+        "llm_attention_prefill_f16": {"func": datalib.generate_llm_attention},
+        "llm_attention_decode_f16": {"func": datalib.generate_llm_attention},
+        "llm_classic_attention_prefill_f16": {
+            "func": datalib.generate_llm_classic_attention},
+        "llm_classic_attention_decode_f16": {
+            "func": datalib.generate_llm_classic_attention},
     }
 
     # Check if app_name exists in the function map
-    if app_name in function_map:
+    if app_name in function_map and not perf:
         func_info = function_map[app_name]
         func = func_info["func"]
         # Call the function
@@ -237,6 +287,12 @@ if __name__ == '__main__':
         else:
             arrays = [(result[i], *arrays[i]) for i in range(len(arrays))]
         print_file(header, defnes, arrays, filename)
+
+    elif app_name in function_map and perf:
+        # Real-size perf run: reserve uninitialized L2 weights, no golden.
+        defnes = datalib.llm_perf_defines(app_name, defnes)
+        decls = datalib.llm_perf_arrays(app_name, defnes)
+        print_perf_file(header, defnes, decls, filename)
 
     else:
         print("Data generation is not defined.")

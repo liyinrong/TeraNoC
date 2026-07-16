@@ -22,10 +22,11 @@ FP_SUFFIXES := f16 f32 f8
 I_SUFFIXES := q16 q32 i16 i32 i8
 I_APPS := $(foreach suf, $(I_SUFFIXES), $(filter %_$(suf), $(ALL)))
 FP_APPS := $(foreach suf, $(FP_SUFFIXES), $(filter %_$(suf), $(ALL)))
+LLM_APPS := $(filter llm_%,$(ALL))
 # Spatz/RVV vector apps are screened by the `sp_` prefix. They need a Spatz
 # config and the LLVM toolchain (RVV codegen); the config is selected by the
 # user (no automatic override).
-SPATZ_APPS := $(filter sp_%, $(ALL))
+SPATZ_APPS := $(filter sp_%,$(ALL))
 # RedMulE apps are screened by the `rm_` prefix. They need a RedMulE-equipped
 # config (e.g. tensorpool*) and the LLVM toolchain (fp16); the config is
 # selected by the user (no automatic override).
@@ -33,7 +34,9 @@ REDMULE_APPS := $(filter rm_%, $(ALL))
 
 # Default compiler per app type: gcc for integer apps, llvm for floating-point
 # and vector apps. Still overridable on the command line.
-ifneq ($(filter $(FP_APPS) $(SPATZ_APPS) $(REDMULE_APPS) all_llvm all_spatz all_redmule,$(MAKECMDGOALS)),)
+LLVM_TARGETS := $(FP_APPS) $(SPATZ_APPS) $(REDMULE_APPS) $(LLM_APPS)
+LLVM_TARGETS += all_llvm all_spatz all_redmule all_llm
+ifneq ($(filter $(LLVM_TARGETS),$(MAKECMDGOALS)),)
   COMPILER ?= llvm
 endif
 
@@ -46,7 +49,7 @@ BINARIES := $(addprefix $(BIN_DIR)/,$(APPS))
 # (`all_llvm`); the vector apps go through `all_spatz`, the RedMulE apps
 # through `all_redmule`.
 ALL_GCC := $(filter-out $(FP_APPS) $(SPATZ_APPS) $(REDMULE_APPS), $(ALL))
-ALL_LLVM := $(filter-out $(I_APPS) $(SPATZ_APPS) $(REDMULE_APPS), $(ALL))
+ALL_LLVM := $(filter-out $(I_APPS) $(SPATZ_APPS) $(REDMULE_APPS) $(LLM_APPS), $(ALL))
 
 # Make all applications
 all: $(ALL_GCC)
@@ -60,7 +63,14 @@ all_spatz: $(SPATZ_APPS)
 # Make all RedMulE apps (uses LLVM by default; pass a RedMulE config)
 all_redmule: $(REDMULE_APPS)
 
+# Dense-LLM applications require a combined Spatz + RedMulE configuration.
+# Keep them out of generic `all_llvm`; callers must select that configuration.
+all_llm: $(LLM_APPS)
+
 $(APPS): % : $(BIN_DIR)/% $(APPS_DIR)/Makefile $(shell find $(RUNTIME_DIR)/**.{S,c,h,ld} -type f)
+
+# Generated data must exist before main.c is compiled, including under -j.
+$(addsuffix /main.c.o,$(APPS)): %/main.c.o: data_%.h
 
 .PHONY: $(BINARIES)
 $(BINARIES): $(BIN_DIR)/%: %/main.c.o $(RUNTIME) $(LINKER_SCRIPT) data_%.h update_opcodes
