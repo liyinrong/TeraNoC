@@ -44,6 +44,7 @@ sources:
   - hardware/src/mempool_addr_scrambler.sv
   - hardware/src/mempool_tcdm_bank_interco.sv
   - hardware/src/axi_L2_interleaver.sv
+  - hardware/src/bootrom_image_pkg.sv
   - hardware/src/bootrom.sv
   - hardware/src/selector.sv
   - hardware/src/mempool_tile_remote_req_router.sv

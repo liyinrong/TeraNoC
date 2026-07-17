@@ -31,12 +31,19 @@ parser.add_argument(
     metavar='int',
     help="Bootram's data width (default: 128)",
     default=128)
-parser.add_argument(
+sv_output = parser.add_mutually_exclusive_group()
+sv_output.add_argument(
     '--sv',
     dest='systemverilog',
     action='store_true',
-    help="Generate SystemVerilog file")
+    help="Generate a width-specific SystemVerilog module")
+sv_output.add_argument(
+    '--sv-package',
+    dest='systemverilog_package',
+    action='store_true',
+    help="Generate a width-independent SystemVerilog boot image package")
 parser.set_defaults(systemverilog=False)
+parser.set_defaults(systemverilog_package=False)
 parser.add_argument(
     '--header',
     dest='header',
@@ -109,6 +116,18 @@ $content
 endmodule
 """
 
+package = """\
+package $package_name;
+  localparam int unsigned BootromWordWidth = 32;
+  localparam int unsigned BootromWordCount = $size;
+
+  localparam logic [BootromWordCount-1:0][BootromWordWidth-1:0]
+      BootromWords = {
+$content
+  };
+endpackage : $package_name
+"""
+
 c_var = """\
 // Auto-generated code
 
@@ -120,18 +139,16 @@ $content
 """
 
 
-def read_bin():
-    with open(filename + ".img", 'rb') as f:
+def read_bin(byte_width):
+    with open(file, 'rb') as f:
         rom = bytes.hex(f.read())
         rom = list(map(''.join, zip(rom[::2], rom[1::2])))
-    # align to datawidth bits
-    align = (int((len(rom) + ByteWidth - 1) / ByteWidth)) * ByteWidth
-    for i in range(len(rom), align):
-        rom.append("00")
+    align = ((len(rom) + byte_width - 1) // byte_width) * byte_width
+    rom.extend(["00"] * (align - len(rom)))
     return rom
 
 
-rom = read_bin()
+rom = read_bin(ByteWidth)
 
 """ Generate C header file for simulator
 """
@@ -168,3 +185,27 @@ if args.systemverilog:
         f.write(s.substitute(filename=os.path.basename(filename), size=int(
             len(rom) / ByteWidth), content=rom_str, DataWidth=DataWidth,
             DataOffset=DataOffset))
+
+""" Generate a fixed-width SystemVerilog package.
+"""
+if args.systemverilog_package:
+    word_byte_width = 4
+    package_rom = read_bin(word_byte_width)
+
+    if not package_rom:
+        sys.exit("Bootrom image must not be empty")
+
+    with open(output + ".sv", "w") as f:
+        rom_str = ""
+        for i in reversed(range(int(len(package_rom) / word_byte_width))):
+            rom_str += "    32'h" + "".join(
+                package_rom[i * word_byte_width:
+                            (i + 1) * word_byte_width][::-1])
+            rom_str += ",\n"
+        rom_str = rom_str[:-2]
+        f.write(license)
+        s = Template(package)
+        f.write(s.substitute(
+            package_name=os.path.basename(output),
+            size=int(len(package_rom) / word_byte_width),
+            content=rom_str))

@@ -875,7 +875,10 @@ module mempool_system
 
   `FF(bootrom_rvalid, bootrom_req, 1'b0, clk_i, rst_ni)
 
-  bootrom i_bootrom (
+  bootrom #(
+    .DataWidth(AxiDataWidth),
+    .AddrWidth(AddrWidth)
+  ) i_bootrom (
     .clk_i  (clk_i        ),
     .req_i  (bootrom_req  ),
     .addr_i (bootrom_addr ),

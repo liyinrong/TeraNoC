@@ -9,6 +9,7 @@ ROOT_DIR 		:= $(patsubst %/,%, $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 MEMPOOL_DIR 	:= $(shell git rev-parse --show-toplevel 2>/dev/null || echo $$MEMPOOL_DIR)
 INSTALL_DIR 	:= $(abspath $(ROOT_DIR)/../install)
 TOOLCHAIN_DIR 	:= $(abspath $(ROOT_DIR)/../toolchain)
+BOOTROM_IMAGE_PKG := src/bootrom_image_pkg.sv
 
 # Include configuration
 config_mk = $(abspath $(ROOT_DIR)/../config/config.mk)
@@ -519,7 +520,7 @@ lint: update-floogen $(SPYGLASS_WORK_DIR)/tmp/files $(SPYGLASS_WORK_DIR)/sdc/fun
 	cd $(SPYGLASS_WORK_DIR); config=$(config) $(SNPS_SG) sg_shell -tcl $(SG_SCRIPT_PATH)/run_lint$(SG_SCRIPT_SUF).tcl
 
 # Build file list, use subst to remove the "32'd" which spyglass can't handle
-$(SPYGLASS_WORK_DIR)/tmp/files%: $(bender)
+$(SPYGLASS_WORK_DIR)/tmp/files%: $(BOOTROM_IMAGE_PKG) $(bender)
 	mkdir -p $(SPYGLASS_WORK_DIR)/tmp
 	$(bender) script verilator $(subst 32\'d,,$(vlog_defs)) -t rtl -t mempool_verilator $(bender_defs) > $@
 
@@ -651,8 +652,10 @@ $(tests_verilate): $(test_result_dir_verilate)/%.out : $(app_path)/%
 ################
 
 # Bootrom
-src/bootrom.sv: $(MEMPOOL_DIR)/software/runtime/bootrom.img $(config_mk) Makefile
-	$(python) ./scripts/generate_bootrom.py --sv --output src/bootrom --datawidth $(axi_data_width) $<
+$(BOOTROM_IMAGE_PKG): $(MEMPOOL_DIR)/software/runtime/bootrom.img \
+		scripts/generate_bootrom.py
+	$(python) ./scripts/generate_bootrom.py --sv-package \
+		--output src/bootrom_image_pkg $<
 
 $(MEMPOOL_DIR)/software/runtime/bootrom.img:
 	make -C $(MEMPOOL_DIR)/software runtime/bootrom.img
