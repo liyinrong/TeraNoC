@@ -89,11 +89,6 @@ module mempool_tcdm_bank_interco
   input  resp_idx_t    [NumBanksPerTile-1:0]            mst_resp_ini_addr_i
 );
 
-  // Rotation-FIFO depth. 2 is the floor of stream_fifo_optimal_wrap (it rejects
-  // depth < 2 — a depth-2 FIFO is a spill register); raise it to pipeline more
-  // outstanding wide reqs if a future bank ever holds more than one.
-  localparam int unsigned RotFifoDepth = 2;
-
   // A single-bank superbank would zero-width the bank_id_lo slices.
   if (NumBanksPerSB < 2)
     $fatal(1, "mempool_tcdm_bank_interco: NumBanksPerSB (=%0d) must be >= 2.", NumBanksPerSB);
@@ -182,23 +177,43 @@ module mempool_tcdm_bank_interco
   end
 
   // ============================================================
-  // Per-superbank wide handling: fork-with-rotation on the req side,
-  // join-with-inverse-rotation on the resp side. Rotation amount per wide
-  // req is queued in a per-superbank FIFO so outstanding reqs reassemble.
+  // Per-superbank wide handling: scatter-with-completion on the req side and a
+  // gather buffer on the resp side. Each bank is served independently (a
+  // per-superbank `served` mask) instead of an all-or-nothing fork, so the
+  // per-bank arbiter can prefer narrow (scalar) traffic without livelocking the
+  // wide access (INVARIANT #2). The wide req is held (backpressured) for its
+  // whole req+resp cycle, so its rotation is combinational (no rotation FIFO)
+  // and one wide req is outstanding per superbank at a time.
   // ============================================================
   wide_resp_t [NumSuperbanks-1:0] sb_wide_resp;
   logic       [NumSuperbanks-1:0] sb_wide_resp_valid;
   logic       [NumSuperbanks-1:0] sb_wide_resp_ready;
 
-  // Per-bank wide req/resp signals coming out of the fork / into the join.
-  logic        [NumBanksPerTile-1:0] wide_fork_valid;
-  logic        [NumBanksPerTile-1:0] wide_fork_ready;
+  // Per-bank rotated wide request + arbiter cross-signals (global bank index).
   narrow_req_t [NumBanksPerTile-1:0] wide_req_for_bank;
-  logic        [NumBanksPerTile-1:0] wide_join_in_valid;
-  logic        [NumBanksPerTile-1:0] wide_join_in_ready;
+  logic        [NumBanksPerTile-1:0] wide_present;     // wide wants this bank, unserved
+  logic        [NumBanksPerTile-1:0] wide_grant;       // arbiter picked wide this cycle
+  logic        [NumBanksPerTile-1:0] wide_served_now;  // wide granted AND bank ready
+
+  // Per-superbank scatter/gather state.
+  logic [NumSuperbanks-1:0][NumBanksPerSB-1:0]                      served_q, served_d;
+  logic [NumSuperbanks-1:0][NumBanksPerSB-1:0]                      rgot_q,   rgot_d;
+  logic [NumSuperbanks-1:0][NumBanksPerSB-1:0][NarrowDataWidth-1:0] rdata_q,  rdata_d;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      served_q <= '0;
+      rgot_q   <= '0;
+      rdata_q  <= '0;
+    end else begin
+      served_q <= served_d;
+      rgot_q   <= rgot_d;
+      rdata_q  <= rdata_d;
+    end
+  end
 
   for (genvar d = 0; d < NumSuperbanks; d++) begin : gen_sb
-    // Rotation amount = (remapped) bank_id_lo of the wide req's tgt_addr.
+    // Rotation amount = (remapped) bank_id_lo of the held wide req's tgt_addr.
     logic [RotBits-1:0] req_rot;
     if (NumBanksPerSB > 1) begin : gen_rot
       // Same bank-id-lo remap arithmetic as the narrow xbar sel, so rotations match.
@@ -216,49 +231,7 @@ module mempool_tcdm_bank_interco
       assign req_rot = '0;
     end
 
-    // Capture each accepted wide req's rotation, replayed when its response joins
-    // out. The fork only fires when the FIFO can enqueue (backpressure on accept),
-    // so the FIFO can never overflow however many wide reqs a bank holds
-    // outstanding; RotFifoDepth is the knob to pipeline more of them.
-    logic [RotBits-1:0] resp_rot;
-    logic               rot_fifo_in_valid,  rot_fifo_in_ready;
-    logic               rot_fifo_out_valid, rot_fifo_out_ready;
-
-    // Fork the wide req across the superbank's banks, gated on FIFO room.
-    logic [NumBanksPerSB-1:0] sb_fork_valid;
-    logic [NumBanksPerSB-1:0] sb_fork_ready;
-    logic                     wide_acc_ready;
-    stream_fork #(.N_OUP(NumBanksPerSB)) i_wide_fork (
-      .clk_i  (clk_i                                   ),
-      .rst_ni (rst_ni                                  ),
-      .valid_i(wide_to_sb_valid[d] & rot_fifo_in_ready ),
-      .ready_o(wide_acc_ready                          ),
-      .valid_o(sb_fork_valid                           ),
-      .ready_i(sb_fork_ready                           )
-    );
-    assign wide_to_sb_ready[d] = wide_acc_ready & rot_fifo_in_ready;
-    // Enqueue when the banks accept; the FIFO masks the write itself when full, so
-    // its input valid need not be gated by its input ready.
-    assign rot_fifo_in_valid = wide_to_sb_valid[d] & wide_acc_ready;
-
-    stream_fifo_optimal_wrap #(
-      .Depth  (RotFifoDepth        ),
-      .type_t (logic [RotBits-1:0] )
-    ) i_rot_fifo (
-      .clk_i      (clk_i             ),
-      .rst_ni     (rst_ni            ),
-      .flush_i    (1'b0              ),
-      .testmode_i (1'b0              ),
-      .usage_o    (/* unused */      ),
-      .data_i     (req_rot           ),
-      .valid_i    (rot_fifo_in_valid ),
-      .ready_o    (rot_fifo_in_ready ),
-      .data_o     (resp_rot          ),
-      .valid_o    (rot_fifo_out_valid),
-      .ready_i    (rot_fifo_out_ready)
-    );
-
-    // Compose each bank's wide req: rotated word slice + shared address.
+    // Compose each bank's wide req (rotated word slice); present it until served.
     for (genvar b = 0; b < NumBanksPerSB; b++) begin : gen_sb_bank_req
       localparam int unsigned global_bank = d*NumBanksPerSB + b;
       always_comb begin
@@ -278,77 +251,137 @@ module mempool_tcdm_bank_interco
           src_group_id:  group_id_i
         };
       end
-      assign wide_fork_valid[global_bank] = sb_fork_valid[b];
-      assign sb_fork_ready[b]             = wide_fork_ready[global_bank];
+      assign wide_present[global_bank] = wide_to_sb_valid[d] & ~served_q[d][b];
     end
 
-    // Wide resp join across the superbank's banks; inverse rotation uses
-    // resp_rot from the FIFO head.
-    logic [NumBanksPerSB-1:0] sb_join_valid;
-    logic [NumBanksPerSB-1:0] sb_join_ready;
-    stream_join #(.N_INP(NumBanksPerSB)) i_wide_join (
-      .inp_valid_i(sb_join_valid          ),
-      .inp_ready_o(sb_join_ready          ),
-      .oup_valid_o(sb_wide_resp_valid[d]  ),
-      .oup_ready_i(sb_wide_resp_ready[d]  )
-    );
-    assign rot_fifo_out_ready = sb_wide_resp_valid[d] & sb_wide_resp_ready[d];
-    // The rotation must be queued before its response joins out; consuming it from
-    // an empty FIFO would replay a stale rotation and corrupt the reassembled rdata.
-`ifndef SYNTHESIS
-    assert property (@(posedge clk_i) disable iff (!rst_ni)
-        rot_fifo_out_ready |-> rot_fifo_out_valid)
-      else $fatal(1, "[mempool_tcdm_bank_interco] sb=%0d rotation FIFO drained while empty", d);
-`endif
-
-    // Wire the per-bank wide-side response handshake into the join.
-    for (genvar b = 0; b < NumBanksPerSB; b++) begin : gen_sb_bank_resp
+    // Per-bank served / response-arrival events for this superbank.
+    logic [NumBanksPerSB-1:0] served_now, rgot_now;
+    for (genvar b = 0; b < NumBanksPerSB; b++) begin : gen_sb_events
       localparam int unsigned global_bank = d*NumBanksPerSB + b;
-      assign sb_join_valid[b]                  = wide_join_in_valid[global_bank];
-      assign wide_join_in_ready[global_bank]   = sb_join_ready[b];
+      assign served_now[b] = wide_served_now[global_bank];
+      assign rgot_now[b]   = mst_resp_valid_i[global_bank] & mst_resp_wide_i[global_bank];
     end
 
-    // Reassemble wide rdata with inverse rotation, then carry metadata.
+    // Emit the gathered wide response once every bank response is registered;
+    // consume the held wide req from the demux only when it is fully done.
+    logic complete;
+    assign sb_wide_resp_valid[d] = &rgot_q[d];
+    assign complete              = sb_wide_resp_valid[d] & sb_wide_resp_ready[d];
+    assign wide_to_sb_ready[d]   = complete;
+
+    always_comb begin
+      served_d[d] = served_q[d] | served_now;
+      rgot_d[d]   = rgot_q[d]   | rgot_now;
+      rdata_d[d]  = rdata_q[d];
+      for (int b = 0; b < NumBanksPerSB; b++)
+        if (rgot_now[b])
+          rdata_d[d][b] = mst_resp_i[d*NumBanksPerSB + b].rdata.data;
+      if (complete) begin
+        served_d[d] = '0;
+        rgot_d[d]   = '0;
+      end
+    end
+
+    // Reassemble wide rdata with inverse rotation from the gather buffer.
     always_comb begin
       sb_wide_resp[d] = '{rdata: '{default: '0}};
       for (int b = 0; b < NumBanksPerSB; b++) begin
-        // Bank port b carries word j = (b - resp_rot) mod NumBanksPerSB.
-        automatic int unsigned j = (b + NumBanksPerSB - resp_rot) % NumBanksPerSB;
-        sb_wide_resp[d].rdata.data[j*NarrowDataWidth +: NarrowDataWidth]
-            = mst_resp_i[d*NumBanksPerSB + b].rdata.data;
+        // Bank port b carries word j = (b - req_rot) mod NumBanksPerSB.
+        automatic int unsigned j = (b + NumBanksPerSB - req_rot) % NumBanksPerSB;
+        sb_wide_resp[d].rdata.data[j*NarrowDataWidth +: NarrowDataWidth] = rdata_q[d][b];
       end
-      // Metadata from the lowest bank — all banks of a wide chunk share it.
-      sb_wide_resp[d].rdata.meta_id = mst_resp_i[d*NumBanksPerSB].rdata.meta_id;
-      sb_wide_resp[d].rdata.core_id = mst_resp_i[d*NumBanksPerSB].rdata.core_id;
-      sb_wide_resp[d].rdata.amo     = mst_resp_i[d*NumBanksPerSB].rdata.amo;
+      // Metadata from the held request — all banks of a wide chunk share it.
+      sb_wide_resp[d].rdata.meta_id = wide_to_sb[d].wdata.meta_id;
+      sb_wide_resp[d].rdata.core_id = wide_to_sb[d].wdata.core_id;
+      sb_wide_resp[d].rdata.amo     = wide_to_sb[d].wdata.amo;
     end
-  end
 
-  // ============================================================
-  // Per-bank priority: wide overrides narrow at the request port.
-  // ============================================================
-  for (genvar b = 0; b < NumBanksPerTile; b++) begin : gen_bank_mux
-    always_comb begin
-      if (wide_fork_valid[b]) begin
-        mst_req_o[b]              = wide_req_for_bank[b];
-        mst_req_valid_o[b]        = wide_fork_valid[b];
-        mst_req_wide_o[b]         = 1'b1;
-        wide_fork_ready[b]        = mst_req_ready_i[b];
-        narrow_to_bank_ready[b]   = 1'b0;
-        mst_req_ini_addr_o[b]     = '0;
+`ifndef SYNTHESIS
+    // Watchdog: a held wide access must complete; fires once on a suspected
+    // livelock/deadlock (the failure mode the gather+aging rework guards against).
+    int unsigned wd_cnt_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        wd_cnt_q <= 0;
+      end else if (wide_to_sb_valid[d] && !complete) begin
+        wd_cnt_q <= wd_cnt_q + 1;
+        if (wd_cnt_q == 100000)
+          $error("[mempool_tcdm_bank_interco] sb=%0d wide access stuck (>100k cyc) served=%b rgot=%b",
+                 d, served_q[d], rgot_q[d]);
       end else begin
-        mst_req_o[b]              = narrow_to_bank[b];
-        mst_req_valid_o[b]        = narrow_to_bank_valid[b];
-        mst_req_wide_o[b]         = 1'b0;
-        wide_fork_ready[b]        = 1'b0;
-        narrow_to_bank_ready[b]   = mst_req_ready_i[b];
-        mst_req_ini_addr_o[b]     = narrow_to_bank_idx[b];
+        wd_cnt_q <= 0;
+      end
+    end
+`endif
+  end
+
+  // ============================================================
+  // Per-bank arbiter: narrow (scalar) > wide, with sticky aging so a wide
+  // access is never starved by a sustained narrow stream (INVARIANT #2). A wide
+  // access blocked by narrow for WideAgeThreshold cycles becomes sticky-boosted
+  // and preempts narrow at that bank until it is granted (bounded wait).
+  // ============================================================
+  localparam int unsigned WideAgeThreshold = 8;
+  localparam int unsigned AgeWidth = $clog2(WideAgeThreshold + 1);
+
+  logic [NumBanksPerTile-1:0][AgeWidth-1:0] age_q, age_d;
+  logic [NumBanksPerTile-1:0]               boost_q, boost_d;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      age_q   <= '0;
+      boost_q <= '0;
+    end else begin
+      age_q   <= age_d;
+      boost_q <= boost_d;
+    end
+  end
+
+  for (genvar b = 0; b < NumBanksPerTile; b++) begin : gen_bank_mux
+    logic narrow_present, wide_win, narrow_win, blocked;
+    assign narrow_present = narrow_to_bank_valid[b];
+    // Wide wins if boosted or if no narrow contends; narrow wins otherwise.
+    assign wide_win   = wide_present[b] & (boost_q[b] | ~narrow_present);
+    assign narrow_win = narrow_present & ~wide_win;
+    assign blocked    = wide_present[b] & narrow_win;
+
+    assign wide_grant[b]      = wide_win;
+    assign wide_served_now[b] = wide_win & mst_req_ready_i[b];
+
+    always_comb begin
+      if (wide_win) begin
+        mst_req_o[b]            = wide_req_for_bank[b];
+        mst_req_valid_o[b]      = 1'b1;
+        mst_req_wide_o[b]       = 1'b1;
+        mst_req_ini_addr_o[b]   = '0;
+        narrow_to_bank_ready[b] = 1'b0;
+      end else begin
+        mst_req_o[b]            = narrow_to_bank[b];
+        mst_req_valid_o[b]      = narrow_present;
+        mst_req_wide_o[b]       = 1'b0;
+        mst_req_ini_addr_o[b]   = narrow_to_bank_idx[b];
+        narrow_to_bank_ready[b] = mst_req_ready_i[b];
+      end
+    end
+
+    // Aging: climb while blocked by narrow; stick the boost at the threshold;
+    // both reset once the wide access is granted at this bank.
+    always_comb begin
+      age_d[b]   = age_q[b];
+      boost_d[b] = boost_q[b];
+      if (wide_served_now[b]) begin
+        age_d[b]   = '0;
+        boost_d[b] = 1'b0;
+      end else if (blocked) begin
+        if (age_q[b] != AgeWidth'(WideAgeThreshold))
+          age_d[b] = age_q[b] + 1'b1;
+        if (age_q[b] >= AgeWidth'(WideAgeThreshold - 1))
+          boost_d[b] = 1'b1;
       end
     end
   end
 
   // ============================================================
-  // Per-bank response split: wide → join, narrow → resp xbar.
+  // Per-bank response split: wide → gather (always accept), narrow → resp xbar.
   // ============================================================
   narrow_resp_t [NumBanksPerTile-1:0] narrow_resp_to_xbar;
   logic         [NumBanksPerTile-1:0] narrow_resp_to_xbar_valid;
@@ -358,11 +391,9 @@ module mempool_tcdm_bank_interco
     assign narrow_resp_to_xbar[b] = mst_resp_i[b];
     always_comb begin
       if (mst_resp_wide_i[b]) begin
-        wide_join_in_valid[b]        = mst_resp_valid_i[b];
-        mst_resp_ready_o[b]          = wide_join_in_ready[b];
+        mst_resp_ready_o[b]          = 1'b1;   // gather buffer always accepts
         narrow_resp_to_xbar_valid[b] = 1'b0;
       end else begin
-        wide_join_in_valid[b]        = 1'b0;
         mst_resp_ready_o[b]          = narrow_resp_to_xbar_ready[b];
         narrow_resp_to_xbar_valid[b] = mst_resp_valid_i[b];
       end

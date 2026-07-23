@@ -400,6 +400,32 @@ package mempool_pkg;
     dma_payload_t rdata;
   } tcdm_dma_resp_t;
 
+  // Wide-engine (WP2 RedMulE) local superbank access: a WIDE_W-wide version of
+  // the DMA wide req/resp, landing on NumSuperbankWords banks. Distinct from the
+  // DMA wide type because WIDE_W (=RMDataWidth) need not equal DmaDataWidth.
+  `ifdef USE_WIDE_TCDM_PLANE
+  typedef logic [WideTcdmDataWidth-1:0]   wide_eng_data_t;
+  typedef logic [WideTcdmDataWidth/8-1:0] wide_eng_strb_t;
+
+  typedef struct packed {
+    meta_id_t       meta_id;
+    tile_core_id_t  core_id;
+    amo_t           amo;
+    wide_eng_data_t data;
+  } wide_eng_payload_t;
+
+  typedef struct packed {
+    wide_eng_payload_t wdata;
+    logic              wen;
+    wide_eng_strb_t    be;
+    tile_addr_t        tgt_addr;
+  } tcdm_wide_eng_req_t;
+
+  typedef struct packed {
+    wide_eng_payload_t rdata;
+  } tcdm_wide_eng_resp_t;
+  `endif
+
   /*************************************
    *  FlooNoC INTERCONNECT PARAMETERS  *
    *************************************/
