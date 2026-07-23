@@ -220,7 +220,10 @@ module mempool_tcdm_wide_superbank
     end
 
     always_comb begin
-      sb_wide_resp[d] = '{rdata: '{default: '0}};
+      // Clear the whole struct ('0), then drive rdata below. Naming only `rdata`
+      // in a pattern is an incomplete-pattern error under VCS when wide_resp_t has
+      // extra fields (the engine class carries ini_addr/src_group_id, unused here).
+      sb_wide_resp[d] = '0;
       for (int b = 0; b < NumBanksPerSB; b++) begin
         automatic int unsigned j = (b + NumBanksPerSB - cfifo_pop_data[d].rot) % NumBanksPerSB;
         sb_wide_resp[d].rdata.data[j*NarrowDataWidth +: NarrowDataWidth]

@@ -830,6 +830,15 @@ module mempool_tile
   tcdm_wide_eng_resp_t eng_port_resp;
   logic                eng_port_resp_valid, eng_port_resp_ready;
 
+  // Wide RedMulE response element ({local engine, remote master} -> HCI resp).
+  // Declared at MODULE scope: VCS rejects a generate-local type used as a module
+  // parameter (rr_arb_tree .DataType) — "complex types declared inside generate
+  // block can't be referred from outside" (Questa vopt tolerates it, VCS does not).
+  typedef struct packed {
+    logic [WideTcdmDataWidth-1:0] data;
+    meta_id_t                     meta_id;
+  } rm_wresp_t;
+
   // This tile's within-group id: the self-routing tag for local RedMulE accesses
   // (matches hdr.src_tile_id carried by remote landings).
   tile_group_id_t tile_wg_id;
@@ -1465,10 +1474,7 @@ module mempool_tile
                                              : tcdm_burst_master_req_ready_i[0];
 
     // Response mux: {local engine resp, remote master resp} -> HCI resp channel.
-    typedef struct packed {
-      logic [WideTcdmDataWidth-1:0] data;
-      meta_id_t                     meta_id;
-    } rm_wresp_t;
+    // (rm_wresp_t is declared at module scope above — VCS generate-scope rule.)
     rm_wresp_t [1:0] rm_resp_in;
     logic      [1:0] rm_resp_in_valid, rm_resp_in_ready;
     rm_wresp_t       rm_resp_out;
