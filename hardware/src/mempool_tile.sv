@@ -819,6 +819,11 @@ module mempool_tile
     .wide_resp_t    (tcdm_dma_resp_t  ),
     .group_id_t     (group_id_t       ),
     .resp_idx_t     (local_resp_interco_addr_t)
+    `ifdef USE_WIDE_TCDM_PLANE
+    ,.WideEngDataWidth(WideTcdmDataWidth   )
+    ,.wide_eng_req_t  (tcdm_wide_eng_req_t )
+    ,.wide_eng_resp_t (tcdm_wide_eng_resp_t)
+    `endif
   ) i_tcdm_bank_interco (
     .clk_i                  (clk_i),
     .rst_ni                 (rst_ni),
@@ -838,6 +843,15 @@ module mempool_tile
     .slv_wide_resp_o        (tcdm_dma_resp_o      ),
     .slv_wide_resp_valid_o  (tcdm_dma_resp_valid_o),
     .slv_wide_resp_ready_i  (tcdm_dma_resp_ready_i),
+    `ifdef USE_WIDE_TCDM_PLANE
+    // B1b: engine wide port present but tied off (RedMulE source connects in B3).
+    .slv_wide_eng_req_i        ('0                ),
+    .slv_wide_eng_req_valid_i  (1'b0              ),
+    .slv_wide_eng_req_ready_o  (/* unconnected */ ),
+    .slv_wide_eng_resp_o       (/* unconnected */ ),
+    .slv_wide_eng_resp_valid_o (/* unconnected */ ),
+    .slv_wide_eng_resp_ready_i (1'b1              ),
+    `endif
     .mst_req_o              (bank_req_payload    ),
     .mst_req_valid_o        (bank_req_valid      ),
     .mst_req_ready_i        (bank_req_ready      ),
