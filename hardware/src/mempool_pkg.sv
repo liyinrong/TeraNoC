@@ -419,10 +419,14 @@ package mempool_pkg;
     logic              wen;
     wide_eng_strb_t    be;
     tile_addr_t        tgt_addr;
+    tile_group_id_t    ini_addr;      // source tile  — self-routing (mirror tcdm_slave_req_t)
+    group_id_t         src_group_id;  // source group — routes the response back
   } tcdm_wide_eng_req_t;
 
   typedef struct packed {
     wide_eng_payload_t rdata;
+    tile_group_id_t    ini_addr;
+    group_id_t         src_group_id;
   } tcdm_wide_eng_resp_t;
   `endif
 

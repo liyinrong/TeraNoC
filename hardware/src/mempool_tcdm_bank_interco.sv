@@ -176,11 +176,15 @@ module mempool_tcdm_bank_interco
     .wide_req_t     (wide_req_t     ),
     .wide_resp_t    (wide_resp_t    ),
     .narrow_req_t   (narrow_req_t   ),
-    .group_id_t     (group_id_t     )
+    .group_id_t     (group_id_t     ),
+    .ini_addr_t     (tile_group_id_t)
   ) i_wide_dma (
     .clk_i (clk_i), .rst_ni(rst_ni), .group_id_i(group_id_i),
     .slv_wide_req_i (slv_wide_req_i), .slv_wide_req_valid_i(slv_wide_req_valid_i), .slv_wide_req_ready_o(slv_wide_req_ready_o),
     .slv_wide_resp_o(slv_wide_resp_o), .slv_wide_resp_valid_o(slv_wide_resp_valid_o), .slv_wide_resp_ready_i(slv_wide_resp_ready_i),
+    // DMA response never leaves the tile: local routing, outputs unused.
+    .slv_wide_ini_addr_i('0), .slv_wide_src_group_i(group_id_i),
+    .slv_wide_resp_ini_addr_o(/* unused */), .slv_wide_resp_src_group_o(/* unused */),
     .wide_req_for_bank_o(dma_req_for_bank), .wide_present_o(dma_present), .wide_served_i(dma_served),
     .resp_data_i(dma_resp_data), .resp_valid_i(dma_resp_valid), .resp_ready_o(dma_resp_ready)
   );
@@ -192,6 +196,11 @@ module mempool_tcdm_bank_interco
   logic [NumBanksPerTile-1:0] ctag_pop_valid,  ctag_pop_ready,  ctag_pop_data;
 
   `ifdef USE_WIDE_TCDM_PLANE
+  // The submodule reassembles rdata; the source routing is carried separately and
+  // re-attached here to form the self-routing engine response.
+  wide_eng_resp_t eng_submod_resp;
+  tile_group_id_t eng_resp_ini_addr;
+  group_id_t      eng_resp_src_group;
   mempool_tcdm_wide_superbank #(
     .NumBanksPerTile(NumBanksPerTile ),
     .NarrowDataWidth(NarrowDataWidth ),
@@ -201,14 +210,20 @@ module mempool_tcdm_bank_interco
     .wide_req_t     (wide_eng_req_t  ),
     .wide_resp_t    (wide_eng_resp_t ),
     .narrow_req_t   (narrow_req_t    ),
-    .group_id_t     (group_id_t      )
+    .group_id_t     (group_id_t      ),
+    .ini_addr_t     (tile_group_id_t )
   ) i_wide_eng (
     .clk_i (clk_i), .rst_ni(rst_ni), .group_id_i(group_id_i),
     .slv_wide_req_i (slv_wide_eng_req_i), .slv_wide_req_valid_i(slv_wide_eng_req_valid_i), .slv_wide_req_ready_o(slv_wide_eng_req_ready_o),
-    .slv_wide_resp_o(slv_wide_eng_resp_o), .slv_wide_resp_valid_o(slv_wide_eng_resp_valid_o), .slv_wide_resp_ready_i(slv_wide_eng_resp_ready_i),
+    .slv_wide_resp_o(eng_submod_resp), .slv_wide_resp_valid_o(slv_wide_eng_resp_valid_o), .slv_wide_resp_ready_i(slv_wide_eng_resp_ready_i),
+    .slv_wide_ini_addr_i(slv_wide_eng_req_i.ini_addr), .slv_wide_src_group_i(slv_wide_eng_req_i.src_group_id),
+    .slv_wide_resp_ini_addr_o(eng_resp_ini_addr), .slv_wide_resp_src_group_o(eng_resp_src_group),
     .wide_req_for_bank_o(eng_req_for_bank), .wide_present_o(eng_present), .wide_served_i(eng_served),
     .resp_data_i(eng_resp_data), .resp_valid_i(eng_resp_valid), .resp_ready_o(eng_resp_ready)
   );
+  assign slv_wide_eng_resp_o = '{rdata:        eng_submod_resp.rdata,
+                                 ini_addr:     eng_resp_ini_addr,
+                                 src_group_id: eng_resp_src_group};
   for (genvar b = 0; b < NumBanksPerTile; b++) begin : gen_ctag_fifo
     stream_fifo_optimal_wrap #(.Depth(ClassFifoDepth), .type_t(logic)) i_ctag_fifo (
       .clk_i(clk_i), .rst_ni(rst_ni), .flush_i(1'b0), .testmode_i(1'b0), .usage_o(),

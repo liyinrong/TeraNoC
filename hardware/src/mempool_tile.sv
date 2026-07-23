@@ -802,7 +802,59 @@ module mempool_tile
   tcdm_slave_resp_t [NumLocalPorts-1:0] local_resp_interco_payload;
   addr_t            [NumLocalPorts-1:0] local_req_interco_addr_int;
 
-  // Bank-side TCDM interconnect: narrow req/resp routing, wide-DMA superbank
+  // ------------------------------------------------------------------------
+  // B2 wide landing: a burst flit arriving from the mesh becomes the engine wide
+  // access; the engine wide response becomes a burst-resp flit, self-routed back
+  // by the carried source routing (ini_addr/src_group_id) — mirrors the narrow
+  // slave path. Port 0 only (one burst channel today).
+  // ------------------------------------------------------------------------
+  `ifdef USE_WIDE_TCDM_PLANE
+  tcdm_wide_eng_req_t  wide_eng_land_req;
+  logic                wide_eng_land_req_valid, wide_eng_land_req_ready;
+  tcdm_wide_eng_resp_t wide_eng_land_resp;
+  logic                wide_eng_land_resp_valid, wide_eng_land_resp_ready;
+
+  localparam int unsigned BurstTileOff = (NumTilesPerGroup == 1) ? 0 : idx_width(NumTilesPerGroup);
+  always_comb begin
+    wide_eng_land_req = '{
+      wdata: '{
+        meta_id: tcdm_burst_slave_req_i[0].hdr.meta_id,
+        core_id: tcdm_burst_slave_req_i[0].hdr.core_id,
+        amo:     tcdm_burst_slave_req_i[0].payload.amo,
+        data:    tcdm_burst_slave_req_i[0].payload.data
+      },
+      wen:          tcdm_burst_slave_req_i[0].payload.wen,
+      be:           tcdm_burst_slave_req_i[0].payload.be,
+      tgt_addr:     tcdm_burst_slave_req_i[0].hdr.tgt_addr[BurstTileOff +: (idx_width(NumBanksPerTile) + TCDMAddrMemWidth)],
+      ini_addr:     tcdm_burst_slave_req_i[0].hdr.src_tile_id,
+      src_group_id: group_id_t'({tcdm_burst_slave_req_i[0].hdr.src_id.x, tcdm_burst_slave_req_i[0].hdr.src_id.y})
+    };
+  end
+  assign wide_eng_land_req_valid = tcdm_burst_slave_req_valid_i[0];
+
+  always_comb begin
+    tcdm_burst_slave_req_ready_o  = '0;
+    tcdm_burst_slave_resp_o       = '0;
+    tcdm_burst_slave_resp_valid_o = '0;
+    tcdm_burst_slave_req_ready_o[0]  = wide_eng_land_req_ready;
+    tcdm_burst_slave_resp_o[0]       = '{
+      payload: '{ data: wide_eng_land_resp.rdata.data },
+      hdr: '{
+        meta_id:       wide_eng_land_resp.rdata.meta_id,
+        core_id:       wide_eng_land_resp.rdata.core_id,
+        tile_id:       wide_eng_land_resp.ini_addr,
+        src_id:        group_xy_id_t'({group_id, 1'b0}),
+        dst_id:        group_xy_id_t'({wide_eng_land_resp.src_group_id, 1'b0}),
+        last:          1'b1,
+        collective_op: 1'b0
+      }
+    };
+    tcdm_burst_slave_resp_valid_o[0] = wide_eng_land_resp_valid;
+  end
+  assign wide_eng_land_resp_ready = tcdm_burst_slave_resp_ready_i[0];
+  `endif
+
+  // Bank-side TCDM interconnect: narrow req/resp routing, wide superbank
   // demux/mux, per-bank wide-narrow arbitration, and within-superbank bank-id remap.
   mempool_tcdm_bank_interco #(
     .NumNarrowReq   (NumLocalPorts + NumRemoteReqPortsPerTile  ),
@@ -844,13 +896,13 @@ module mempool_tile
     .slv_wide_resp_valid_o  (tcdm_dma_resp_valid_o),
     .slv_wide_resp_ready_i  (tcdm_dma_resp_ready_i),
     `ifdef USE_WIDE_TCDM_PLANE
-    // B1b: engine wide port present but tied off (RedMulE source connects in B3).
-    .slv_wide_eng_req_i        ('0                ),
-    .slv_wide_eng_req_valid_i  (1'b0              ),
-    .slv_wide_eng_req_ready_o  (/* unconnected */ ),
-    .slv_wide_eng_resp_o       (/* unconnected */ ),
-    .slv_wide_eng_resp_valid_o (/* unconnected */ ),
-    .slv_wide_eng_resp_ready_i (1'b1              ),
+    // B2: engine wide port fed by the wide landing (a burst flit from the mesh).
+    .slv_wide_eng_req_i        (wide_eng_land_req       ),
+    .slv_wide_eng_req_valid_i  (wide_eng_land_req_valid ),
+    .slv_wide_eng_req_ready_o  (wide_eng_land_req_ready ),
+    .slv_wide_eng_resp_o       (wide_eng_land_resp      ),
+    .slv_wide_eng_resp_valid_o (wide_eng_land_resp_valid),
+    .slv_wide_eng_resp_ready_i (wide_eng_land_resp_ready),
     `endif
     .mst_req_o              (bank_req_payload    ),
     .mst_req_valid_o        (bank_req_valid      ),
@@ -1574,16 +1626,12 @@ module mempool_tile
   if (DataWidth > AxiDataWidth)
     $error("AxiDataWidth needs to be larger than DataWidth!");
 
-  // Wide TCDM plane (WP2) — Sub-step A: ports present but not yet driven by the
-  // RedMulE source (T1.4) or the wide landing (T1.3). Tie off so the plane is
-  // reachable end-to-end but idle (master injects nothing; slave accepts+drops).
+  // Wide TCDM plane (WP2) — master (source) side still tied off; the RedMulE
+  // source connects it in B3. The slave (landing) side is driven by B2 below.
   `ifdef USE_WIDE_TCDM_PLANE
   assign tcdm_burst_master_req_o        = '0;
   assign tcdm_burst_master_req_valid_o  = '0;
   assign tcdm_burst_master_resp_ready_o = '1;
-  assign tcdm_burst_slave_req_ready_o   = '1;
-  assign tcdm_burst_slave_resp_o        = '0;
-  assign tcdm_burst_slave_resp_valid_o  = '0;
   `endif
 
 endmodule : mempool_tile

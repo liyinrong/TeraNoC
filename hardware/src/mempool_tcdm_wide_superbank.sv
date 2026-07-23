@@ -30,6 +30,7 @@ module mempool_tcdm_wide_superbank
   parameter type wide_resp_t  = logic,
   parameter type narrow_req_t = logic,
   parameter type group_id_t   = logic,
+  parameter type ini_addr_t   = logic,
   // derived
   localparam int unsigned NumBanksPerSB  = WideDataWidth / NarrowDataWidth,
   localparam int unsigned NumSuperbanks  = NumBanksPerTile / NumBanksPerSB,
@@ -51,6 +52,12 @@ module mempool_tcdm_wide_superbank
   output wide_resp_t                                    slv_wide_resp_o,
   output logic                                          slv_wide_resp_valid_o,
   input  logic                                          slv_wide_resp_ready_i,
+  // Source routing carried through the access (self-routing, mirrors the narrow
+  // path). Tie inputs to '0/local for a class whose response never leaves the tile.
+  input  ini_addr_t                                     slv_wide_ini_addr_i,
+  input  group_id_t                                     slv_wide_src_group_i,
+  output ini_addr_t                                     slv_wide_resp_ini_addr_o,
+  output group_id_t                                     slv_wide_resp_src_group_o,
   // Per-bank arbitration interface (arbiter is in the caller).
   output narrow_req_t [NumBanksPerTile-1:0]             wide_req_for_bank_o,
   output logic        [NumBanksPerTile-1:0]             wide_present_o,
@@ -69,6 +76,8 @@ module mempool_tcdm_wide_superbank
     logic [$bits(slv_wide_req_i.wdata.meta_id)-1:0] meta_id;
     logic [$bits(slv_wide_req_i.wdata.core_id)-1:0] core_id;
     logic [$bits(slv_wide_req_i.wdata.amo)-1:0]     amo;
+    ini_addr_t                                      ini_addr;
+    group_id_t                                      src_group_id;
   } wide_ctx_t;
 
   // Demux the single wide req to its target superbank.
@@ -187,11 +196,15 @@ module mempool_tcdm_wide_superbank
     assign wide_to_sb_ready[d] = accept;
     assign served_d[d]         = accept ? '0 : served_next;
 
+    // Only the currently-scattering superbank accepts (the demux routes the single
+    // input to one superbank at a time), so slv_wide_*_i carry this req's routing.
     assign cfifo_push_valid[d] = all_served & wide_to_sb_valid[d];
-    assign cfifo_push_data[d]  = '{rot:     req_rot,
-                                   meta_id: wide_to_sb[d].wdata.meta_id,
-                                   core_id: wide_to_sb[d].wdata.core_id,
-                                   amo:     wide_to_sb[d].wdata.amo};
+    assign cfifo_push_data[d]  = '{rot:          req_rot,
+                                   meta_id:      wide_to_sb[d].wdata.meta_id,
+                                   core_id:      wide_to_sb[d].wdata.core_id,
+                                   amo:          wide_to_sb[d].wdata.amo,
+                                   ini_addr:     slv_wide_ini_addr_i,
+                                   src_group_id: slv_wide_src_group_i};
 
     // Emit: join the per-bank response FIFO heads with the context FIFO head.
     logic [NumBanksPerSB-1:0] sb_rfifo_valid;
@@ -235,27 +248,45 @@ module mempool_tcdm_wide_superbank
 `endif
   end
 
-  // Wide response mux (NumSuperbanks -> 1).
+  // Wide response mux (NumSuperbanks -> 1), carrying the source routing so each
+  // response self-routes at the caller (mirrors the narrow slave-resp path).
+  typedef struct packed {
+    wide_resp_t resp;
+    ini_addr_t  ini_addr;
+    group_id_t  src_group_id;
+  } sb_out_t;
+  sb_out_t [NumSuperbanks-1:0] sb_out;
+  sb_out_t                     mux_out;
+  for (genvar d = 0; d < NumSuperbanks; d++) begin : gen_sb_out
+    assign sb_out[d] = '{resp:         sb_wide_resp[d],
+                         ini_addr:     cfifo_pop_data[d].ini_addr,
+                         src_group_id: cfifo_pop_data[d].src_group_id};
+  end
+
   if (NumSuperbanks > 1) begin : gen_wide_resp_mux
     stream_xbar #(
       .NumInp   (NumSuperbanks ),
       .NumOut   (1             ),
-      .payload_t(wide_resp_t   )
+      .payload_t(sb_out_t      )
     ) i_wide_resp_mux (
       .clk_i, .rst_ni, .flush_i(1'b0), .rr_i('0),
-      .data_i (sb_wide_resp          ),
+      .data_i (sb_out                ),
       .valid_i(sb_wide_resp_valid    ),
       .ready_o(sb_wide_resp_ready    ),
       .sel_i  ('0                    ),
-      .data_o (slv_wide_resp_o       ),
+      .data_o (mux_out               ),
       .valid_o(slv_wide_resp_valid_o ),
       .ready_i(slv_wide_resp_ready_i ),
       .idx_o  (/* unused */          )
     );
   end else begin : gen_wide_resp_bypass
-    assign slv_wide_resp_o       = sb_wide_resp[0];
+    assign mux_out               = sb_out[0];
     assign slv_wide_resp_valid_o = sb_wide_resp_valid[0];
     assign sb_wide_resp_ready[0] = slv_wide_resp_ready_i;
   end
+
+  assign slv_wide_resp_o           = mux_out.resp;
+  assign slv_wide_resp_ini_addr_o  = mux_out.ini_addr;
+  assign slv_wide_resp_src_group_o = mux_out.src_group_id;
 
 endmodule
