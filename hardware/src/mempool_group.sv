@@ -99,6 +99,17 @@ module mempool_group
   tcdm_slave_req_t   [NumRemoteReqPortsPerTile-1:0] [NumTilesPerGroup-1:0] tcdm_slave_req;
   logic              [NumRemoteReqPortsPerTile-1:0] [NumTilesPerGroup-1:0] tcdm_slave_req_valid;
   logic              [NumRemoteReqPortsPerTile-1:0] [NumTilesPerGroup-1:0] tcdm_slave_req_ready;
+
+  // Wide TCDM plane (WP2): per-tile burst signals between the tiles and the
+  // group-level local-vs-mesh split (gen_burst_local_split further down).
+  `ifdef USE_WIDE_TCDM_PLANE
+  floo_tcdm_burst_req_t  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  tb_mst_req,  tb_slv_req;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  tb_mst_req_valid,  tb_mst_req_ready;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  tb_slv_req_valid,  tb_slv_req_ready;
+  floo_tcdm_burst_resp_t [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] tb_mst_resp, tb_slv_resp;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] tb_mst_resp_valid, tb_mst_resp_ready;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] tb_slv_resp_valid, tb_slv_resp_ready;
+  `endif
   tcdm_master_resp_t [NumRemoteRespPortsPerTile-1:0][NumTilesPerGroup-1:0] tcdm_master_resp;
   logic              [NumRemoteRespPortsPerTile-1:0][NumTilesPerGroup-1:0] tcdm_master_resp_valid;
   logic              [NumRemoteRespPortsPerTile-1:0][NumTilesPerGroup-1:0] tcdm_master_resp_ready;
@@ -163,21 +174,22 @@ module mempool_group
       .tcdm_slave_resp_o       (tran_tcdm_slave_resp                           ),
       .tcdm_slave_resp_valid_o (tran_tcdm_slave_resp_valid                     ),
       .tcdm_slave_resp_ready_i (tran_tcdm_slave_resp_ready                     ),
-      // Wide TCDM plane (WP2): per-tile burst ports wired straight to the group
-      // burst ports (tile index t maps directly; no local-port transpose).
+      // Wide TCDM plane (WP2): the tile's burst ports go to the group-level
+      // local-vs-mesh split below (gen_burst_local_split), NOT straight to the
+      // mesh -- a same-group sibling target must never enter the inter-group net.
       `ifdef USE_WIDE_TCDM_PLANE
-      .tcdm_burst_master_req_o        (tcdm_burst_master_req_o[t]              ),
-      .tcdm_burst_master_req_valid_o  (tcdm_burst_master_req_valid_o[t]        ),
-      .tcdm_burst_master_req_ready_i  (tcdm_burst_master_req_ready_i[t]        ),
-      .tcdm_burst_master_resp_i       (tcdm_burst_master_resp_i[t]             ),
-      .tcdm_burst_master_resp_valid_i (tcdm_burst_master_resp_valid_i[t]       ),
-      .tcdm_burst_master_resp_ready_o (tcdm_burst_master_resp_ready_o[t]       ),
-      .tcdm_burst_slave_req_i         (tcdm_burst_slave_req_i[t]               ),
-      .tcdm_burst_slave_req_valid_i   (tcdm_burst_slave_req_valid_i[t]         ),
-      .tcdm_burst_slave_req_ready_o   (tcdm_burst_slave_req_ready_o[t]         ),
-      .tcdm_burst_slave_resp_o        (tcdm_burst_slave_resp_o[t]              ),
-      .tcdm_burst_slave_resp_valid_o  (tcdm_burst_slave_resp_valid_o[t]        ),
-      .tcdm_burst_slave_resp_ready_i  (tcdm_burst_slave_resp_ready_i[t]        ),
+      .tcdm_burst_master_req_o        (tb_mst_req[t]                           ),
+      .tcdm_burst_master_req_valid_o  (tb_mst_req_valid[t]                     ),
+      .tcdm_burst_master_req_ready_i  (tb_mst_req_ready[t]                     ),
+      .tcdm_burst_master_resp_i       (tb_mst_resp[t]                          ),
+      .tcdm_burst_master_resp_valid_i (tb_mst_resp_valid[t]                    ),
+      .tcdm_burst_master_resp_ready_o (tb_mst_resp_ready[t]                    ),
+      .tcdm_burst_slave_req_i         (tb_slv_req[t]                           ),
+      .tcdm_burst_slave_req_valid_i   (tb_slv_req_valid[t]                     ),
+      .tcdm_burst_slave_req_ready_o   (tb_slv_req_ready[t]                     ),
+      .tcdm_burst_slave_resp_o        (tb_slv_resp[t]                          ),
+      .tcdm_burst_slave_resp_valid_o  (tb_slv_resp_valid[t]                    ),
+      .tcdm_burst_slave_resp_ready_i  (tb_slv_resp_ready[t]                    ),
       `endif
       // TCDM DMA interfaces
       .tcdm_dma_req_i          (tcdm_dma_req[t]                                ),
@@ -216,6 +228,109 @@ module mempool_group
   /*************************
    *  Local Interconnect  *
    *************************/
+
+  // ==========================================================================
+  // Wide TCDM plane (WP2 T1.5): intra-group burst routing.
+  // A wide access targeting a SIBLING TILE IN THIS GROUP must not enter the
+  // inter-group mesh: a flit whose dst_id equals this group is ejected by the
+  // router straight back out the local port it was injected on (floo_router
+  // NoLoopback) and never progresses. Mirror the narrow net -- whose local port
+  // (index 0) is handled inside the group -- by splitting each tile's burst
+  // master on destination group: same-group traffic is cross-connected
+  // tile-to-tile here, only other-group traffic reaches the mesh. Responses
+  // mirror the same split (dst_id = requester's group, tile_id = requester tile).
+  // ==========================================================================
+  `ifdef USE_WIDE_TCDM_PLANE
+  localparam int unsigned BurstTileSelW = idx_width(NumTilesPerGroup);
+
+  logic [NumTilesPerGroup-1:0] bmst_local, bslv_resp_local;
+
+  floo_tcdm_burst_req_t  [NumTilesPerGroup-1:0] lreq_in, lreq_out;
+  logic [NumTilesPerGroup-1:0] lreq_in_valid, lreq_in_ready, lreq_out_valid, lreq_out_ready;
+  logic [NumTilesPerGroup-1:0][BurstTileSelW-1:0] lreq_sel;
+
+  floo_tcdm_burst_resp_t [NumTilesPerGroup-1:0] lrsp_in, lrsp_out;
+  logic [NumTilesPerGroup-1:0] lrsp_in_valid, lrsp_in_ready, lrsp_out_valid, lrsp_out_ready;
+  logic [NumTilesPerGroup-1:0][BurstTileSelW-1:0] lrsp_sel;
+
+  for (genvar t = 0; t < NumTilesPerGroup; t++) begin: gen_burst_local_split
+    // ---- request: tile master -> {sibling tile (local), mesh (other group)} ----
+    assign bmst_local[t] = (group_id_t'({tb_mst_req[t][0].hdr.dst_id.x,
+                                         tb_mst_req[t][0].hdr.dst_id.y}) == group_id_i);
+    // Target tile sits in the low bits of the flit's tgt_addr ({row,bank,tile}),
+    // the same field mempool_tile.sv's landing strips off.
+    assign lreq_sel[t]      = tb_mst_req[t][0].hdr.tgt_addr[BurstTileSelW-1:0];
+    assign lreq_in[t]       = tb_mst_req[t][0];
+    assign lreq_in_valid[t] = tb_mst_req_valid[t][0] & bmst_local[t];
+
+    assign tcdm_burst_master_req_o[t][0]       = tb_mst_req[t][0];
+    assign tcdm_burst_master_req_valid_o[t][0] = tb_mst_req_valid[t][0] & ~bmst_local[t];
+    assign tb_mst_req_ready[t][0] = bmst_local[t] ? lreq_in_ready[t]
+                                                 : tcdm_burst_master_req_ready_i[t][0];
+
+    // ---- request: {mesh eject, sibling} -> tile slave ----
+    rr_arb_tree #(
+      .NumIn(2), .DataType(floo_tcdm_burst_req_t), .AxiVldRdy(1'b1), .LockIn(1'b1)
+    ) i_burst_slv_req_arb (
+      .clk_i (clk_i), .rst_ni(rst_ni), .flush_i(1'b0), .rr_i('0),
+      .req_i ({lreq_out_valid[t], tcdm_burst_slave_req_valid_i[t][0]}),
+      .gnt_o ({lreq_out_ready[t], tcdm_burst_slave_req_ready_o[t][0]}),
+      .data_i({lreq_out[t],       tcdm_burst_slave_req_i[t][0]      }),
+      .req_o (tb_slv_req_valid[t][0]),
+      .gnt_i (tb_slv_req_ready[t][0]),
+      .data_o(tb_slv_req[t][0]      ),
+      .idx_o (/* unused */          )
+    );
+
+    // ---- response: tile slave -> {requesting sibling (local), mesh} ----
+    assign bslv_resp_local[t] = (group_id_t'({tb_slv_resp[t][0].hdr.dst_id.x,
+                                              tb_slv_resp[t][0].hdr.dst_id.y}) == group_id_i);
+    assign lrsp_sel[t]      = tb_slv_resp[t][0].hdr.tile_id[BurstTileSelW-1:0];
+    assign lrsp_in[t]       = tb_slv_resp[t][0];
+    assign lrsp_in_valid[t] = tb_slv_resp_valid[t][0] & bslv_resp_local[t];
+
+    assign tcdm_burst_slave_resp_o[t][0]       = tb_slv_resp[t][0];
+    assign tcdm_burst_slave_resp_valid_o[t][0] = tb_slv_resp_valid[t][0] & ~bslv_resp_local[t];
+    assign tb_slv_resp_ready[t][0] = bslv_resp_local[t] ? lrsp_in_ready[t]
+                                                       : tcdm_burst_slave_resp_ready_i[t][0];
+
+    // ---- response: {mesh, sibling} -> tile master ----
+    rr_arb_tree #(
+      .NumIn(2), .DataType(floo_tcdm_burst_resp_t), .AxiVldRdy(1'b1), .LockIn(1'b1)
+    ) i_burst_mst_resp_arb (
+      .clk_i (clk_i), .rst_ni(rst_ni), .flush_i(1'b0), .rr_i('0),
+      .req_i ({lrsp_out_valid[t], tcdm_burst_master_resp_valid_i[t][0]}),
+      .gnt_o ({lrsp_out_ready[t], tcdm_burst_master_resp_ready_o[t][0]}),
+      .data_i({lrsp_out[t],       tcdm_burst_master_resp_i[t][0]      }),
+      .req_o (tb_mst_resp_valid[t][0]),
+      .gnt_i (tb_mst_resp_ready[t][0]),
+      .data_o(tb_mst_resp[t][0]      ),
+      .idx_o (/* unused */           )
+    );
+  end: gen_burst_local_split
+
+  stream_xbar #(
+    .NumInp(NumTilesPerGroup), .NumOut(NumTilesPerGroup),
+    .payload_t(floo_tcdm_burst_req_t)
+  ) i_burst_local_req_xbar (
+    .clk_i (clk_i), .rst_ni(rst_ni), .flush_i(1'b0), .rr_i('0),
+    .data_i (lreq_in ), .valid_i(lreq_in_valid ), .ready_o(lreq_in_ready ),
+    .sel_i  (lreq_sel),
+    .data_o (lreq_out), .valid_o(lreq_out_valid), .ready_i(lreq_out_ready),
+    .idx_o  (/* unused */)
+  );
+
+  stream_xbar #(
+    .NumInp(NumTilesPerGroup), .NumOut(NumTilesPerGroup),
+    .payload_t(floo_tcdm_burst_resp_t)
+  ) i_burst_local_resp_xbar (
+    .clk_i (clk_i), .rst_ni(rst_ni), .flush_i(1'b0), .rr_i('0),
+    .data_i (lrsp_in ), .valid_i(lrsp_in_valid ), .ready_o(lrsp_in_ready ),
+    .sel_i  (lrsp_sel),
+    .data_o (lrsp_out), .valid_o(lrsp_out_valid), .ready_i(lrsp_out_ready),
+    .idx_o  (/* unused */)
+  );
+  `endif
 
   // The local port is always at the index 0 out of the NumGroups TCDM ports of the tile.
 

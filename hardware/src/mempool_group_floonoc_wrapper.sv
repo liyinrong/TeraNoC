@@ -1136,20 +1136,70 @@ end : gen_router_router_i
   logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_from_router_valid;
   logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_from_router_ready;
 
-  // REQ:  tile master (inject) -> to_router ;  from_router (eject) -> tile slave (land)
+  // REQ:  tile master (inject) -> to_router
   assign floo_tcdm_burst_req_to_router          = group_burst_master_req;
   assign floo_tcdm_burst_req_to_router_valid    = group_burst_master_req_valid;
   assign group_burst_master_req_ready           = floo_tcdm_burst_req_to_router_ready;
-  assign group_burst_slave_req                  = floo_tcdm_burst_req_from_router;
-  assign group_burst_slave_req_valid            = floo_tcdm_burst_req_from_router_valid;
-  assign floo_tcdm_burst_req_from_router_ready  = group_burst_slave_req_ready;
-  // RESP: tile slave (inject) -> to_router ;  from_router (eject) -> tile master
+  // RESP: tile slave (inject) -> to_router
   assign floo_tcdm_burst_resp_to_router         = group_burst_slave_resp;
   assign floo_tcdm_burst_resp_to_router_valid   = group_burst_slave_resp_valid;
   assign group_burst_slave_resp_ready           = floo_tcdm_burst_resp_to_router_ready;
-  assign group_burst_master_resp                = floo_tcdm_burst_resp_from_router;
-  assign group_burst_master_resp_valid          = floo_tcdm_burst_resp_from_router_valid;
-  assign floo_tcdm_burst_resp_from_router_ready = group_burst_master_resp_ready;
+
+  // -------------------------------------------------------------------------
+  // Burst EJECT: route the arriving flit to its TARGET TILE inside this group.
+  // The routers route by GROUP id, so a flit ejects at whichever tile-router the
+  // XY route landed on -- not necessarily the addressed tile. Wiring eject 1:1
+  // to tile[i] therefore served the request from the WRONG tile's banks (silent
+  // data corruption). Mirror the 32-bit net, which crossbars the ejected flit by
+  // `req_tile_sel = hdr.tgt_addr[NumTilesPerGroupWidth-1:0]` (req) and
+  // `resp_tile_sel = hdr.tile_id` (resp).
+  // -------------------------------------------------------------------------
+  floo_tcdm_burst_req_t  [NumTilesPerGroup-1:0] beq_in,  beq_out;
+  logic                  [NumTilesPerGroup-1:0] beq_in_valid, beq_in_ready, beq_out_valid, beq_out_ready;
+  tile_group_id_t        [NumTilesPerGroup-1:0] beq_sel;
+  floo_tcdm_burst_resp_t [NumTilesPerGroup-1:0] bep_in,  bep_out;
+  logic                  [NumTilesPerGroup-1:0] bep_in_valid, bep_in_ready, bep_out_valid, bep_out_ready;
+  tile_group_id_t        [NumTilesPerGroup-1:0] bep_sel;
+
+  for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_burst_eject_conn
+    assign beq_in[i]                                  = floo_tcdm_burst_req_from_router[i][0];
+    assign beq_in_valid[i]                            = floo_tcdm_burst_req_from_router_valid[i][0];
+    assign floo_tcdm_burst_req_from_router_ready[i][0] = beq_in_ready[i];
+    assign beq_sel[i]                                 = beq_in[i].hdr.tgt_addr[NumTilesPerGroupWidth-1:0];
+    assign group_burst_slave_req[i][0]                = beq_out[i];
+    assign group_burst_slave_req_valid[i][0]          = beq_out_valid[i];
+    assign beq_out_ready[i]                           = group_burst_slave_req_ready[i][0];
+
+    assign bep_in[i]                                   = floo_tcdm_burst_resp_from_router[i][0];
+    assign bep_in_valid[i]                             = floo_tcdm_burst_resp_from_router_valid[i][0];
+    assign floo_tcdm_burst_resp_from_router_ready[i][0] = bep_in_ready[i];
+    assign bep_sel[i]                                  = bep_in[i].hdr.tile_id;
+    assign group_burst_master_resp[i][0]               = bep_out[i];
+    assign group_burst_master_resp_valid[i][0]         = bep_out_valid[i];
+    assign bep_out_ready[i]                            = group_burst_master_resp_ready[i][0];
+  end
+
+  stream_xbar #(
+    .NumInp(NumTilesPerGroup), .NumOut(NumTilesPerGroup),
+    .payload_t(floo_tcdm_burst_req_t)
+  ) i_burst_req_eject_xbar (
+    .clk_i (clk_i), .rst_ni(rst_ni), .flush_i(1'b0), .rr_i('0),
+    .data_i (beq_in ), .valid_i(beq_in_valid ), .ready_o(beq_in_ready ),
+    .sel_i  (beq_sel),
+    .data_o (beq_out), .valid_o(beq_out_valid), .ready_i(beq_out_ready),
+    .idx_o  (/* unused */)
+  );
+
+  stream_xbar #(
+    .NumInp(NumTilesPerGroup), .NumOut(NumTilesPerGroup),
+    .payload_t(floo_tcdm_burst_resp_t)
+  ) i_burst_resp_eject_xbar (
+    .clk_i (clk_i), .rst_ni(rst_ni), .flush_i(1'b0), .rr_i('0),
+    .data_i (bep_in ), .valid_i(bep_in_valid ), .ready_o(bep_in_ready ),
+    .sel_i  (bep_sel),
+    .data_o (bep_out), .valid_o(bep_out_valid), .ready_i(bep_out_ready),
+    .idx_o  (/* unused */)
+  );
 
   // -- Routers: one wide-req + one wide-resp router per tile, single VC, XY --
   for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_burst_router_i
