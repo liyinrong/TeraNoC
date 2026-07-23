@@ -154,6 +154,23 @@ axi_tile_resp_t axi_mst_resp_to_group;
 axi_tile_req_t  axi_mst_req_splitter;
 axi_tile_resp_t axi_mst_resp_splitter;
 
+// Wide TCDM plane (WP2): per-tile burst ports of the group, wired below to the
+// wide-net local injection/ejection (replacing the T1.1 tie-offs).
+`ifdef USE_WIDE_TCDM_PLANE
+floo_tcdm_burst_req_t  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  group_burst_master_req;
+logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  group_burst_master_req_valid;
+logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  group_burst_master_req_ready;
+floo_tcdm_burst_resp_t [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] group_burst_master_resp;
+logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] group_burst_master_resp_valid;
+logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] group_burst_master_resp_ready;
+floo_tcdm_burst_req_t  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  group_burst_slave_req;
+logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  group_burst_slave_req_valid;
+logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  group_burst_slave_req_ready;
+floo_tcdm_burst_resp_t [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] group_burst_slave_resp;
+logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] group_burst_slave_resp_valid;
+logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] group_burst_slave_resp_ready;
+`endif
+
 // Instantiate the mempool_group
 mempool_group #(
   .TCDMBaseAddr             (TCDMBaseAddr                   ),
@@ -184,6 +201,20 @@ mempool_group #(
   .dma_req_valid_i          (dma_req_valid_i                ),
   .dma_req_ready_o          (dma_req_ready_o                ),
   .dma_meta_o               (dma_meta_o                     ),
+  `ifdef USE_WIDE_TCDM_PLANE
+  .tcdm_burst_master_req_o        (group_burst_master_req        ),
+  .tcdm_burst_master_req_valid_o  (group_burst_master_req_valid  ),
+  .tcdm_burst_master_req_ready_i  (group_burst_master_req_ready  ),
+  .tcdm_burst_master_resp_i       (group_burst_master_resp       ),
+  .tcdm_burst_master_resp_valid_i (group_burst_master_resp_valid ),
+  .tcdm_burst_master_resp_ready_o (group_burst_master_resp_ready ),
+  .tcdm_burst_slave_req_i         (group_burst_slave_req         ),
+  .tcdm_burst_slave_req_valid_i   (group_burst_slave_req_valid   ),
+  .tcdm_burst_slave_req_ready_o   (group_burst_slave_req_ready   ),
+  .tcdm_burst_slave_resp_o        (group_burst_slave_resp        ),
+  .tcdm_burst_slave_resp_valid_o  (group_burst_slave_resp_valid  ),
+  .tcdm_burst_slave_resp_ready_i  (group_burst_slave_resp_ready  ),
+  `endif
   .axi_mst_req_o            (axi_mst_req_from_group         ),
   .axi_mst_resp_i           (axi_mst_resp_to_group          )
 );
@@ -996,6 +1027,253 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
     assign floo_tcdm_resp_from_router_vc_ready[i][j] = floo_tcdm_resp_from_router_before_xbar_ready[i][j];
   end : gen_router_wide_resp_router_j
 end : gen_router_router_i
+
+// ====================================================================== //
+// ----   Wide TCDM plane (WP2): separate single-beat inter-group net  --- //
+// ====================================================================== //
+// A physically-wide (WIDE_W) FlooNoC net that carries RedMulE line traffic
+// as one flit. It rides the SAME per-group boundary bundle as the 32-bit net
+// (the .floo_tcdm_burst_req / .floo_tcdm_burst_resp bundle fields, whole-struct
+// wired group-to-group by the cluster wrapper) but keeps its OWN routers,
+// valid/ready and FIFOs, so it is an isolated net (no head-of-line blocking
+// with scalar traffic) and needs NO remapper/crossbar (INVARIANT: single VC).
+// T1.1 skeleton: the inter-group mesh is wired end-to-end; the LOCAL (tile)
+// injection/ejection is tied off and gets connected by class steering (T1.2)
+// and the RedMulE endpoint / wide landing (T1.3/T1.4).
+`ifdef USE_WIDE_TCDM_PLANE
+  // -- Boundary bundle <-> per-(dir,tile,port) request signals (mirror 32b) --
+  floo_tcdm_burst_req_t [West:North][NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0] floo_tcdm_burst_req_out;
+  logic                 [West:North][NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0] floo_tcdm_burst_req_valid_out;
+  logic                 [West:North][NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0] floo_tcdm_burst_req_ready_in;
+  floo_tcdm_burst_req_t [West:North][NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0] floo_tcdm_burst_req_in;
+  logic                 [West:North][NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0] floo_tcdm_burst_req_valid_in;
+  logic                 [West:North][NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0] floo_tcdm_burst_req_ready_out;
+
+  for (genvar i = North; i <= West; i++) begin : gen_tcdm_burst_req_if_i
+    for (genvar j = 0; j < NumTilesPerGroup; j++) begin : gen_tcdm_burst_req_if_j
+      for (genvar k = 0; k < NumBurstRemoteReqPortsPerTile; k++) begin : gen_tcdm_burst_req_if_k
+        assign floo_tcdm_req_o[i].floo_tcdm_burst_req[j].burst_req[k].req   = floo_tcdm_burst_req_out      [i][j][k];
+        assign floo_tcdm_req_o[i].floo_tcdm_burst_req[j].burst_req[k].valid = floo_tcdm_burst_req_valid_out[i][j][k];
+        assign floo_tcdm_req_o[i].floo_tcdm_burst_req[j].burst_req[k].ready = floo_tcdm_burst_req_ready_out[i][j][k];
+        assign floo_tcdm_burst_req_in       [i][j][k] = floo_tcdm_req_i[i].floo_tcdm_burst_req[j].burst_req[k].req;
+        assign floo_tcdm_burst_req_valid_in [i][j][k] = floo_tcdm_req_i[i].floo_tcdm_burst_req[j].burst_req[k].valid;
+        assign floo_tcdm_burst_req_ready_in [i][j][k] = floo_tcdm_req_i[i].floo_tcdm_burst_req[j].burst_req[k].ready;
+      end
+    end
+  end
+
+  // -- Boundary bundle <-> per-(dir,tile,port) response signals (mirror 32b) --
+  floo_tcdm_burst_resp_t [West:North][NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_out;
+  logic                  [West:North][NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_valid_out;
+  logic                  [West:North][NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_ready_in;
+  floo_tcdm_burst_resp_t [West:North][NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_in;
+  logic                  [West:North][NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_valid_in;
+  logic                  [West:North][NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_ready_out;
+
+  for (genvar i = North; i <= West; i++) begin : gen_tcdm_burst_resp_if_i
+    for (genvar j = 0; j < NumTilesPerGroup; j++) begin : gen_tcdm_burst_resp_if_j
+      for (genvar k = 0; k < NumBurstRemoteRespPortsPerTile; k++) begin : gen_tcdm_burst_resp_if_k
+        assign floo_tcdm_rsp_o[i].floo_tcdm_burst_resp[j][k].resp  = floo_tcdm_burst_resp_out      [i][j][k];
+        assign floo_tcdm_rsp_o[i].floo_tcdm_burst_resp[j][k].valid = floo_tcdm_burst_resp_valid_out[i][j][k];
+        assign floo_tcdm_rsp_o[i].floo_tcdm_burst_resp[j][k].ready = floo_tcdm_burst_resp_ready_out[i][j][k];
+        assign floo_tcdm_burst_resp_in       [i][j][k] = floo_tcdm_rsp_i[i].floo_tcdm_burst_resp[j][k].resp;
+        assign floo_tcdm_burst_resp_valid_in [i][j][k] = floo_tcdm_rsp_i[i].floo_tcdm_burst_resp[j][k].valid;
+        assign floo_tcdm_burst_resp_ready_in [i][j][k] = floo_tcdm_rsp_i[i].floo_tcdm_burst_resp[j][k].ready;
+      end
+    end
+  end
+
+  // -- Transpose [dir][tile][k] <-> [tile][k][dir] so routers index by tile --
+  floo_tcdm_burst_req_t  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0][West:North] floo_tcdm_burst_req_out_trans;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0][West:North] floo_tcdm_burst_req_valid_out_trans;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0][West:North] floo_tcdm_burst_req_ready_in_trans;
+  floo_tcdm_burst_req_t  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0][West:North] floo_tcdm_burst_req_in_trans;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0][West:North] floo_tcdm_burst_req_valid_in_trans;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0][West:North] floo_tcdm_burst_req_ready_out_trans;
+
+  floo_tcdm_burst_resp_t [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0][West:North] floo_tcdm_burst_resp_out_trans;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0][West:North] floo_tcdm_burst_resp_valid_out_trans;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0][West:North] floo_tcdm_burst_resp_ready_in_trans;
+  floo_tcdm_burst_resp_t [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0][West:North] floo_tcdm_burst_resp_in_trans;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0][West:North] floo_tcdm_burst_resp_valid_in_trans;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0][West:North] floo_tcdm_burst_resp_ready_out_trans;
+
+  for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_burst_router_router_connection_i
+    for (genvar j = 0; j < NumBurstRemoteReqPortsPerTile; j++) begin : gen_burst_req_conn_j
+      for (genvar k = North; k <= West; k++) begin : gen_burst_req_conn_k
+        assign floo_tcdm_burst_req_out            [k][i][j] = floo_tcdm_burst_req_out_trans       [i][j][k];
+        assign floo_tcdm_burst_req_valid_out      [k][i][j] = floo_tcdm_burst_req_valid_out_trans [i][j][k];
+        assign floo_tcdm_burst_req_ready_out      [k][i][j] = floo_tcdm_burst_req_ready_out_trans [i][j][k];
+        assign floo_tcdm_burst_req_in_trans       [i][j][k] = floo_tcdm_burst_req_in             [k][i][j];
+        assign floo_tcdm_burst_req_ready_in_trans [i][j][k] = floo_tcdm_burst_req_ready_in       [k][i][j];
+        assign floo_tcdm_burst_req_valid_in_trans [i][j][k] = floo_tcdm_burst_req_valid_in       [k][i][j];
+      end
+    end
+    for (genvar j = 0; j < NumBurstRemoteRespPortsPerTile; j++) begin : gen_burst_resp_conn_j
+      for (genvar k = North; k <= West; k++) begin : gen_burst_resp_conn_k
+        assign floo_tcdm_burst_resp_out            [k][i][j] = floo_tcdm_burst_resp_out_trans       [i][j][k];
+        assign floo_tcdm_burst_resp_valid_out      [k][i][j] = floo_tcdm_burst_resp_valid_out_trans [i][j][k];
+        assign floo_tcdm_burst_resp_ready_out      [k][i][j] = floo_tcdm_burst_resp_ready_out_trans [i][j][k];
+        assign floo_tcdm_burst_resp_in_trans       [i][j][k] = floo_tcdm_burst_resp_in             [k][i][j];
+        assign floo_tcdm_burst_resp_ready_in_trans [i][j][k] = floo_tcdm_burst_resp_ready_in       [k][i][j];
+        assign floo_tcdm_burst_resp_valid_in_trans [i][j][k] = floo_tcdm_burst_resp_valid_in       [k][i][j];
+      end
+    end
+  end
+
+  // -- Local (tile) side: T1.1 ties it off. Injection = idle, ejection = drop.
+  //    T1.2 (class steering) + T1.4 (RedMulE endpoint) connect real traffic.
+  floo_tcdm_burst_req_t  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  floo_tcdm_burst_req_to_router;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  floo_tcdm_burst_req_to_router_valid;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  floo_tcdm_burst_req_to_router_ready;
+  floo_tcdm_burst_req_t  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  floo_tcdm_burst_req_from_router;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  floo_tcdm_burst_req_from_router_valid;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]  floo_tcdm_burst_req_from_router_ready;
+  floo_tcdm_burst_resp_t [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_to_router;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_to_router_valid;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_to_router_ready;
+  floo_tcdm_burst_resp_t [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_from_router;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_from_router_valid;
+  logic                  [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp_from_router_ready;
+
+  // REQ:  tile master (inject) -> to_router ;  from_router (eject) -> tile slave (land)
+  assign floo_tcdm_burst_req_to_router          = group_burst_master_req;
+  assign floo_tcdm_burst_req_to_router_valid    = group_burst_master_req_valid;
+  assign group_burst_master_req_ready           = floo_tcdm_burst_req_to_router_ready;
+  assign group_burst_slave_req                  = floo_tcdm_burst_req_from_router;
+  assign group_burst_slave_req_valid            = floo_tcdm_burst_req_from_router_valid;
+  assign floo_tcdm_burst_req_from_router_ready  = group_burst_slave_req_ready;
+  // RESP: tile slave (inject) -> to_router ;  from_router (eject) -> tile master
+  assign floo_tcdm_burst_resp_to_router         = group_burst_slave_resp;
+  assign floo_tcdm_burst_resp_to_router_valid   = group_burst_slave_resp_valid;
+  assign group_burst_slave_resp_ready           = floo_tcdm_burst_resp_to_router_ready;
+  assign group_burst_master_resp                = floo_tcdm_burst_resp_from_router;
+  assign group_burst_master_resp_valid          = floo_tcdm_burst_resp_from_router_valid;
+  assign floo_tcdm_burst_resp_from_router_ready = group_burst_master_resp_ready;
+
+  // -- Routers: one wide-req + one wide-resp router per tile, single VC, XY --
+  for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_burst_router_i
+    for (genvar j = 0; j < NumBurstRemoteReqPortsPerTile; j++) begin : gen_burst_req_router_j
+      if (NocRoutingAlgorithm == 1) begin : gen_id_table_routing
+        floo_router #(
+          .NumRoutes       (mempool_pkg::NumDirections            ),
+          .NumVirtChannels (1                                     ),
+          .flit_t          (floo_tcdm_burst_req_t                 ),
+          .InFifoDepth     (mempool_pkg::NumRouterInFifoDepth     ),
+          .OutFifoDepth    (mempool_pkg::NumRouterOutFifoDepth    ),
+          .RouteAlgo       (IdTable                               ),
+          .VcImpl          (VcPreemptValid                        ),
+          .id_t            (routing_table_pkg::routing_rule_addr_t),
+          .NumAddrRules    (NumGroups                             ),
+          .addr_rule_t     (routing_table_pkg::routing_rule_t     )
+        ) i_floo_tcdm_burst_req_router (
+          .clk_i, .rst_ni,
+          .test_enable_i  (1'b0                                                                            ),
+          .xy_id_i        ('0                                                                              ),
+          .id_route_map_i (routing_table_pkg::RoutingTables[group_xy_id.x][group_xy_id.y]                  ),
+          .valid_i        ({floo_tcdm_burst_req_to_router_valid[i][j],   floo_tcdm_burst_req_valid_in_trans[i][j]} ),
+          .ready_o        ({floo_tcdm_burst_req_to_router_ready[i][j],   floo_tcdm_burst_req_ready_out_trans[i][j]}),
+          .data_i         ({floo_tcdm_burst_req_to_router[i][j],         floo_tcdm_burst_req_in_trans[i][j]}       ),
+          .valid_o        ({floo_tcdm_burst_req_from_router_valid[i][j], floo_tcdm_burst_req_valid_out_trans[i][j]}),
+          .ready_i        ({floo_tcdm_burst_req_from_router_ready[i][j], floo_tcdm_burst_req_ready_in_trans[i][j]} ),
+          .data_o         ({floo_tcdm_burst_req_from_router[i][j],       floo_tcdm_burst_req_out_trans[i][j]}      ),
+          .credit_o       (                                                                                ),
+          .credit_i       ('0                                                                              ),
+          .offload_req_o  (                                                                                ),
+          .offload_rsp_i  ('0                                                                              )
+        );
+      end else begin : gen_xy_routing
+        floo_router #(
+          .NumRoutes       (mempool_pkg::NumDirections            ),
+          .NumVirtChannels (1                                     ),
+          .flit_t          (floo_tcdm_burst_req_t                 ),
+          .InFifoDepth     (mempool_pkg::NumRouterInFifoDepth     ),
+          .OutFifoDepth    (mempool_pkg::NumRouterOutFifoDepth    ),
+          .RouteAlgo       (XYRouting                             ),
+          .VcImpl          (VcPreemptValid                        ),
+          .id_t            (group_xy_id_t                         ),
+          .NumAddrRules    (1                                     ),
+          .addr_rule_t     (logic                                 )
+        ) i_floo_tcdm_burst_req_router (
+          .clk_i, .rst_ni,
+          .test_enable_i  (1'b0                                                                            ),
+          .xy_id_i        (group_xy_id                                                                     ),
+          .id_route_map_i ('0                                                                              ),
+          .valid_i        ({floo_tcdm_burst_req_to_router_valid[i][j],   floo_tcdm_burst_req_valid_in_trans[i][j]} ),
+          .ready_o        ({floo_tcdm_burst_req_to_router_ready[i][j],   floo_tcdm_burst_req_ready_out_trans[i][j]}),
+          .data_i         ({floo_tcdm_burst_req_to_router[i][j],         floo_tcdm_burst_req_in_trans[i][j]}       ),
+          .valid_o        ({floo_tcdm_burst_req_from_router_valid[i][j], floo_tcdm_burst_req_valid_out_trans[i][j]}),
+          .ready_i        ({floo_tcdm_burst_req_from_router_ready[i][j], floo_tcdm_burst_req_ready_in_trans[i][j]} ),
+          .data_o         ({floo_tcdm_burst_req_from_router[i][j],       floo_tcdm_burst_req_out_trans[i][j]}      ),
+          .credit_o       (                                                                                ),
+          .credit_i       ('0                                                                              ),
+          .offload_req_o  (                                                                                ),
+          .offload_rsp_i  ('0                                                                              )
+        );
+      end
+    end : gen_burst_req_router_j
+
+    for (genvar j = 0; j < NumBurstRemoteRespPortsPerTile; j++) begin : gen_burst_resp_router_j
+      if (NocRoutingAlgorithm == 1) begin : gen_id_table_routing
+        floo_router #(
+          .NumRoutes       (mempool_pkg::NumDirections            ),
+          .NumVirtChannels (1                                     ),
+          .flit_t          (floo_tcdm_burst_resp_t                ),
+          .InFifoDepth     (mempool_pkg::NumRouterInFifoDepth     ),
+          .OutFifoDepth    (mempool_pkg::NumRouterOutFifoDepth    ),
+          .RouteAlgo       (IdTable                               ),
+          .VcImpl          (VcPreemptValid                        ),
+          .id_t            (routing_table_pkg::routing_rule_addr_t),
+          .NumAddrRules    (NumGroups                             ),
+          .addr_rule_t     (routing_table_pkg::routing_rule_t     )
+        ) i_floo_tcdm_burst_resp_router (
+          .clk_i, .rst_ni,
+          .test_enable_i  (1'b0                                                                             ),
+          .xy_id_i        ('0                                                                               ),
+          .id_route_map_i (routing_table_pkg::RoutingTables[group_xy_id.x][group_xy_id.y]                   ),
+          .valid_i        ({floo_tcdm_burst_resp_to_router_valid[i][j],   floo_tcdm_burst_resp_valid_in_trans[i][j]} ),
+          .ready_o        ({floo_tcdm_burst_resp_to_router_ready[i][j],   floo_tcdm_burst_resp_ready_out_trans[i][j]}),
+          .data_i         ({floo_tcdm_burst_resp_to_router[i][j],         floo_tcdm_burst_resp_in_trans[i][j]}       ),
+          .valid_o        ({floo_tcdm_burst_resp_from_router_valid[i][j], floo_tcdm_burst_resp_valid_out_trans[i][j]}),
+          .ready_i        ({floo_tcdm_burst_resp_from_router_ready[i][j], floo_tcdm_burst_resp_ready_in_trans[i][j]} ),
+          .data_o         ({floo_tcdm_burst_resp_from_router[i][j],       floo_tcdm_burst_resp_out_trans[i][j]}      ),
+          .credit_o       (                                                                                 ),
+          .credit_i       ('0                                                                               ),
+          .offload_req_o  (                                                                                 ),
+          .offload_rsp_i  ('0                                                                               )
+        );
+      end else begin : gen_xy_routing
+        floo_router #(
+          .NumRoutes       (mempool_pkg::NumDirections            ),
+          .NumVirtChannels (1                                     ),
+          .flit_t          (floo_tcdm_burst_resp_t                ),
+          .InFifoDepth     (mempool_pkg::NumRouterInFifoDepth     ),
+          .OutFifoDepth    (mempool_pkg::NumRouterOutFifoDepth    ),
+          .RouteAlgo       (XYRouting                             ),
+          .VcImpl          (VcPreemptValid                        ),
+          .id_t            (group_xy_id_t                         ),
+          .NumAddrRules    (1                                     ),
+          .addr_rule_t     (logic                                 )
+        ) i_floo_tcdm_burst_resp_router (
+          .clk_i, .rst_ni,
+          .test_enable_i  (1'b0                                                                             ),
+          .xy_id_i        (group_xy_id                                                                      ),
+          .id_route_map_i ('0                                                                               ),
+          .valid_i        ({floo_tcdm_burst_resp_to_router_valid[i][j],   floo_tcdm_burst_resp_valid_in_trans[i][j]} ),
+          .ready_o        ({floo_tcdm_burst_resp_to_router_ready[i][j],   floo_tcdm_burst_resp_ready_out_trans[i][j]}),
+          .data_i         ({floo_tcdm_burst_resp_to_router[i][j],         floo_tcdm_burst_resp_in_trans[i][j]}       ),
+          .valid_o        ({floo_tcdm_burst_resp_from_router_valid[i][j], floo_tcdm_burst_resp_valid_out_trans[i][j]}),
+          .ready_i        ({floo_tcdm_burst_resp_from_router_ready[i][j], floo_tcdm_burst_resp_ready_in_trans[i][j]} ),
+          .data_o         ({floo_tcdm_burst_resp_from_router[i][j],       floo_tcdm_burst_resp_out_trans[i][j]}      ),
+          .credit_o       (                                                                                 ),
+          .credit_i       ('0                                                                               ),
+          .offload_req_o  (                                                                                 ),
+          .offload_rsp_i  ('0                                                                               )
+        );
+      end
+    end : gen_burst_resp_router_j
+  end : gen_burst_router_i
+`endif
 
 // ----------------------------- //
 // AXI FlooNoC Network Interface //

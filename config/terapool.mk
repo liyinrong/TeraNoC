@@ -96,6 +96,13 @@ noc_router_output_fifo_dep ?= 2
 # Router remapping xbar size configuration
 noc_router_remap_group_size ?= 4
 
+# Wide TCDM plane (WP2): a separate single-beat wide FlooNoC net carrying RedMulE
+# line traffic (WIDE_W = RMDataWidth). Default 0 (from config/config.mk) keeps it
+# absent and bit-identical. To enable, set both >= 1 (they must be enabled
+# together):
+# noc_req_burst_channel_num  ?= 1
+# noc_resp_burst_channel_num ?= 1
+
 ###########################
 ## 3. AXI and DMA Config
 ###########################

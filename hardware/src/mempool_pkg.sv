@@ -292,6 +292,14 @@ package mempool_pkg;
   localparam integer unsigned RMMasterPorts             = RMDataWidth / DataWidth;
   localparam integer unsigned RMRegSize                 = 256;
 
+  // Wide TCDM plane (WP2). WideTcdmDataWidth is the roadmap's WIDE_W: the payload
+  // width of one single-beat wide flit, equal to the RedMulE request width. A
+  // wide flit lands on NumSuperbankWords = WIDE_W/32 32-bit banks (a "superbank").
+  // NOTE: unrelated to the narrow/wide (rd/rdwr) 32-bit channel split below; the
+  // wide plane is the separate, physically-wide FlooNoC net named with "burst".
+  localparam integer unsigned WideTcdmDataWidth = RMDataWidth;
+  localparam integer unsigned NumSuperbankWords = WideTcdmDataWidth / DataWidth;
+
   localparam integer unsigned RMBaseAddr = 32'h4002_0000;
   localparam integer unsigned RMMask     = ~((1 << idx_width(RMRegSize)) - 1);
 
@@ -406,6 +414,13 @@ package mempool_pkg;
   localparam integer unsigned NumNarrowRemoteReqPortsPerTile = NumRdRemoteReqPortsPerTile;
   localparam integer unsigned NumWideRemoteReqPortsPerTile   = NumRdWrRemoteReqPortsPerTile + NumWrRemoteReqPortsPerTile;
 
+  // Wide TCDM plane (WP2) port counts. A SEPARATE FlooNoC net with its own
+  // routers/links, so these are NOT folded into NumRemoteReqPortsPerTile (which
+  // sizes the 32-bit net). Default 0 => the wide plane is absent and the build
+  // is bit-identical to one without it.
+  localparam integer unsigned NumBurstRemoteReqPortsPerTile  = `ifdef NOC_REQ_BURST_CHANNEL_NUM  `NOC_REQ_BURST_CHANNEL_NUM  `else 0 `endif;
+  localparam integer unsigned NumBurstRemoteRespPortsPerTile = `ifdef NOC_RESP_BURST_CHANNEL_NUM `NOC_RESP_BURST_CHANNEL_NUM `else 0 `endif;
+
   localparam integer unsigned NumRemoteReqPortsPerTile     = 1 + NumNarrowRemoteReqPortsPerTile + NumWideRemoteReqPortsPerTile;
   localparam integer unsigned NumRemoteRespPortsPerTile    = 1 + (`ifdef NOC_RESP_CHANNEL_NUM `NOC_RESP_CHANNEL_NUM `else 2 `endif);
   localparam integer unsigned NumDirections = `ifdef NUM_DIRECTIONS `NUM_DIRECTIONS `else 5 `endif;
@@ -455,6 +470,44 @@ package mempool_pkg;
     floo_tcdm_req_meta_t    hdr;
   } floo_tcdm_rdwr_req_t;
 
+  // --------------------------------------------------------------------------
+  //  Wide TCDM plane (WP2) request flit + per-tile interface — a separate,
+  //  single-beat FlooNoC net (WIDE_W wide). Present only when the plane is
+  //  enabled (default off => bit-identical). Single-beat: one flit per engine
+  //  request, hdr.last always 1'b1 (INVARIANT #1). It rides the same per-group
+  //  boundary bundle as the 32-bit net but keeps its OWN routers/valid-ready/
+  //  FIFOs, so it stays an isolated net (no HoL) while the inter-group mesh
+  //  (whole-struct group-to-group wiring) carries it for free.
+  // --------------------------------------------------------------------------
+  `ifdef USE_WIDE_TCDM_PLANE
+  typedef logic [WideTcdmDataWidth-1:0]     burst_data_t;
+  typedef logic [WideTcdmDataWidth/8-1:0]   burst_strb_t;
+
+  typedef struct packed {
+    amo_t         amo;
+    logic         wen;
+    burst_strb_t  be;
+    burst_data_t  data;
+  } floo_tcdm_burst_req_payload_t;
+
+  // Reuse the 32-bit net's request meta: meta_id already covers RedMulE's ROB id
+  // (MetaIdWidth), preserving the user-id end-to-end (INVARIANT #3).
+  typedef struct packed {
+    floo_tcdm_burst_req_payload_t payload;
+    floo_tcdm_req_meta_t          hdr;
+  } floo_tcdm_burst_req_t;
+
+  typedef struct packed {
+    floo_tcdm_burst_req_t req;
+    logic                 valid;
+    logic                 ready;
+  } floo_tcdm_burst_req_if_entry_t;
+
+  typedef struct packed {
+    floo_tcdm_burst_req_if_entry_t [NumBurstRemoteReqPortsPerTile-1:0] burst_req;
+  } floo_tcdm_burst_req_if_per_tile_entry_t;
+  `endif
+
   `ifndef USE_NARROW_REQ_CHANNEL
     typedef struct packed {
       floo_tcdm_rdwr_req_t req;
@@ -468,6 +521,9 @@ package mempool_pkg;
 
     typedef struct packed {
       floo_tcdm_req_if_per_tile_entry_t [NumTilesPerGroup-1:0] floo_tcdm_req;
+      `ifdef USE_WIDE_TCDM_PLANE
+      floo_tcdm_burst_req_if_per_tile_entry_t [NumTilesPerGroup-1:0] floo_tcdm_burst_req;
+      `endif
     } floo_tcdm_req_if_t;
   `else
     typedef struct packed {
@@ -489,6 +545,9 @@ package mempool_pkg;
 
     typedef struct packed {
       floo_tcdm_req_if_per_tile_entry_t  [NumTilesPerGroup-1:0] floo_tcdm_req;
+      `ifdef USE_WIDE_TCDM_PLANE
+      floo_tcdm_burst_req_if_per_tile_entry_t [NumTilesPerGroup-1:0] floo_tcdm_burst_req;
+      `endif
     } floo_tcdm_req_if_t;
   `endif
 
@@ -513,6 +572,24 @@ package mempool_pkg;
     floo_tcdm_resp_meta_t    hdr;
   } floo_tcdm_resp_t;
 
+  // Wide TCDM plane (WP2) response flit + per-tile interface (see request note).
+  `ifdef USE_WIDE_TCDM_PLANE
+  typedef struct packed {
+    burst_data_t data;
+  } floo_tcdm_burst_resp_payload_t;
+
+  typedef struct packed {
+    floo_tcdm_burst_resp_payload_t payload;
+    floo_tcdm_resp_meta_t          hdr;
+  } floo_tcdm_burst_resp_t;
+
+  typedef struct packed {
+    floo_tcdm_burst_resp_t resp;
+    logic                  valid;
+    logic                  ready;
+  } floo_tcdm_burst_rsp_if_entry_t;
+  `endif
+
   typedef struct packed {
     floo_tcdm_resp_t resp;
     logic            valid;
@@ -521,6 +598,9 @@ package mempool_pkg;
 
   typedef struct packed {
     floo_tcdm_rsp_if_entry_t     [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]    floo_tcdm_resp;
+    `ifdef USE_WIDE_TCDM_PLANE
+    floo_tcdm_burst_rsp_if_entry_t [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0] floo_tcdm_burst_resp;
+    `endif
   } floo_tcdm_rsp_if_t;
 
   /**********************

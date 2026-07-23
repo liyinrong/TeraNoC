@@ -237,6 +237,13 @@ endif
 vlog_defs += -DNOC_REQ_RDWR_CHANNEL_NUM=$(noc_req_rdwr_channel_num)
 vlog_defs += -DNOC_REQ_WR_CHANNEL_NUM=$(noc_req_wr_channel_num)
 vlog_defs += -DNOC_RESP_CHANNEL_NUM=$(noc_resp_channel_num)
+# Wide TCDM plane (WP2): a separate single-beat FlooNoC net. Default 0 => absent
+# and bit-identical to a build without it; USE_WIDE_TCDM_PLANE gates the RTL.
+vlog_defs += -DNOC_REQ_BURST_CHANNEL_NUM=$(noc_req_burst_channel_num)
+vlog_defs += -DNOC_RESP_BURST_CHANNEL_NUM=$(noc_resp_burst_channel_num)
+ifneq (0, $(noc_req_burst_channel_num))
+	vlog_defs += -DUSE_WIDE_TCDM_PLANE
+endif
 # --------------------------
 # Router Buffer Configuration
 # --------------------------

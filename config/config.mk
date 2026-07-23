@@ -95,6 +95,13 @@ spm_profiling ?= 0
 # Enable the interconnect access pattern profiling
 noc_profiling ?= 0
 
+# Wide TCDM plane (WP2): number of wide, single-beat request/response channels on
+# the separate wide FlooNoC net (carries RedMulE line traffic). Global default 0
+# keeps the plane absent for every flavor (bit-identical). A WP2-enabled flavor
+# sets both >= 1; they are always emitted so no flavor produces an empty define.
+noc_req_burst_channel_num  ?= 0
+noc_resp_burst_channel_num ?= 0
+
 # Number of RedMulE tensor-core tiles in the cluster
 num_redmule_tiles ?= 0
 redmule_height ?= 0

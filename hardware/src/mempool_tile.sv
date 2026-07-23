@@ -46,6 +46,24 @@ module mempool_tile
   output `STRUCT_VECT(tcdm_slave_resp_t,  [NumRemoteRespPortsPerTile-1:0])        tcdm_slave_resp_o,
   output logic                            [NumRemoteRespPortsPerTile-1:0]         tcdm_slave_resp_valid_o,
   input  logic                            [NumRemoteRespPortsPerTile-1:0]         tcdm_slave_resp_ready_i,
+  // Wide TCDM plane (WP2): burst master (this tile injects a wide flit) and burst
+  // slave (a wide flit lands in this tile). Flits are formed in the tile. T1.4
+  // (RedMulE source) drives the master; T1.3 (landing) drives the slave. Sub-step
+  // A leaves both tied off so the plane is reachable but idle.
+  `ifdef USE_WIDE_TCDM_PLANE
+  output `STRUCT_VECT(floo_tcdm_burst_req_t,  [NumBurstRemoteReqPortsPerTile-1:0])  tcdm_burst_master_req_o,
+  output logic                                [NumBurstRemoteReqPortsPerTile-1:0]   tcdm_burst_master_req_valid_o,
+  input  logic                                [NumBurstRemoteReqPortsPerTile-1:0]   tcdm_burst_master_req_ready_i,
+  input  `STRUCT_VECT(floo_tcdm_burst_resp_t, [NumBurstRemoteRespPortsPerTile-1:0]) tcdm_burst_master_resp_i,
+  input  logic                                [NumBurstRemoteRespPortsPerTile-1:0]  tcdm_burst_master_resp_valid_i,
+  output logic                                [NumBurstRemoteRespPortsPerTile-1:0]  tcdm_burst_master_resp_ready_o,
+  input  `STRUCT_VECT(floo_tcdm_burst_req_t,  [NumBurstRemoteReqPortsPerTile-1:0])  tcdm_burst_slave_req_i,
+  input  logic                                [NumBurstRemoteReqPortsPerTile-1:0]   tcdm_burst_slave_req_valid_i,
+  output logic                                [NumBurstRemoteReqPortsPerTile-1:0]   tcdm_burst_slave_req_ready_o,
+  output `STRUCT_VECT(floo_tcdm_burst_resp_t, [NumBurstRemoteRespPortsPerTile-1:0]) tcdm_burst_slave_resp_o,
+  output logic                                [NumBurstRemoteRespPortsPerTile-1:0]  tcdm_burst_slave_resp_valid_o,
+  input  logic                                [NumBurstRemoteRespPortsPerTile-1:0]  tcdm_burst_slave_resp_ready_i,
+  `endif
   // TCDM DMA interfaces
   input  `STRUCT_PORT(tcdm_dma_req_t)                                             tcdm_dma_req_i,
   input  logic                                                                    tcdm_dma_req_valid_i,
@@ -1541,5 +1559,17 @@ module mempool_tile
 
   if (DataWidth > AxiDataWidth)
     $error("AxiDataWidth needs to be larger than DataWidth!");
+
+  // Wide TCDM plane (WP2) — Sub-step A: ports present but not yet driven by the
+  // RedMulE source (T1.4) or the wide landing (T1.3). Tie off so the plane is
+  // reachable end-to-end but idle (master injects nothing; slave accepts+drops).
+  `ifdef USE_WIDE_TCDM_PLANE
+  assign tcdm_burst_master_req_o        = '0;
+  assign tcdm_burst_master_req_valid_o  = '0;
+  assign tcdm_burst_master_resp_ready_o = '1;
+  assign tcdm_burst_slave_req_ready_o   = '1;
+  assign tcdm_burst_slave_resp_o        = '0;
+  assign tcdm_burst_slave_resp_valid_o  = '0;
+  `endif
 
 endmodule : mempool_tile

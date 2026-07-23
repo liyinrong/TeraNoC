@@ -42,6 +42,23 @@ module mempool_group
   output `STRUCT_VECT(tcdm_slave_resp_t,  [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]) tcdm_slave_resp_o,
   output logic                            [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]  tcdm_slave_resp_valid_o,
   input  logic                            [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]  tcdm_slave_resp_ready_i,
+  // Wide TCDM plane (WP2): per-tile burst master/slave, wired straight through to
+  // the group wrapper's wide-net local injection/ejection (no local index-0 port;
+  // own-tile wide access uses the tile superbank, T1.5).
+  `ifdef USE_WIDE_TCDM_PLANE
+  output `STRUCT_VECT(floo_tcdm_burst_req_t,  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0])  tcdm_burst_master_req_o,
+  output logic                            [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]   tcdm_burst_master_req_valid_o,
+  input  logic                            [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]   tcdm_burst_master_req_ready_i,
+  input  `STRUCT_VECT(floo_tcdm_burst_resp_t, [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0]) tcdm_burst_master_resp_i,
+  input  logic                            [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0]  tcdm_burst_master_resp_valid_i,
+  output logic                            [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0]  tcdm_burst_master_resp_ready_o,
+  input  `STRUCT_VECT(floo_tcdm_burst_req_t,  [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0])  tcdm_burst_slave_req_i,
+  input  logic                            [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]   tcdm_burst_slave_req_valid_i,
+  output logic                            [NumTilesPerGroup-1:0][NumBurstRemoteReqPortsPerTile-1:0]   tcdm_burst_slave_req_ready_o,
+  output `STRUCT_VECT(floo_tcdm_burst_resp_t, [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0]) tcdm_burst_slave_resp_o,
+  output logic                            [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0]  tcdm_burst_slave_resp_valid_o,
+  input  logic                            [NumTilesPerGroup-1:0][NumBurstRemoteRespPortsPerTile-1:0]  tcdm_burst_slave_resp_ready_i,
+  `endif
 
   // Wake up interface
   input  logic                            [NumCoresPerGroup-1:0]                                 wake_up_i,
@@ -146,6 +163,22 @@ module mempool_group
       .tcdm_slave_resp_o       (tran_tcdm_slave_resp                           ),
       .tcdm_slave_resp_valid_o (tran_tcdm_slave_resp_valid                     ),
       .tcdm_slave_resp_ready_i (tran_tcdm_slave_resp_ready                     ),
+      // Wide TCDM plane (WP2): per-tile burst ports wired straight to the group
+      // burst ports (tile index t maps directly; no local-port transpose).
+      `ifdef USE_WIDE_TCDM_PLANE
+      .tcdm_burst_master_req_o        (tcdm_burst_master_req_o[t]              ),
+      .tcdm_burst_master_req_valid_o  (tcdm_burst_master_req_valid_o[t]        ),
+      .tcdm_burst_master_req_ready_i  (tcdm_burst_master_req_ready_i[t]        ),
+      .tcdm_burst_master_resp_i       (tcdm_burst_master_resp_i[t]             ),
+      .tcdm_burst_master_resp_valid_i (tcdm_burst_master_resp_valid_i[t]       ),
+      .tcdm_burst_master_resp_ready_o (tcdm_burst_master_resp_ready_o[t]       ),
+      .tcdm_burst_slave_req_i         (tcdm_burst_slave_req_i[t]               ),
+      .tcdm_burst_slave_req_valid_i   (tcdm_burst_slave_req_valid_i[t]         ),
+      .tcdm_burst_slave_req_ready_o   (tcdm_burst_slave_req_ready_o[t]         ),
+      .tcdm_burst_slave_resp_o        (tcdm_burst_slave_resp_o[t]              ),
+      .tcdm_burst_slave_resp_valid_o  (tcdm_burst_slave_resp_valid_o[t]        ),
+      .tcdm_burst_slave_resp_ready_i  (tcdm_burst_slave_resp_ready_i[t]        ),
+      `endif
       // TCDM DMA interfaces
       .tcdm_dma_req_i          (tcdm_dma_req[t]                                ),
       .tcdm_dma_req_valid_i    (tcdm_dma_req_valid[t]                          ),
