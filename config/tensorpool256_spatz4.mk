@@ -12,6 +12,13 @@ include $(MEMPOOL_DIR)/config/tensorpool256.mk
 
 config_build_path ?= tensorpool256_spatz4
 
+# Use the tp256_spatz4-specific FlooNoC config: its L2/HBM System Address Map
+# matches this flavor's 512 MiB L2 (l2_size below). Without this override the
+# included tensorpool256.mk falls back to floo_noc_terapool.yml, whose SAM lays
+# L2 out as 1 MiB/bank (16 MiB total) -> L2 accesses above 16 MiB misroute to the
+# wrong bank, corrupting instruction fetch and wedging the boot/barrier.
+floo_noc_cfg := floo_noc_tensorpool256_spatz4.yml
+
 # Real-size dense-LLM weights, KV state, and spill buffers live in L2. Keep the
 # inherited TensorPool L1 geometry and extend L2 up to the bootrom boundary.
 l2_size := 536870912

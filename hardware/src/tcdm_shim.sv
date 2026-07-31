@@ -16,12 +16,13 @@ module tcdm_shim
   parameter int unsigned MaxOutStandingTrans = 8             ,
   parameter int unsigned NrTCDM              = 2             ,
   parameter int unsigned NrSoC               = 1             ,
+  parameter bit          EnableSoC           = 1'b1          ,
   parameter int unsigned NumRules            = 1             , // Routing rules
+  parameter int unsigned MetaIdWidth         = mempool_pkg::MetaIdWidth,
   parameter type req_t                       = logic,
   parameter type resp_t                      = logic,
   localparam int unsigned StrbWidth          = DataWidth/8   ,
-  localparam int unsigned NumOutput          = NrTCDM + NrSoC,
-  localparam int unsigned MetaIdWidth        = mempool_pkg::MetaIdWidth
+  localparam int unsigned NumOutput          = NrTCDM + (EnableSoC ? NrSoC : 0)
 ) (
   input  logic                                          clk_i,
   input  logic                                          rst_ni,
@@ -87,74 +88,121 @@ module tcdm_shim
     assign tcdm_ppayload[i].error = 1'b0                ;
   end
 
-  // ROB IDs of the SoC requests (come back in order)
+  // ROB IDs of the SoC requests (come back in order).
   logic [NrSoC-1:0][MetaIdWidth-1:0] soc_meta_id;
 
-  for (genvar i = 0; i < NrSoC; i++) begin: gen_soc_meta_id_fifo
-    logic [NrSoC-1:0][MetaIdWidth-1:0] meta_read;
-    logic [NrSoC-1:0][MetaIdWidth-1:0] meta_write;
+  if (EnableSoC) begin : gen_soc_routing
+    for (genvar i = 0; i < NrSoC; i++) begin: gen_soc_meta_id_fifo
+      logic [MetaIdWidth-1:0] meta_read;
+      logic [MetaIdWidth-1:0] meta_write;
 
-    assign soc_meta_id[i] = soc_pwrite_i ? meta_write : meta_read;
+      assign soc_meta_id[i] = soc_pwrite_i[i] ? meta_write : meta_read;
 
-    fifo_v3 #(
-      .DEPTH     (MaxOutStandingTrans),
-      .DATA_WIDTH(MetaIdWidth        )
-    ) i_soc_meta_id_read_fifo (
-      .clk_i     (clk_i                                              ),
-      .rst_ni    (rst_ni                                             ),
-      .flush_i   (1'b0                                               ),
-      .testmode_i(1'b0                                               ),
-      .data_i    (data_qid_i                                         ),
-      .push_i    (soc_qvalid_o[i] & soc_qready_i[i] &!soc_qwrite_o[i]),
-      .full_o    (/* Unused */                                       ),
-      .data_o    (meta_read                                          ),
-      .pop_i     (soc_pvalid_i[i] & soc_pready_o[i] & !soc_pwrite_i  ),
-      .empty_o   (/* Unused */                                       ),
-      .usage_o   (/* Unused */                                       )
+      fifo_v3 #(
+        .DEPTH     (MaxOutStandingTrans),
+        .DATA_WIDTH(MetaIdWidth        )
+      ) i_soc_meta_id_read_fifo (
+        .clk_i     (clk_i                                               ),
+        .rst_ni    (rst_ni                                              ),
+        .flush_i   (1'b0                                                ),
+        .testmode_i(1'b0                                                ),
+        .data_i    (data_qid_i                                          ),
+        .push_i    (soc_qvalid_o[i] & soc_qready_i[i] & !soc_qwrite_o[i]),
+        .full_o    (/* Unused */                                        ),
+        .data_o    (meta_read                                           ),
+        .pop_i     (soc_pvalid_i[i] & soc_pready_o[i] & !soc_pwrite_i[i]),
+        .empty_o   (/* Unused */                                        ),
+        .usage_o   (/* Unused */                                        )
+      );
+      fifo_v3 #(
+        .DEPTH     (MaxOutStandingTrans),
+        .DATA_WIDTH(MetaIdWidth        )
+      ) i_soc_meta_id_write_fifo (
+        .clk_i     (clk_i                                              ),
+        .rst_ni    (rst_ni                                             ),
+        .flush_i   (1'b0                                               ),
+        .testmode_i(1'b0                                               ),
+        .data_i    (data_qid_i                                         ),
+        .push_i    (soc_qvalid_o[i] & soc_qready_i[i] & soc_qwrite_o[i]),
+        .full_o    (/* Unused */                                       ),
+        .data_o    (meta_write                                         ),
+        .pop_i     (soc_pvalid_i[i] & soc_pready_o[i] & soc_pwrite_i[i]),
+        .empty_o   (/* Unused */                                       ),
+        .usage_o   (/* Unused */                                       )
+      );
+    end: gen_soc_meta_id_fifo
+
+    // Connect SoC request and response payloads.
+    for (genvar i = 0; i < NrSoC; i++) begin : gen_soc_con
+      assign soc_qaddr_o[i]        = soc_qpayload[i].addr ;
+      assign soc_qwrite_o[i]       = soc_qpayload[i].write;
+      assign soc_qamo_o[i]         = soc_qpayload[i].amo  ;
+      assign soc_qdata_o[i]        = soc_qpayload[i].data ;
+      assign soc_qstrb_o[i]        = soc_qpayload[i].strb ;
+      assign soc_ppayload[i].data  = soc_pdata_i[i]       ;
+      assign soc_ppayload[i].id    = soc_meta_id[i]       ;
+      assign soc_ppayload[i].write = soc_pwrite_i[i]      ;
+      assign soc_ppayload[i].error = soc_perror_i[i]      ;
+    end
+
+    snitch_addr_demux #(
+      .NrOutput     (NumOutput),
+      .AddressWidth (AddrWidth),
+      .NumRules     (NumRules ),
+      .req_t        (req_t    ),
+      .resp_t       (resp_t   )
+    ) i_snitch_addr_demux (
+      .clk_i         (clk_i                            ),
+      .rst_ni        (rst_ni                           ),
+      .req_addr_i    (data_qaddr_i                     ),
+      .req_payload_i (data_qpayload                    ),
+      .req_valid_i   (data_qvalid_i                    ),
+      .req_ready_o   (data_qready_o                    ),
+      .resp_payload_o(data_ppayload                    ),
+      .resp_valid_o  (data_pvalid_o                    ),
+      .resp_ready_i  (data_pready_i                    ),
+      .req_payload_o ({soc_qpayload, tcdm_qpayload}    ),
+      .req_valid_o   ({soc_qvalid_o, tcdm_req_valid_o} ),
+      .req_ready_i   ({soc_qready_i, tcdm_req_ready_i} ),
+      .resp_payload_i({soc_ppayload, tcdm_ppayload}    ),
+      .resp_valid_i  ({soc_pvalid_i, tcdm_resp_valid_i}),
+      .resp_ready_o  ({soc_pready_o, tcdm_resp_ready_o}),
+      .address_map_i (address_map_i                    )
     );
-    fifo_v3 #(
-      .DEPTH     (MaxOutStandingTrans),
-      .DATA_WIDTH(MetaIdWidth        )
-    ) i_soc_meta_id_write_fifo (
-      .clk_i     (clk_i                                              ),
-      .rst_ni    (rst_ni                                             ),
-      .flush_i   (1'b0                                               ),
-      .testmode_i(1'b0                                               ),
-      .data_i    (data_qid_i                                         ),
-      .push_i    (soc_qvalid_o[i] & soc_qready_i[i] & soc_qwrite_o[i]),
-      .full_o    (/* Unused */                                       ),
-      .data_o    (meta_write                                         ),
-      .pop_i     (soc_pvalid_i[i] & soc_pready_o[i] & soc_pwrite_i   ),
-      .empty_o   (/* Unused */                                       ),
-      .usage_o   (/* Unused */                                       )
-    );
-  end: gen_soc_meta_id_fifo
+  end else begin : gen_tcdm_only_routing
+    assign soc_qaddr_o  = '0;
+    assign soc_qwrite_o = '0;
+    assign soc_qamo_o   = '0;
+    assign soc_qdata_o  = '0;
+    assign soc_qstrb_o  = '0;
+    assign soc_qvalid_o = '0;
+    assign soc_pready_o = '0;
 
-  // Demux according to address
-  snitch_addr_demux #(
-    .NrOutput     (NumOutput),
-    .AddressWidth (AddrWidth),
-    .NumRules     (NumRules ), // TODO
-    .req_t        (req_t    ),
-    .resp_t       (resp_t   )
-  ) i_snitch_addr_demux (
-    .clk_i         (clk_i                            ),
-    .rst_ni        (rst_ni                           ),
-    .req_addr_i    (data_qaddr_i                     ),
-    .req_payload_i (data_qpayload                    ),
-    .req_valid_i   (data_qvalid_i                    ),
-    .req_ready_o   (data_qready_o                    ),
-    .resp_payload_o(data_ppayload                    ),
-    .resp_valid_o  (data_pvalid_o                    ),
-    .resp_ready_i  (data_pready_i                    ),
-    .req_payload_o ({soc_qpayload, tcdm_qpayload}    ),
-    .req_valid_o   ({soc_qvalid_o, tcdm_req_valid_o} ),
-    .req_ready_i   ({soc_qready_i, tcdm_req_ready_i} ),
-    .resp_payload_i({soc_ppayload, tcdm_ppayload}    ),
-    .resp_valid_i  ({soc_pvalid_i, tcdm_resp_valid_i}),
-    .resp_ready_o  ({soc_pready_o, tcdm_resp_ready_o}),
-    .address_map_i (address_map_i                    )
-  );
+    snitch_addr_demux #(
+      .NrOutput     (NumOutput),
+      .AddressWidth (AddrWidth),
+      .NumRules     (NumRules ),
+      .req_t        (req_t    ),
+      .resp_t       (resp_t   )
+    ) i_snitch_addr_demux (
+      .clk_i         (clk_i                  ),
+      .rst_ni        (rst_ni                 ),
+      .req_addr_i    (data_qaddr_i           ),
+      .req_payload_i (data_qpayload          ),
+      .req_valid_i   (data_qvalid_i          ),
+      .req_ready_o   (data_qready_o          ),
+      .resp_payload_o(data_ppayload          ),
+      .resp_valid_o  (data_pvalid_o          ),
+      .resp_ready_i  (data_pready_i          ),
+      .req_payload_o (tcdm_qpayload          ),
+      .req_valid_o   (tcdm_req_valid_o       ),
+      .req_ready_i   (tcdm_req_ready_i       ),
+      .resp_payload_i(tcdm_ppayload          ),
+      .resp_valid_i  (tcdm_resp_valid_i      ),
+      .resp_ready_o  (tcdm_resp_ready_o      ),
+      .address_map_i (address_map_i          )
+    );
+  end
 
   // Connect TCDM output ports
   for (genvar i = 0; i < NrTCDM; i++) begin : gen_tcdm_con
@@ -164,19 +212,6 @@ module tcdm_shim
     assign tcdm_req_id_o[i]       = tcdm_qpayload[i].id   ;
     assign tcdm_req_wen_o[i]      = tcdm_qpayload[i].write;
     assign tcdm_req_be_o[i]       = tcdm_qpayload[i].strb ;
-  end
-
-  // Connect SOCs
-  for (genvar i = 0; i < NrSoC; i++) begin : gen_soc_con
-    assign soc_qaddr_o[i]        = soc_qpayload[i].addr ;
-    assign soc_qwrite_o[i]       = soc_qpayload[i].write;
-    assign soc_qamo_o[i]         = soc_qpayload[i].amo  ;
-    assign soc_qdata_o[i]        = soc_qpayload[i].data ;
-    assign soc_qstrb_o[i]        = soc_qpayload[i].strb ;
-    assign soc_ppayload[i].data  = soc_pdata_i[i]       ;
-    assign soc_ppayload[i].id    = soc_meta_id[i]       ;
-    assign soc_ppayload[i].write = soc_pwrite_i[i]      ;
-    assign soc_ppayload[i].error = soc_perror_i[i]      ;
   end
 
   // Request interface
@@ -197,7 +232,14 @@ module tcdm_shim
   if (AddrWidth != 32)
     $fatal(1, "[tcdm_shim] Only support 32-bit wide addresses.");
 
-  if (DataWidth != 32)
-    $fatal(1, "[tcdm_shim] Only support a data width of 32 bits.");
+  if ((DataWidth == 0) || (DataWidth % 8 != 0))
+    $fatal(1, "[tcdm_shim] Data width must be a positive whole number of bytes.");
+
+  if (NrTCDM < 1)
+    $fatal(1, "[tcdm_shim] At least one TCDM output is required.");
+
+  // Keep a non-zero physical SoC port vector even when routing is disabled.
+  if (NrSoC < 1)
+    $fatal(1, "[tcdm_shim] NrSoC must remain non-zero; use EnableSoC to disable routing.");
 
 endmodule

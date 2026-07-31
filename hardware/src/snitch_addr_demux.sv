@@ -83,20 +83,21 @@ module snitch_addr_demux
     assign req_payload_o[i] = req_payload_i;
   end
 
-  // Merge the response streams
-  logic [idx_width(NrOutput)-1:0] rr_prio;
-  assign rr_prio = 0;
-
+  // Merge responses fairly and keep the selected stream stable under
+  // backpressure. A fixed external priority can starve one destination when
+  // multiple response streams remain continuously valid.
   rr_arb_tree #(
     .DataType (resp_t  ),
     .NumIn    (NrOutput),
     .AxiVldRdy(1'b1    ),
-    .ExtPrio  (1'b1    )
+    .ExtPrio  (1'b0    ),
+    .LockIn   (1'b1    ),
+    .FairArb  (1'b1    )
   ) i_resp_stream_arbiter (
     .clk_i  (clk_i         ),
     .rst_ni (rst_ni        ),
     .flush_i(1'b0          ),
-    .rr_i   (rr_prio       ),
+    .rr_i   ('0            ),
     .req_i  (resp_valid_i  ),
     .data_i (resp_payload_i),
     .gnt_o  (resp_ready_o  ),

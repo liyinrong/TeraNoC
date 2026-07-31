@@ -33,36 +33,38 @@ module mempool_tile
   // Tile ID
   input  logic                            [idx_width(NumTiles)-1:0]               tile_id_i,
   // TCDM Master interfaces
-  output `STRUCT_VECT(tcdm_master_req_t,  [NumRemoteReqPortsPerTile-1:0])         tcdm_master_req_o,
-  output logic                            [NumRemoteReqPortsPerTile-1:0]          tcdm_master_req_valid_o,
-  input  logic                            [NumRemoteReqPortsPerTile-1:0]          tcdm_master_req_ready_i,
-  input  `STRUCT_VECT(tcdm_master_resp_t, [NumRemoteRespPortsPerTile-1:0])        tcdm_master_resp_i,
-  input  logic                            [NumRemoteRespPortsPerTile-1:0]         tcdm_master_resp_valid_i,
-  output logic                            [NumRemoteRespPortsPerTile-1:0]         tcdm_master_resp_ready_o,
+  output `STRUCT_VECT(tcdm_master_req_t,  [NumNarrowRemoteReqPortsPerTile-1:0])         tcdm_master_req_o,
+  output logic                            [NumNarrowRemoteReqPortsPerTile-1:0]          tcdm_master_req_valid_o,
+  input  logic                            [NumNarrowRemoteReqPortsPerTile-1:0]          tcdm_master_req_ready_i,
+  input  `STRUCT_VECT(tcdm_master_resp_t, [NumNarrowRemoteRespPortsPerTile-1:0])        tcdm_master_resp_i,
+  input  logic                            [NumNarrowRemoteRespPortsPerTile-1:0]         tcdm_master_resp_valid_i,
+  output logic                            [NumNarrowRemoteRespPortsPerTile-1:0]         tcdm_master_resp_ready_o,
   // TCDM slave interfaces
-  input  `STRUCT_VECT(tcdm_slave_req_t,   [NumRemoteReqPortsPerTile-1:0])         tcdm_slave_req_i,
-  input  logic                            [NumRemoteReqPortsPerTile-1:0]          tcdm_slave_req_valid_i,
-  output logic                            [NumRemoteReqPortsPerTile-1:0]          tcdm_slave_req_ready_o,
-  output `STRUCT_VECT(tcdm_slave_resp_t,  [NumRemoteRespPortsPerTile-1:0])        tcdm_slave_resp_o,
-  output logic                            [NumRemoteRespPortsPerTile-1:0]         tcdm_slave_resp_valid_o,
-  input  logic                            [NumRemoteRespPortsPerTile-1:0]         tcdm_slave_resp_ready_i,
-  // Wide TCDM plane (WP2): burst master (this tile injects a wide flit) and burst
-  // slave (a wide flit lands in this tile). Flits are formed in the tile. T1.4
-  // (RedMulE source) drives the master; T1.3 (landing) drives the slave. Sub-step
-  // A leaves both tied off so the plane is reachable but idle.
+  input  `STRUCT_VECT(tcdm_slave_req_t,   [NumNarrowRemoteReqPortsPerTile-1:0])         tcdm_slave_req_i,
+  input  logic                            [NumNarrowRemoteReqPortsPerTile-1:0]          tcdm_slave_req_valid_i,
+  output logic                            [NumNarrowRemoteReqPortsPerTile-1:0]          tcdm_slave_req_ready_o,
+  output `STRUCT_VECT(tcdm_slave_resp_t,  [NumNarrowRemoteRespPortsPerTile-1:0])        tcdm_slave_resp_o,
+  output logic                            [NumNarrowRemoteRespPortsPerTile-1:0]         tcdm_slave_resp_valid_o,
+  input  logic                            [NumNarrowRemoteRespPortsPerTile-1:0]         tcdm_slave_resp_ready_i,
+  // TCDM Wide Master interfaces
   `ifdef USE_WIDE_TCDM_PLANE
-  output `STRUCT_VECT(floo_tcdm_burst_req_t,  [NumBurstRemoteReqPortsPerTile-1:0])  tcdm_burst_master_req_o,
-  output logic                                [NumBurstRemoteReqPortsPerTile-1:0]   tcdm_burst_master_req_valid_o,
-  input  logic                                [NumBurstRemoteReqPortsPerTile-1:0]   tcdm_burst_master_req_ready_i,
-  input  `STRUCT_VECT(floo_tcdm_burst_resp_t, [NumBurstRemoteRespPortsPerTile-1:0]) tcdm_burst_master_resp_i,
-  input  logic                                [NumBurstRemoteRespPortsPerTile-1:0]  tcdm_burst_master_resp_valid_i,
-  output logic                                [NumBurstRemoteRespPortsPerTile-1:0]  tcdm_burst_master_resp_ready_o,
-  input  `STRUCT_VECT(floo_tcdm_burst_req_t,  [NumBurstRemoteReqPortsPerTile-1:0])  tcdm_burst_slave_req_i,
-  input  logic                                [NumBurstRemoteReqPortsPerTile-1:0]   tcdm_burst_slave_req_valid_i,
-  output logic                                [NumBurstRemoteReqPortsPerTile-1:0]   tcdm_burst_slave_req_ready_o,
-  output `STRUCT_VECT(floo_tcdm_burst_resp_t, [NumBurstRemoteRespPortsPerTile-1:0]) tcdm_burst_slave_resp_o,
-  output logic                                [NumBurstRemoteRespPortsPerTile-1:0]  tcdm_burst_slave_resp_valid_o,
-  input  logic                                [NumBurstRemoteRespPortsPerTile-1:0]  tcdm_burst_slave_resp_ready_i,
+  output `STRUCT_VECT(tcdm_wide_master_req_t,
+                      [NumWideRemoteReqPortsPerTile-1:0]) tcdm_wide_master_req_o,
+  output logic [NumWideRemoteReqPortsPerTile-1:0] tcdm_wide_master_req_valid_o,
+  input  logic [NumWideRemoteReqPortsPerTile-1:0] tcdm_wide_master_req_ready_i,
+  input  `STRUCT_VECT(tcdm_wide_master_resp_t,
+                      [NumWideRemoteRespPortsPerTile-1:0]) tcdm_wide_master_resp_i,
+  input  logic [NumWideRemoteRespPortsPerTile-1:0] tcdm_wide_master_resp_valid_i,
+  output logic [NumWideRemoteRespPortsPerTile-1:0] tcdm_wide_master_resp_ready_o,
+  // TCDM Wide Slave interfaces
+  input  `STRUCT_VECT(tcdm_wide_slave_req_t,
+                      [NumWideRemoteReqPortsPerTile-1:0]) tcdm_wide_slave_req_i,
+  input  logic [NumWideRemoteReqPortsPerTile-1:0] tcdm_wide_slave_req_valid_i,
+  output logic [NumWideRemoteReqPortsPerTile-1:0] tcdm_wide_slave_req_ready_o,
+  output `STRUCT_VECT(tcdm_wide_slave_resp_t,
+                      [NumWideRemoteRespPortsPerTile-1:0]) tcdm_wide_slave_resp_o,
+  output logic [NumWideRemoteRespPortsPerTile-1:0] tcdm_wide_slave_resp_valid_o,
+  input  logic [NumWideRemoteRespPortsPerTile-1:0] tcdm_wide_slave_resp_ready_i,
   `endif
   // TCDM DMA interfaces
   input  `STRUCT_PORT(tcdm_dma_req_t)                                             tcdm_dma_req_i,
@@ -91,10 +93,10 @@ module mempool_tile
   import snitch_pkg::dreq_t;
   import snitch_pkg::dresp_t;
 
-  typedef logic [idx_width(NumRemoteReqPortsPerTile)-1:0] remote_ports_index_t;
+  typedef logic [idx_width(NumNarrowRemoteReqPortsPerTile)-1:0] remote_ports_index_t;
 
-  typedef logic [idx_width(NumLocalPorts + NumRemoteReqPortsPerTile)-1:0] local_req_interco_addr_t;
-  typedef logic [idx_width(NumLocalPorts + NumRemoteRespPortsPerTile)-1:0] local_resp_interco_addr_t;
+  typedef logic [idx_width(NumLocalPorts + NumNarrowRemoteReqPortsPerTile)-1:0] local_req_interco_addr_t;
+  typedef logic [idx_width(NumLocalPorts + NumNarrowRemoteRespPortsPerTile)-1:0] local_resp_interco_addr_t;
 
   /*********************
    *  Control Signals  *
@@ -429,15 +431,15 @@ module mempool_tile
   // Condition bank_resp_ini_addr into the resp xbar's sel, handling
   // req/resp port-count asymmetry; feeds i_tcdm_bank_interco.mst_resp_ini_addr_i.
   for (genvar b = 0; unsigned'(b) < NumBanksPerTile; b++) begin: gen_superbank_resp_ini_addr
-    if(NumRemoteReqPortsPerTile > NumRemoteRespPortsPerTile ) begin: gen_superbank_resp_ini_addr_req_gt_resp
+    if(NumNarrowRemoteReqPortsPerTile > NumNarrowRemoteRespPortsPerTile ) begin: gen_superbank_resp_ini_addr_req_gt_resp
       always_comb begin
         superbank_resp_ini_addr[b] = '0;
         superbank_resp_ini_addr[b] = bank_resp_ini_addr[b];
-        if(bank_resp_ini_addr[b] > (NumLocalPorts + NumRemoteRespPortsPerTile - 1)) begin
-          superbank_resp_ini_addr[b] = bank_resp_ini_addr[b] - (NumRemoteReqPortsPerTile - NumRemoteRespPortsPerTile);
+        if(bank_resp_ini_addr[b] > (NumLocalPorts + NumNarrowRemoteRespPortsPerTile - 1)) begin
+          superbank_resp_ini_addr[b] = bank_resp_ini_addr[b] - (NumNarrowRemoteReqPortsPerTile - NumNarrowRemoteRespPortsPerTile);
         end
       end
-    end else if (NumRemoteReqPortsPerTile == NumRemoteRespPortsPerTile) begin: gen_superbank_resp_ini_addr_req_eq_resp
+    end else if (NumNarrowRemoteReqPortsPerTile == NumNarrowRemoteRespPortsPerTile) begin: gen_superbank_resp_ini_addr_req_eq_resp
       always_comb begin
         superbank_resp_ini_addr[b] = '0;
         superbank_resp_ini_addr[b] = bank_resp_ini_addr[b];
@@ -445,8 +447,8 @@ module mempool_tile
     end
     else begin: gen_superbank_resp_ini_addr_req_lt_resp
       localparam int unsigned bank_resp_payload_width = $bits(tcdm_slave_resp_t);
-      localparam int unsigned hash_width = $clog2(NumRemoteRespPortsPerTile - 1) + 2;
-      localparam int unsigned hash_binning_step = (1 << hash_width) / (NumRemoteRespPortsPerTile - 1);
+      localparam int unsigned hash_width = $clog2(NumNarrowRemoteRespPortsPerTile - 1) + 2;
+      localparam int unsigned hash_binning_step = (1 << hash_width) / (NumNarrowRemoteRespPortsPerTile - 1);
       logic [bank_resp_payload_width-1:0] bank_resp_payload_raw;
       logic [hash_width-1:0] hash_src0, hash_src1, hash;
       assign bank_resp_payload_raw = bank_resp_payload[b];
@@ -474,7 +476,7 @@ module mempool_tile
         superbank_resp_ini_addr[b] = bank_resp_ini_addr[b];
         if(bank_resp_ini_addr[b] > NumLocalPorts) begin
           superbank_resp_ini_addr[b] = NumLocalPorts + 1 + 0;
-          for (int i = 1; i < (NumRemoteRespPortsPerTile-1); i++) begin
+          for (int i = 1; i < (NumNarrowRemoteRespPortsPerTile-1); i++) begin
             if (hash >= i * hash_binning_step) begin
               superbank_resp_ini_addr[b] = NumLocalPorts + 1 + i;
             end
@@ -636,22 +638,37 @@ module mempool_tile
 
   // These are required to break dependencies between request and response, establishing a correct
   // valid/ready handshake.
-  tcdm_master_req_t  [NumRemoteReqPortsPerTile-1:0] prereg_tcdm_master_req;
-  logic              [NumRemoteReqPortsPerTile-1:0] prereg_tcdm_master_req_valid;
-  logic              [NumRemoteReqPortsPerTile-1:0] prereg_tcdm_master_req_ready;
-  tcdm_slave_req_t   [NumRemoteReqPortsPerTile-1:0] postreg_tcdm_slave_req;
-  logic              [NumRemoteReqPortsPerTile-1:0] postreg_tcdm_slave_req_valid;
-  logic              [NumRemoteReqPortsPerTile-1:0] postreg_tcdm_slave_req_ready;
-  tcdm_slave_resp_t  [NumRemoteRespPortsPerTile-1:0] prereg_tcdm_slave_resp;
-  logic              [NumRemoteRespPortsPerTile-1:0] prereg_tcdm_slave_resp_valid;
-  logic              [NumRemoteRespPortsPerTile-1:0] prereg_tcdm_slave_resp_ready;
-  tcdm_master_resp_t [NumRemoteRespPortsPerTile-1:0] postreg_tcdm_master_resp;
-  tile_core_id_t     [NumRemoteRespPortsPerTile-1:0] postreg_tcdm_master_resp_ini_sel;
-  logic              [NumRemoteRespPortsPerTile-1:0] postreg_tcdm_master_resp_valid;
-  logic              [NumRemoteRespPortsPerTile-1:0] postreg_tcdm_master_resp_ready;
+  tcdm_master_req_t  [NumNarrowRemoteReqPortsPerTile-1:0] prereg_tcdm_master_req;
+  logic              [NumNarrowRemoteReqPortsPerTile-1:0] prereg_tcdm_master_req_valid;
+  logic              [NumNarrowRemoteReqPortsPerTile-1:0] prereg_tcdm_master_req_ready;
+  tcdm_slave_req_t   [NumNarrowRemoteReqPortsPerTile-1:0] postreg_tcdm_slave_req;
+  logic              [NumNarrowRemoteReqPortsPerTile-1:0] postreg_tcdm_slave_req_valid;
+  logic              [NumNarrowRemoteReqPortsPerTile-1:0] postreg_tcdm_slave_req_ready;
+  tcdm_slave_resp_t  [NumNarrowRemoteRespPortsPerTile-1:0] prereg_tcdm_slave_resp;
+  logic              [NumNarrowRemoteRespPortsPerTile-1:0] prereg_tcdm_slave_resp_valid;
+  logic              [NumNarrowRemoteRespPortsPerTile-1:0] prereg_tcdm_slave_resp_ready;
+  tcdm_master_resp_t [NumNarrowRemoteRespPortsPerTile-1:0] postreg_tcdm_master_resp;
+  tile_core_id_t     [NumNarrowRemoteRespPortsPerTile-1:0] postreg_tcdm_master_resp_ini_sel;
+  logic              [NumNarrowRemoteRespPortsPerTile-1:0] postreg_tcdm_master_resp_valid;
+  logic              [NumNarrowRemoteRespPortsPerTile-1:0] postreg_tcdm_master_resp_ready;
+
+  `ifdef USE_WIDE_TCDM_PLANE
+  tcdm_wide_master_req_t [NumWideRemoteReqPortsPerTile-1:0] prereg_tcdm_wide_master_req;
+  logic [NumWideRemoteReqPortsPerTile-1:0] prereg_tcdm_wide_master_req_valid;
+  logic [NumWideRemoteReqPortsPerTile-1:0] prereg_tcdm_wide_master_req_ready;
+  tcdm_wide_slave_req_t [NumWideRemoteReqPortsPerTile-1:0] postreg_tcdm_wide_slave_req;
+  logic [NumWideRemoteReqPortsPerTile-1:0] postreg_tcdm_wide_slave_req_valid;
+  logic [NumWideRemoteReqPortsPerTile-1:0] postreg_tcdm_wide_slave_req_ready;
+  tcdm_wide_slave_resp_t [NumWideRemoteRespPortsPerTile-1:0] prereg_tcdm_wide_slave_resp;
+  logic [NumWideRemoteRespPortsPerTile-1:0] prereg_tcdm_wide_slave_resp_valid;
+  logic [NumWideRemoteRespPortsPerTile-1:0] prereg_tcdm_wide_slave_resp_ready;
+  tcdm_wide_master_resp_t [NumWideRemoteRespPortsPerTile-1:0] postreg_tcdm_wide_master_resp;
+  logic [NumWideRemoteRespPortsPerTile-1:0] postreg_tcdm_wide_master_resp_valid;
+  logic [NumWideRemoteRespPortsPerTile-1:0] postreg_tcdm_wide_master_resp_ready;
+  `endif
 
   // Break paths between request and response with registers
-  for (genvar h = 0; unsigned'(h) < NumRemoteReqPortsPerTile; h++) begin: gen_tcdm_registers_req
+  for (genvar h = 0; unsigned'(h) < NumNarrowRemoteReqPortsPerTile; h++) begin: gen_tcdm_registers_req
     spill_register #(
       .T(tcdm_master_req_t)
     ) i_tcdm_master_req_register (
@@ -681,7 +698,7 @@ module mempool_tile
     );
   end: gen_tcdm_registers_req
 
-  for (genvar h = 0; unsigned'(h) < NumRemoteRespPortsPerTile; h++) begin: gen_tcdm_registers_resp
+  for (genvar h = 0; unsigned'(h) < NumNarrowRemoteRespPortsPerTile; h++) begin: gen_tcdm_registers_resp
     fall_through_register #(
       .T(tcdm_master_resp_t)
     ) i_tcdm_master_resp_register (
@@ -714,6 +731,70 @@ module mempool_tile
     );
   end: gen_tcdm_registers_resp
 
+  `ifdef USE_WIDE_TCDM_PLANE
+  for (genvar h = 0; unsigned'(h) < NumWideRemoteReqPortsPerTile; h++) begin:
+      gen_tcdm_wide_registers_req
+    spill_register #(
+      .T(tcdm_wide_master_req_t)
+    ) i_tcdm_wide_master_req_register (
+      .clk_i  (clk_i                               ),
+      .rst_ni (rst_ni                              ),
+      .data_i (prereg_tcdm_wide_master_req[h]      ),
+      .valid_i(prereg_tcdm_wide_master_req_valid[h]),
+      .ready_o(prereg_tcdm_wide_master_req_ready[h]),
+      .data_o (tcdm_wide_master_req_o[h]           ),
+      .valid_o(tcdm_wide_master_req_valid_o[h]     ),
+      .ready_i(tcdm_wide_master_req_ready_i[h]     )
+    );
+
+    fall_through_register #(
+      .T(tcdm_wide_slave_req_t)
+    ) i_tcdm_wide_slave_req_register (
+      .clk_i     (clk_i                               ),
+      .rst_ni    (rst_ni                              ),
+      .clr_i     (1'b0                                ),
+      .testmode_i(1'b0                                ),
+      .data_i    (tcdm_wide_slave_req_i[h]            ),
+      .valid_i   (tcdm_wide_slave_req_valid_i[h]      ),
+      .ready_o   (tcdm_wide_slave_req_ready_o[h]      ),
+      .data_o    (postreg_tcdm_wide_slave_req[h]      ),
+      .valid_o   (postreg_tcdm_wide_slave_req_valid[h]),
+      .ready_i   (postreg_tcdm_wide_slave_req_ready[h])
+    );
+  end: gen_tcdm_wide_registers_req
+
+  for (genvar h = 0; unsigned'(h) < NumWideRemoteRespPortsPerTile; h++) begin:
+      gen_tcdm_wide_registers_resp
+    fall_through_register #(
+      .T(tcdm_wide_master_resp_t)
+    ) i_tcdm_wide_master_resp_register (
+      .clk_i     (clk_i                                ),
+      .rst_ni    (rst_ni                               ),
+      .clr_i     (1'b0                                 ),
+      .testmode_i(1'b0                                 ),
+      .data_i    (tcdm_wide_master_resp_i[h]           ),
+      .valid_i   (tcdm_wide_master_resp_valid_i[h]     ),
+      .ready_o   (tcdm_wide_master_resp_ready_o[h]     ),
+      .data_o    (postreg_tcdm_wide_master_resp[h]     ),
+      .valid_o   (postreg_tcdm_wide_master_resp_valid[h]),
+      .ready_i   (postreg_tcdm_wide_master_resp_ready[h])
+    );
+
+    spill_register #(
+      .T(tcdm_wide_slave_resp_t)
+    ) i_tcdm_wide_slave_resp_register (
+      .clk_i  (clk_i                                ),
+      .rst_ni (rst_ni                               ),
+      .data_i (prereg_tcdm_wide_slave_resp[h]       ),
+      .valid_i(prereg_tcdm_wide_slave_resp_valid[h] ),
+      .ready_o(prereg_tcdm_wide_slave_resp_ready[h] ),
+      .data_o (tcdm_wide_slave_resp_o[h]            ),
+      .valid_o(tcdm_wide_slave_resp_valid_o[h]      ),
+      .ready_i(tcdm_wide_slave_resp_ready_i[h]      )
+    );
+  end: gen_tcdm_wide_registers_resp
+  `endif
+
   /****************************
    *   Remote Interconnects   *
    ****************************/
@@ -738,7 +819,7 @@ module mempool_tile
 
   stream_xbar #(
     .NumInp   (NumLocalPorts                 ), // cores + RedMulE clients
-    .NumOut   (NumRemoteReqPortsPerTile      ),
+    .NumOut   (NumNarrowRemoteReqPortsPerTile      ),
     .payload_t(tcdm_master_req_t             ),
     .AxiVldRdy(0                             ), // the sel_i can be changed before the hsk happen, as the priority of cores can be different
     .LockIn   (0                             )
@@ -762,14 +843,14 @@ module mempool_tile
 
   // Slice sel per slot: resp_ini_sel is cluster-width but sel_i is
   // idx_width(NumLocalPorts); a flat connect misroutes (trips invalid_resp_id).
-  logic [NumRemoteRespPortsPerTile-1:0][idx_width(NumLocalPorts)-1:0] remote_resp_sel;
-  for (genvar h = 0; h < NumRemoteRespPortsPerTile; h++) begin: gen_remote_resp_sel
+  logic [NumNarrowRemoteRespPortsPerTile-1:0][idx_width(NumLocalPorts)-1:0] remote_resp_sel;
+  for (genvar h = 0; h < NumNarrowRemoteRespPortsPerTile; h++) begin: gen_remote_resp_sel
     assign remote_resp_sel[h] =
       postreg_tcdm_master_resp_ini_sel[h][idx_width(NumLocalPorts)-1:0];
   end
 
   stream_xbar #(
-    .NumInp   (NumRemoteRespPortsPerTile     ),
+    .NumInp   (NumNarrowRemoteRespPortsPerTile     ),
     .NumOut   (NumLocalPorts                 ), // cores + RedMulE clients
     .payload_t(tcdm_master_resp_t            )
   ) i_remote_resp_interco (
@@ -803,123 +884,101 @@ module mempool_tile
   addr_t            [NumLocalPorts-1:0] local_req_interco_addr_int;
 
   // ------------------------------------------------------------------------
-  // B2 wide landing: a burst flit arriving from the mesh becomes the engine wide
-  // access; the engine wide response becomes a burst-resp flit, self-routed back
-  // by the carried source routing (ini_addr/src_group_id) — mirrors the narrow
-  // slave path. Port 0 only (one burst channel today).
+  // B2 wide landing: a raw wide slave request becomes an engine access, and the
+  // engine response returns through the raw slave response. Carried source routing
+  // (ini_addr/src_group_id) mirrors the narrow slave path.
   // ------------------------------------------------------------------------
   `ifdef USE_WIDE_TCDM_PLANE
-  // The bank interco holds ONE engine superbank. It serves two request sources:
-  //   (a) remote wide flits landing here          (tcdm_burst_slave_* -> wide_eng_land_*)
-  //   (b) this tile's own RedMulE local accesses  (rm_local_*, driven by gen_redmule)
-  // A 2:1 arbiter merges them onto the engine port (eng_port_*). Each access carries
-  // its source routing (ini_addr/src_group_id), so the response self-routes: the demux
-  // returns own-tile responses to RedMulE and everything else onto the wide net.
-  tcdm_wide_eng_req_t  wide_eng_land_req;
-  logic                wide_eng_land_req_valid, wide_eng_land_req_ready;
-  tcdm_wide_eng_resp_t wide_eng_land_resp;
-  logic                wide_eng_land_resp_valid, wide_eng_land_resp_ready;
+  // Keep own-tile, same-group, and inter-group paths independent through
+  // superbank selection. The first ingress is the own-tile RedMulE bypass;
+  // every tile slave port occupies one additional bank-interconnect ingress.
+  localparam int unsigned NumWideLocalEngPorts = 1;
+  localparam int unsigned NumWideEngIngress =
+      NumWideLocalEngPorts + NumWideRemoteReqPortsPerTile;
+  tcdm_wide_eng_req_t  [NumWideEngIngress-1:0] tcdm_wide_eng_req;
+  logic                [NumWideEngIngress-1:0] tcdm_wide_eng_req_valid;
+  logic                [NumWideEngIngress-1:0] tcdm_wide_eng_req_ready;
+  tcdm_wide_eng_resp_t [NumWideEngIngress-1:0] tcdm_wide_eng_resp;
+  logic                [NumWideEngIngress-1:0] tcdm_wide_eng_resp_valid;
+  logic                [NumWideEngIngress-1:0] tcdm_wide_eng_resp_ready;
 
-  tcdm_wide_eng_req_t  rm_local_req;
-  logic                rm_local_req_valid, rm_local_req_ready;
-  tcdm_wide_eng_resp_t rm_local_resp;
-  logic                rm_local_resp_valid, rm_local_resp_ready;
+  tcdm_wide_eng_req_t  tcdm_wide_eng_req_from_rm;
+  logic                tcdm_wide_eng_req_from_rm_valid;
+  logic                tcdm_wide_eng_req_from_rm_ready;
+  tcdm_wide_eng_resp_t tcdm_wide_eng_resp_to_rm;
+  logic                tcdm_wide_eng_resp_to_rm_valid;
+  logic                tcdm_wide_eng_resp_to_rm_ready;
 
-  tcdm_wide_eng_req_t  eng_port_req;
-  logic                eng_port_req_valid, eng_port_req_ready;
-  tcdm_wide_eng_resp_t eng_port_resp;
-  logic                eng_port_resp_valid, eng_port_resp_ready;
-
-  // Wide RedMulE response element ({local engine, remote master} -> HCI resp).
-  // Declared at MODULE scope: VCS rejects a generate-local type used as a module
-  // parameter (rr_arb_tree .DataType) — "complex types declared inside generate
-  // block can't be referred from outside" (Questa vopt tolerates it, VCS does not).
+  // Wide RedMulE shim payloads. Declared at module scope because some simulators
+  // reject generate-local types used as module type parameters.
   typedef struct packed {
-    logic [WideTcdmDataWidth-1:0] data;
-    meta_id_t                     meta_id;
-  } rm_wresp_t;
+    addr_t          addr;
+    meta_id_t       id;
+    amo_t           amo;
+    logic           write;
+    wide_tcdm_data_t data;
+    wide_eng_strb_t strb;
+  } tcdm_wide_rm_req_t;
 
-  // This tile's within-group id: the self-routing tag for local RedMulE accesses
-  // (matches hdr.src_tile_id carried by remote landings).
-  tile_group_id_t tile_wg_id;
-  assign tile_wg_id = tile_group_id_t'(tile_id_i);
+  typedef struct packed {
+    wide_tcdm_data_t data;
+    meta_id_t        id;
+    logic            write;
+    logic            error;
+  } tcdm_wide_rm_resp_t;
 
-  localparam int unsigned BurstTileOff = (NumTilesPerGroup == 1) ? 0 : idx_width(NumTilesPerGroup);
+  // This tile's within-group ID, carried with requests so responses self-route.
+  tile_group_id_t tcdm_wide_tile_id;
+  assign tcdm_wide_tile_id = tile_group_id_t'(tile_id_i);
 
-  // (a) Landing request: a remote wide flit -> engine wide req.
-  always_comb begin
-    wide_eng_land_req = '{
+  localparam int unsigned WideTileOff =
+      (NumTilesPerGroup == 1) ? 0 : idx_width(NumTilesPerGroup);
+
+  assign tcdm_wide_eng_req[0] = tcdm_wide_eng_req_from_rm;
+  assign tcdm_wide_eng_req_valid[0] = tcdm_wide_eng_req_from_rm_valid;
+  assign tcdm_wide_eng_req_from_rm_ready = tcdm_wide_eng_req_ready[0];
+  assign tcdm_wide_eng_resp_to_rm = tcdm_wide_eng_resp[0];
+  assign tcdm_wide_eng_resp_to_rm_valid = tcdm_wide_eng_resp_valid[0];
+  assign tcdm_wide_eng_resp_ready[0] = tcdm_wide_eng_resp_to_rm_ready;
+
+  for (genvar p = 0; p < NumWideRemoteReqPortsPerTile; p++) begin :
+      gen_wide_group_ingress
+    assign tcdm_wide_eng_req[p+NumWideLocalEngPorts] = '{
       wdata: '{
-        meta_id: tcdm_burst_slave_req_i[0].hdr.meta_id,
-        core_id: tcdm_burst_slave_req_i[0].hdr.core_id,
-        amo:     tcdm_burst_slave_req_i[0].payload.amo,
-        data:    tcdm_burst_slave_req_i[0].payload.data
+        meta_id: postreg_tcdm_wide_slave_req[p].wdata.meta_id,
+        core_id: postreg_tcdm_wide_slave_req[p].wdata.core_id,
+        amo:     postreg_tcdm_wide_slave_req[p].wdata.amo,
+        data:    postreg_tcdm_wide_slave_req[p].wdata.data
       },
-      wen:          tcdm_burst_slave_req_i[0].payload.wen,
-      be:           tcdm_burst_slave_req_i[0].payload.be,
-      tgt_addr:     tcdm_burst_slave_req_i[0].hdr.tgt_addr[BurstTileOff +: (idx_width(NumBanksPerTile) + TCDMAddrMemWidth)],
-      ini_addr:     tcdm_burst_slave_req_i[0].hdr.src_tile_id,
-      src_group_id: group_id_t'({tcdm_burst_slave_req_i[0].hdr.src_id.x, tcdm_burst_slave_req_i[0].hdr.src_id.y})
+      wen:          postreg_tcdm_wide_slave_req[p].wen,
+      be:           postreg_tcdm_wide_slave_req[p].be,
+      tgt_addr:     postreg_tcdm_wide_slave_req[p].tgt_addr[
+                        WideTileOff +:
+                        idx_width(NumBanksPerTile) + TCDMAddrMemWidth],
+      ini_addr:     postreg_tcdm_wide_slave_req[p].ini_addr,
+      src_group_id: postreg_tcdm_wide_slave_req[p].src_group_id
     };
+    assign tcdm_wide_eng_req_valid[p+NumWideLocalEngPorts] =
+        postreg_tcdm_wide_slave_req_valid[p];
+    assign postreg_tcdm_wide_slave_req_ready[p] =
+        tcdm_wide_eng_req_ready[p+NumWideLocalEngPorts];
+    assign prereg_tcdm_wide_slave_resp[p] =
+        tcdm_wide_eng_resp[p+NumWideLocalEngPorts];
+    assign prereg_tcdm_wide_slave_resp_valid[p] =
+        tcdm_wide_eng_resp_valid[p+NumWideLocalEngPorts];
+    assign tcdm_wide_eng_resp_ready[p+NumWideLocalEngPorts] =
+        prereg_tcdm_wide_slave_resp_ready[p];
   end
-  assign wide_eng_land_req_valid = tcdm_burst_slave_req_valid_i[0];
-
-  // Engine-port request arbiter: [0] = landing, [1] = local RedMulE.
-  rr_arb_tree #(
-    .NumIn(2), .DataType(tcdm_wide_eng_req_t), .AxiVldRdy(1'b1), .LockIn(1'b1)
-  ) i_eng_req_arb (
-    .clk_i    (clk_i  ),
-    .rst_ni   (rst_ni ),
-    .flush_i  (1'b0   ),
-    .rr_i     ('0     ),
-    .req_i    ({rm_local_req_valid, wide_eng_land_req_valid}),
-    .gnt_o    ({rm_local_req_ready, wide_eng_land_req_ready}),
-    .data_i   ({rm_local_req,       wide_eng_land_req      }),
-    .req_o    (eng_port_req_valid ),
-    .gnt_i    (eng_port_req_ready ),
-    .data_o   (eng_port_req       ),
-    .idx_o    (/* unused */       )
-  );
-
-  // Engine-port response self-routing demux: own tile+group -> RedMulE, else landing.
-  logic eng_resp_is_local;
-  assign eng_resp_is_local = (eng_port_resp.src_group_id == group_id)
-                           & (eng_port_resp.ini_addr    == tile_wg_id);
-  assign rm_local_resp            = eng_port_resp;
-  assign wide_eng_land_resp       = eng_port_resp;
-  assign rm_local_resp_valid      = eng_port_resp_valid &  eng_resp_is_local;
-  assign wide_eng_land_resp_valid = eng_port_resp_valid & ~eng_resp_is_local;
-  assign eng_port_resp_ready      = eng_resp_is_local ? rm_local_resp_ready
-                                                      : wide_eng_land_resp_ready;
-
-  // (a) Landing response: self-routed back onto the wide net toward the source.
-  always_comb begin
-    tcdm_burst_slave_req_ready_o  = '0;
-    tcdm_burst_slave_resp_o       = '0;
-    tcdm_burst_slave_resp_valid_o = '0;
-    tcdm_burst_slave_req_ready_o[0]  = wide_eng_land_req_ready;
-    tcdm_burst_slave_resp_o[0]       = '{
-      payload: '{ data: wide_eng_land_resp.rdata.data },
-      hdr: '{
-        meta_id:       wide_eng_land_resp.rdata.meta_id,
-        core_id:       wide_eng_land_resp.rdata.core_id,
-        tile_id:       wide_eng_land_resp.ini_addr,
-        src_id:        group_xy_id_t'({group_id, 1'b0}),
-        dst_id:        group_xy_id_t'({wide_eng_land_resp.src_group_id, 1'b0}),
-        last:          1'b1,
-        collective_op: 1'b0
-      }
-    };
-    tcdm_burst_slave_resp_valid_o[0] = wide_eng_land_resp_valid;
-  end
-  assign wide_eng_land_resp_ready = tcdm_burst_slave_resp_ready_i[0];
   `endif
 
   // Bank-side TCDM interconnect: narrow req/resp routing, wide superbank
   // demux/mux, per-bank wide-narrow arbitration, and within-superbank bank-id remap.
   mempool_tcdm_bank_interco #(
-    .NumNarrowReq   (NumLocalPorts + NumRemoteReqPortsPerTile  ),
-    .NumNarrowResp  (NumLocalPorts + NumRemoteRespPortsPerTile ),
+    .NumNarrowReq   (NumLocalPorts + NumNarrowRemoteReqPortsPerTile  ),
+    .NumNarrowResp  (NumLocalPorts + NumNarrowRemoteRespPortsPerTile ),
+    `ifdef USE_WIDE_TCDM_PLANE
+    .NumWideEngPorts(NumWideEngIngress),
+    `endif
     .NumBanksPerTile(NumBanksPerTile  ),
     .NumSuperbanks  (NumSuperbanks    ),
     .NarrowDataWidth(DataWidth        ),
@@ -957,13 +1016,13 @@ module mempool_tile
     .slv_wide_resp_valid_o  (tcdm_dma_resp_valid_o),
     .slv_wide_resp_ready_i  (tcdm_dma_resp_ready_i),
     `ifdef USE_WIDE_TCDM_PLANE
-    // B2: engine wide port fed by the wide landing (a burst flit from the mesh).
-    .slv_wide_eng_req_i        (eng_port_req            ),
-    .slv_wide_eng_req_valid_i  (eng_port_req_valid      ),
-    .slv_wide_eng_req_ready_o  (eng_port_req_ready      ),
-    .slv_wide_eng_resp_o       (eng_port_resp           ),
-    .slv_wide_eng_resp_valid_o (eng_port_resp_valid     ),
-    .slv_wide_eng_resp_ready_i (eng_port_resp_ready     ),
+    // B2: engine wide port fed by the raw wide landing path.
+    .slv_wide_eng_req_i        (tcdm_wide_eng_req            ),
+    .slv_wide_eng_req_valid_i  (tcdm_wide_eng_req_valid      ),
+    .slv_wide_eng_req_ready_o  (tcdm_wide_eng_req_ready      ),
+    .slv_wide_eng_resp_o       (tcdm_wide_eng_resp           ),
+    .slv_wide_eng_resp_valid_o (tcdm_wide_eng_resp_valid     ),
+    .slv_wide_eng_resp_ready_i (tcdm_wide_eng_resp_ready     ),
     `endif
     .mst_req_o              (bank_req_payload    ),
     .mst_req_valid_o        (bank_req_valid      ),
@@ -986,11 +1045,11 @@ module mempool_tile
    // undriven bleeds X into the remote interco valid/sel and deadlocks.
    mempool_tile_remote_req_router #(
     .NumCoresPerTile                      (NumLocalPorts                       ),
-    .NumRemoteReqPortsPerTile             (NumRemoteReqPortsPerTile            ),
-    .NumRdRemoteReqPortsPerTile           (NumRdRemoteReqPortsPerTile          ),
-    .NumWrRemoteReqPortsPerTile           (NumWrRemoteReqPortsPerTile          ),
-    .NumWideRemoteReqPortsPerTile         (NumWideRemoteReqPortsPerTile        ),
-    .NumRdWrRemoteReqPortsPerTile         (NumRdWrRemoteReqPortsPerTile        ),
+    .NumNarrowRemoteReqPortsPerTile             (NumNarrowRemoteReqPortsPerTile            ),
+    .NumNarrowRoReqPortsPerTile           (NumNarrowRoReqPortsPerTile          ),
+    .NumNarrowWoReqPortsPerTile           (NumNarrowWoReqPortsPerTile          ),
+    .NumNarrowPayloadReqPortsPerTile         (NumNarrowPayloadReqPortsPerTile        ),
+    .NumNarrowRwReqPortsPerTile         (NumNarrowRwReqPortsPerTile        ),
     .NumBanksPerTile                      (NumBanksPerTile                     ),
     .NumTilesPerGroup                     (NumTilesPerGroup                    ),
     .NumGroups                            (NumGroups                           ),
@@ -1043,6 +1102,22 @@ module mempool_tile
     '{slave_idx: TCDM_LOCAL,
       mask     : TCDMMask | ({idx_width(NumTiles){1'b1}} << (ByteOffset + $clog2(NumBanksPerTile))),
       value    : TCDMBaseAddr | (tile_id_i << (ByteOffset + $clog2(NumBanksPerTile)))
+    }
+  };
+
+  // TCDM-only clients use the same local/external address routing without
+  // instantiating the scalar SoC response-ID path.
+  address_map_t [1:0] tcdm_mask_map;
+  assign tcdm_mask_map = '{
+    '{slave_idx: TCDM_EXTERNAL,
+      mask     : TCDMMask,
+      value    : TCDMBaseAddr
+    },
+    '{slave_idx: TCDM_LOCAL,
+      mask     : TCDMMask | ({idx_width(NumTiles){1'b1}} <<
+                 (ByteOffset + $clog2(NumBanksPerTile))),
+      value    : TCDMBaseAddr |
+                 (tile_id_i << (ByteOffset + $clog2(NumBanksPerTile)))
     }
   };
 
@@ -1377,18 +1452,18 @@ module mempool_tile
     assign wake_up = wake_up_q | {{(NumCoresPerTile-1){1'b0}}, redmule_evt[0]};
 
     // ----------------------------------------------------------------------
-    // WP2 wide source path: issue each RedMulE HCI beat as ONE wide access.
-    //   local (own-tile superbank) -> bank-interco engine port (rm_local_*)
-    //   remote                     -> one wide flit on the burst master port
-    // The response self-routes (each access carries ini_addr/src_group_id) and
-    // RedMulE's hci_core_rob reorders by meta_id, so out-of-order is fine. No
-    // 16x32b unpack, no transactions_table — the superbank gathers per request.
+    // WP2 wide source path: issue each RedMulE HCI beat as one raw wide access.
+    // Own-tile accesses bypass locally; mempool_group owns the same-group/remote
+    // split. The response self-routes (each access carries ini_addr/src_group_id),
+    // and RedMulE's hci_core_rob reorders by meta_id, so out-of-order is fine.
+    // No 16x32b unpack,
+    // no transactions_table — the superbank gathers per request.
     // ----------------------------------------------------------------------
     `ifdef USE_WIDE_TCDM_PLANE
     localparam int unsigned RobW = idx_width(RMOutstandingTransactions);
 
     // Scramble the wide base address exactly like the per-core/RedMulE scrambler.
-    addr_t rm_wide_scrambled;
+    addr_t tcdm_wide_rm_scrambled;
     mempool_addr_scrambler #(
       .AddrWidth               (AddrWidth        ),
       .ByteOffset              (ByteOffset       ),
@@ -1403,114 +1478,337 @@ module mempool_tile
       .EnableTileIdRemap       (TileIdRemap      )
     ) i_rm_wide_scrambler (
       .address_i (tcdm.req_add     ),
-      .address_o (rm_wide_scrambled)
+      .address_o (tcdm_wide_rm_scrambled)
     );
 
-    // Local = own tile (mask_map idx-1 test); target group for remote routing.
-    logic rm_wide_is_local;
-    assign rm_wide_is_local =
-        rm_wide_scrambled[ByteOffset + $clog2(NumBanksPerTile) +: idx_width(NumTiles)] == tile_id_i;
-    group_id_t rm_wide_tgt_group;
-    assign rm_wide_tgt_group =
-        rm_wide_scrambled[ByteOffset + $clog2(NumBanksPerTile) + $clog2(NumTilesPerGroup) +: $clog2(NumGroups)];
+    // Same-tile requests bypass the tile ports. The shared shim sees only
+    // other-tile traffic and separates the same-group and inter-group classes.
+    typedef enum int unsigned {
+      TCDM_WIDE_EXTERNAL = 0, TCDM_WIDE_INTRA
+    } tcdm_wide_addr_map_slave_t;
 
-    // Remote flit target address == narrow remote_req_tgt_addr layout {row,bank,tile}.
-    tcdm_addr_t rm_wide_tgt_addr;
-    if (NumTilesPerGroup == 1) begin : gen_rm_wide_tgt_addr
-      assign rm_wide_tgt_addr = tcdm_addr_t'({
-          rm_wide_scrambled[ByteOffset + idx_width(NumBanksPerTile) + $clog2(NumGroups) +: TCDMAddrMemWidth],
-          rm_wide_scrambled[ByteOffset +: idx_width(NumBanksPerTile)]});
-    end else begin : gen_rm_wide_tgt_addr
-      assign rm_wide_tgt_addr = tcdm_addr_t'({
-          rm_wide_scrambled[ByteOffset + idx_width(NumBanksPerTile) + $clog2(NumTilesPerGroup) + $clog2(NumGroups) +: TCDMAddrMemWidth],
-          rm_wide_scrambled[ByteOffset +: idx_width(NumBanksPerTile)],
-          rm_wide_scrambled[ByteOffset + idx_width(NumBanksPerTile) +: $clog2(NumTilesPerGroup)]});
+    localparam int unsigned NumWideShimPorts = TCDM_WIDE_INTRA + 1;
+    localparam int unsigned NumWideRmRespSources = NumWideLocalEngPorts + 1;
+
+    tcdm_wide_master_req_t tcdm_wide_intra_req_interco;
+    logic                  tcdm_wide_intra_req_interco_valid;
+    logic                  tcdm_wide_intra_req_interco_ready;
+    addr_t                 tcdm_wide_intra_req_interco_addr_int;
+    tcdm_wide_master_resp_t tcdm_wide_intra_resp_interco;
+    logic                   tcdm_wide_intra_resp_interco_valid;
+    logic                   tcdm_wide_intra_resp_interco_ready;
+
+    tcdm_wide_master_req_t tcdm_wide_remote_req_interco;
+    logic                  tcdm_wide_remote_req_interco_valid;
+    logic                  tcdm_wide_remote_req_interco_ready;
+    addr_t                 tcdm_wide_remote_req_interco_addr_int;
+    tcdm_wide_master_resp_t tcdm_wide_remote_resp_interco;
+    logic                   tcdm_wide_remote_resp_interco_valid;
+    logic                   tcdm_wide_remote_resp_interco_ready;
+
+    group_id_t tcdm_wide_remote_tgt_group;
+    logic [idx_width(NumTiles)-1:0] tcdm_wide_intra_tgt_tile;
+    logic [idx_width(NumTiles)-1:0] tcdm_wide_rm_tgt_tile;
+    logic tcdm_wide_rm_own_tile;
+    tile_addr_t tcdm_wide_rm_local_addr;
+    logic tcdm_wide_rm_write;
+    meta_id_t tcdm_wide_rm_meta, tcdm_wide_rm_resp_meta;
+    address_map_t [NumWideShimPorts-1:0] tcdm_wide_mask_map;
+    tcdm_wide_rm_resp_t tcdm_wide_group_resp;
+    logic tcdm_wide_group_resp_out_valid, tcdm_wide_group_resp_out_ready;
+    logic tcdm_wide_group_req_input_ready;
+    logic [idx_width(NumWideIntraGroupPortsPerTile)-1:0] tcdm_wide_intra_req_sel;
+    logic [idx_width(NumWideInterGroupReqPortsPerTile)-1:0]
+        tcdm_wide_remote_req_sel;
+    logic [NumWideRemoteRespPortsPerTile-1:0][idx_width(NumWideShimPorts)-1:0]
+        tcdm_wide_resp_interco_sel;
+    tcdm_wide_rm_resp_t [NumWideRmRespSources-1:0] tcdm_wide_rm_resp_in;
+    logic [NumWideRmRespSources-1:0] tcdm_wide_rm_resp_in_valid;
+    logic [NumWideRmRespSources-1:0] tcdm_wide_rm_resp_in_ready;
+    tcdm_wide_rm_resp_t tcdm_wide_rm_resp;
+
+    if (NumGroups > 1) begin : gen_rm_wide_tgt_group
+      assign tcdm_wide_remote_tgt_group =
+          tcdm_wide_remote_req_interco_addr_int[ByteOffset + $clog2(NumBanksPerTile) +
+          $clog2(NumTilesPerGroup) +: $clog2(NumGroups)];
+    end else begin : gen_rm_wide_tgt_group
+      assign tcdm_wide_remote_tgt_group = '0;
     end
 
-    // Local engine target address {row,bank} (own tile; group/tile field removed).
-    tile_addr_t rm_wide_local_addr;
-    assign rm_wide_local_addr = {
-        rm_wide_scrambled[ByteOffset + idx_width(NumBanksPerTile) + $clog2(NumTiles) +: TCDMAddrMemWidth],
-        rm_wide_scrambled[ByteOffset +: idx_width(NumBanksPerTile)]};
+    assign tcdm_wide_rm_tgt_tile =
+        tcdm_wide_rm_scrambled[ByteOffset + $clog2(NumBanksPerTile) +:
+                               idx_width(NumTiles)];
+    assign tcdm_wide_rm_own_tile = tcdm_wide_rm_tgt_tile == tile_id_i;
+    assign tcdm_wide_intra_tgt_tile =
+        tcdm_wide_intra_req_interco_addr_int[
+            ByteOffset + $clog2(NumBanksPerTile) +: idx_width(NumTiles)];
+
+    // Remote target addresses use the narrow remote_req_tgt_addr layout
+    // {row, bank, tile}.
+    if (NumTilesPerGroup == 1) begin : gen_rm_wide_tgt_addr
+      assign tcdm_wide_intra_req_interco.tgt_addr = tcdm_addr_t'({
+          tcdm_wide_intra_req_interco_addr_int[ByteOffset + idx_width(NumBanksPerTile) +
+          $clog2(NumGroups) +: TCDMAddrMemWidth],
+          tcdm_wide_intra_req_interco_addr_int[
+              ByteOffset +: idx_width(NumBanksPerTile)]});
+      assign tcdm_wide_remote_req_interco.tgt_addr = tcdm_addr_t'({
+          tcdm_wide_remote_req_interco_addr_int[ByteOffset + idx_width(NumBanksPerTile) +
+          $clog2(NumGroups) +: TCDMAddrMemWidth],
+          tcdm_wide_remote_req_interco_addr_int[
+              ByteOffset +: idx_width(NumBanksPerTile)]});
+    end else begin : gen_rm_wide_tgt_addr
+      assign tcdm_wide_intra_req_interco.tgt_addr = tcdm_addr_t'({
+          tcdm_wide_intra_req_interco_addr_int[ByteOffset + idx_width(NumBanksPerTile) +
+          $clog2(NumTilesPerGroup) + $clog2(NumGroups) +: TCDMAddrMemWidth],
+          tcdm_wide_intra_req_interco_addr_int[
+              ByteOffset +: idx_width(NumBanksPerTile)],
+          tcdm_wide_intra_req_interco_addr_int[
+              ByteOffset + idx_width(NumBanksPerTile) +:
+          $clog2(NumTilesPerGroup)]});
+      assign tcdm_wide_remote_req_interco.tgt_addr = tcdm_addr_t'({
+          tcdm_wide_remote_req_interco_addr_int[ByteOffset + idx_width(NumBanksPerTile) +
+          $clog2(NumTilesPerGroup) + $clog2(NumGroups) +: TCDMAddrMemWidth],
+          tcdm_wide_remote_req_interco_addr_int[
+              ByteOffset +: idx_width(NumBanksPerTile)],
+          tcdm_wide_remote_req_interco_addr_int[
+              ByteOffset + idx_width(NumBanksPerTile) +:
+          $clog2(NumTilesPerGroup)]});
+    end
+
+    // Own-tile engine target address {row,bank} (group/tile field removed).
+    assign tcdm_wide_rm_local_addr = {
+        tcdm_wide_rm_scrambled[ByteOffset + idx_width(NumBanksPerTile) +
+        $clog2(NumTiles) +: TCDMAddrMemWidth],
+        tcdm_wide_rm_scrambled[ByteOffset +: idx_width(NumBanksPerTile)]};
 
     // HCI convention: req_wen==1 is a read (write = ~req_wen). Pack the stream id +
     // ROB id into meta_id exactly as the narrow unpack so hci_core_rob still matches.
-    logic     rm_wide_write;
-    meta_id_t rm_wide_meta;
-    assign rm_wide_write                    = ~tcdm.req_wen;
-    assign rm_wide_meta[MetaIdWidth-1:RobW] = tcdm.req_id;
-    assign rm_wide_meta[RobW-1:0]           = tcdm.req_user;
+    assign tcdm_wide_rm_write                    = ~tcdm.req_wen;
+    assign tcdm_wide_rm_meta[MetaIdWidth-1:RobW] = tcdm.req_id;
+    assign tcdm_wide_rm_meta[RobW-1:0]           = tcdm.req_user;
 
-    // Request demux: local -> engine port; remote -> burst master flit.
-    assign rm_local_req = '{
-      wdata: '{ meta_id: rm_wide_meta, core_id: '0, amo: '0, data: tcdm.req_data },
-      wen:          rm_wide_write,
+    if (NumGroups > 1) begin : gen_wide_group_map
+      assign tcdm_wide_mask_map = '{
+        '{slave_idx: TCDM_WIDE_EXTERNAL, mask: TCDMMask, value: TCDMBaseAddr},
+        '{slave_idx: TCDM_WIDE_INTRA,
+          mask: TCDMMask |
+              ({idx_width(NumGroups){1'b1}} <<
+               (ByteOffset + $clog2(NumBanksPerTile) +
+                $clog2(NumTilesPerGroup))),
+          value: TCDMBaseAddr |
+              (group_id << (ByteOffset + $clog2(NumBanksPerTile) +
+                            $clog2(NumTilesPerGroup)))}
+      };
+    end else begin : gen_wide_group_map
+      assign tcdm_wide_mask_map = '{
+        '{slave_idx: TCDM_WIDE_EXTERNAL, mask: TCDMMask, value: TCDMBaseAddr},
+        '{slave_idx: TCDM_WIDE_INTRA, mask: TCDMMask, value: TCDMBaseAddr}
+      };
+    end
+
+    tcdm_shim #(
+      .AddrWidth           (AddrWidth                         ),
+      .DataWidth           (WideTcdmDataWidth                 ),
+      .MaxOutStandingTrans (snitch_pkg::NumIntOutstandingLoads),
+      .NrTCDM              (NumWideShimPorts                  ),
+      .NrSoC               (1                                 ),
+      .EnableSoC           (1'b0                              ),
+      .NumRules            (NumWideShimPorts                  ),
+      .req_t               (tcdm_wide_rm_req_t                ),
+      .resp_t              (tcdm_wide_rm_resp_t               )
+    ) i_tcdm_wide_shim (
+      .clk_i              (clk_i                                                        ),
+      .rst_ni             (rst_ni                                                       ),
+      // {intra, remote}: idx 1 = same-group, idx 0 = inter-group.
+      .tcdm_req_valid_o   ({tcdm_wide_intra_req_interco_valid,
+                            tcdm_wide_remote_req_interco_valid}                         ),
+      .tcdm_req_tgt_addr_o({tcdm_wide_intra_req_interco_addr_int,
+                            tcdm_wide_remote_req_interco_addr_int}                      ),
+      .tcdm_req_wen_o     ({tcdm_wide_intra_req_interco.wen,
+                            tcdm_wide_remote_req_interco.wen}                           ),
+      .tcdm_req_wdata_o   ({tcdm_wide_intra_req_interco.wdata.data,
+                            tcdm_wide_remote_req_interco.wdata.data}                    ),
+      .tcdm_req_amo_o     ({tcdm_wide_intra_req_interco.wdata.amo,
+                            tcdm_wide_remote_req_interco.wdata.amo}                     ),
+      .tcdm_req_id_o      ({tcdm_wide_intra_req_interco.wdata.meta_id,
+                            tcdm_wide_remote_req_interco.wdata.meta_id}                 ),
+      .tcdm_req_be_o      ({tcdm_wide_intra_req_interco.be,
+                            tcdm_wide_remote_req_interco.be}                            ),
+      .tcdm_req_ready_i   ({tcdm_wide_intra_req_interco_ready,
+                            tcdm_wide_remote_req_interco_ready}                         ),
+      .tcdm_resp_valid_i  ({tcdm_wide_intra_resp_interco_valid,
+                            tcdm_wide_remote_resp_interco_valid}                        ),
+      .tcdm_resp_ready_o  ({tcdm_wide_intra_resp_interco_ready,
+                            tcdm_wide_remote_resp_interco_ready}                        ),
+      .tcdm_resp_rdata_i  ({tcdm_wide_intra_resp_interco.rdata.data,
+                            tcdm_wide_remote_resp_interco.rdata.data}                   ),
+      .tcdm_resp_id_i     ({tcdm_wide_intra_resp_interco.rdata.meta_id,
+                            tcdm_wide_remote_resp_interco.rdata.meta_id}                ),
+      // to SoC
+      .soc_qaddr_o        (/* unused */                                                 ),
+      .soc_qwrite_o       (/* unused */                                                 ),
+      .soc_qamo_o         (/* unused */                                                 ),
+      .soc_qdata_o        (/* unused */                                                 ),
+      .soc_qstrb_o        (/* unused */                                                 ),
+      .soc_qvalid_o       (/* unused */                                                 ),
+      .soc_qready_i       ('0                                                           ),
+      .soc_pdata_i        ('0                                                           ),
+      .soc_pwrite_i       ('0                                                           ),
+      .soc_perror_i       ('0                                                           ),
+      .soc_pvalid_i       ('0                                                           ),
+      .soc_pready_o       (/* unused */                                                 ),
+      // from RedMulE
+      .data_qaddr_i       (tcdm_wide_rm_scrambled                                      ),
+      .data_qwrite_i      (tcdm_wide_rm_write                                          ),
+      .data_qamo_i        ('0                                                           ),
+      .data_qdata_i       (tcdm.req_data                                               ),
+      .data_qstrb_i       (tcdm.req_be                                                 ),
+      .data_qid_i         (tcdm_wide_rm_meta                                           ),
+      .data_qvalid_i      (tcdm.req_valid & ~tcdm_wide_rm_own_tile                     ),
+      .data_qready_o      (tcdm_wide_group_req_input_ready                             ),
+      .data_pdata_o       (tcdm_wide_group_resp.data                                   ),
+      .data_perror_o      (tcdm_wide_group_resp.error                                  ),
+      .data_pid_o         (tcdm_wide_group_resp.id                                     ),
+      .data_pvalid_o      (tcdm_wide_group_resp_out_valid                              ),
+      .data_pready_i      (tcdm_wide_group_resp_out_ready                              ),
+      .address_map_i      (tcdm_wide_mask_map                                          )
+    );
+    assign tcdm_wide_group_resp.write = 1'b0;
+
+    assign tcdm_wide_eng_req_from_rm = '{
+      wdata: '{
+        meta_id: tcdm_wide_rm_meta,
+        core_id: '0,
+        amo:     '0,
+        data:    tcdm.req_data
+      },
+      wen:          tcdm_wide_rm_write,
       be:           tcdm.req_be,
-      tgt_addr:     rm_wide_local_addr,
-      ini_addr:     tile_wg_id,
+      tgt_addr:     tcdm_wide_rm_local_addr,
+      ini_addr:     tcdm_wide_tile_id,
       src_group_id: group_id
     };
-    assign rm_local_req_valid = tcdm.req_valid & rm_wide_is_local;
+    assign tcdm_wide_eng_req_from_rm_valid =
+        tcdm.req_valid & tcdm_wide_rm_own_tile;
 
-    always_comb begin
-      tcdm_burst_master_req_o          = '0;
-      tcdm_burst_master_req_valid_o    = '0;
-      tcdm_burst_master_req_o[0]       = '{
-        payload: '{ amo: '0, wen: rm_wide_write, be: tcdm.req_be, data: tcdm.req_data },
-        hdr: '{
-          meta_id:       rm_wide_meta,
-          core_id:       '0,
-          src_tile_id:   tile_wg_id,
-          src_id:        group_xy_id_t'({group_id, 1'b0}),
-          dst_id:        group_xy_id_t'({rm_wide_tgt_group, 1'b0}),
-          tgt_addr:      rm_wide_tgt_addr,
-          last:          1'b1,
-          collective_op: 1'b0
-        }
-      };
-      tcdm_burst_master_req_valid_o[0] = tcdm.req_valid & ~rm_wide_is_local;
+    assign tcdm_wide_intra_req_interco.wdata.core_id = '0;
+    assign tcdm_wide_intra_req_interco.tgt_group_id  = group_id;
+    assign tcdm_wide_intra_req_interco.src_tile_id   = tcdm_wide_tile_id;
+    assign tcdm_wide_remote_req_interco.wdata.core_id = '0;
+    assign tcdm_wide_remote_req_interco.tgt_group_id  = tcdm_wide_remote_tgt_group;
+    assign tcdm_wide_remote_req_interco.src_tile_id   = tcdm_wide_tile_id;
+
+    assign tcdm_wide_intra_req_sel =
+        idx_width(NumWideIntraGroupPortsPerTile)'(
+            tcdm_wide_intra_tgt_tile % NumWideIntraGroupPortsPerTile);
+    for (genvar p = 0; p < NumWideIntraGroupPortsPerTile; p++) begin :
+        gen_wide_intra_req_port
+      assign prereg_tcdm_wide_master_req[p] = tcdm_wide_intra_req_interco;
+      assign prereg_tcdm_wide_master_req_valid[p] =
+          tcdm_wide_intra_req_interco_valid &
+          (tcdm_wide_intra_req_sel == p);
     end
-    assign tcdm.req_ready = rm_wide_is_local ? rm_local_req_ready
-                                             : tcdm_burst_master_req_ready_i[0];
+    assign tcdm_wide_intra_req_interco_ready =
+        prereg_tcdm_wide_master_req_ready[tcdm_wide_intra_req_sel];
 
-    // Response mux: {local engine resp, remote master resp} -> HCI resp channel.
-    // (rm_wresp_t is declared at module scope above — VCS generate-scope rule.)
-    rm_wresp_t [1:0] rm_resp_in;
-    logic      [1:0] rm_resp_in_valid, rm_resp_in_ready;
-    rm_wresp_t       rm_resp_out;
-    logic            rm_resp_out_valid, rm_resp_out_ready;
+    assign tcdm_wide_remote_req_sel =
+        idx_width(NumWideInterGroupReqPortsPerTile)'(
+            tcdm_wide_remote_tgt_group % NumWideInterGroupReqPortsPerTile);
 
-    assign rm_resp_in[0]       = '{data: rm_local_resp.rdata.data, meta_id: rm_local_resp.rdata.meta_id};
-    assign rm_resp_in_valid[0] = rm_local_resp_valid;
-    assign rm_local_resp_ready = rm_resp_in_ready[0];
-    assign rm_resp_in[1]       = '{data:    tcdm_burst_master_resp_i[0].payload.data,
-                                   meta_id: tcdm_burst_master_resp_i[0].hdr.meta_id};
-    assign rm_resp_in_valid[1] = tcdm_burst_master_resp_valid_i[0];
-    always_comb begin
-      tcdm_burst_master_resp_ready_o    = '0;
-      tcdm_burst_master_resp_ready_o[0] = rm_resp_in_ready[1];
+    for (genvar p = 0; p < NumWideInterGroupReqPortsPerTile; p++) begin :
+        gen_wide_remote_req_port
+      assign prereg_tcdm_wide_master_req[p+NumWideIntraGroupPortsPerTile] =
+          tcdm_wide_remote_req_interco;
+      assign prereg_tcdm_wide_master_req_valid[p+NumWideIntraGroupPortsPerTile] =
+          tcdm_wide_remote_req_interco_valid &
+          (tcdm_wide_remote_req_sel == p);
+    end
+    assign tcdm_wide_remote_req_interco_ready =
+        prereg_tcdm_wide_master_req_ready[
+            tcdm_wide_remote_req_sel+NumWideIntraGroupPortsPerTile];
+
+    for (genvar p = 0; p < NumWideRemoteRespPortsPerTile; p++) begin :
+        gen_tcdm_wide_resp_interco_sel
+      assign tcdm_wide_resp_interco_sel[p] =
+          (p < NumWideIntraGroupPortsPerTile) ?
+              idx_width(NumWideShimPorts)'(TCDM_WIDE_INTRA) :
+              idx_width(NumWideShimPorts)'(TCDM_WIDE_EXTERNAL);
     end
 
-    rr_arb_tree #(
-      .NumIn(2), .DataType(rm_wresp_t), .AxiVldRdy(1'b1), .LockIn(1'b1)
-    ) i_rm_resp_arb (
-      .clk_i    (clk_i           ),
-      .rst_ni   (rst_ni          ),
-      .flush_i  (1'b0            ),
-      .rr_i     ('0              ),
-      .req_i    (rm_resp_in_valid ),
-      .gnt_o    (rm_resp_in_ready ),
-      .data_i   (rm_resp_in       ),
-      .req_o    (rm_resp_out_valid),
-      .gnt_i    (rm_resp_out_ready),
-      .data_o   (rm_resp_out      ),
-      .idx_o    (/* unused */     )
+    stream_xbar #(
+      .NumInp   (NumWideRemoteRespPortsPerTile),
+      .NumOut   (NumWideShimPorts             ),
+      .payload_t(tcdm_wide_master_resp_t      )
+    ) i_tcdm_wide_resp_interco (
+      .clk_i  (clk_i                                                        ),
+      .rst_ni (rst_ni                                                       ),
+      .flush_i(1'b0                                                         ),
+      // External priority flag
+      .rr_i   ('0                                                           ),
+      // Master
+      .data_i (postreg_tcdm_wide_master_resp                               ),
+      .valid_i(postreg_tcdm_wide_master_resp_valid                         ),
+      .ready_o(postreg_tcdm_wide_master_resp_ready                         ),
+      .sel_i  (tcdm_wide_resp_interco_sel                                  ),
+      // Slave
+      .data_o ({tcdm_wide_intra_resp_interco, tcdm_wide_remote_resp_interco}),
+      .valid_o({tcdm_wide_intra_resp_interco_valid,
+                tcdm_wide_remote_resp_interco_valid}                       ),
+      .ready_i({tcdm_wide_intra_resp_interco_ready,
+                tcdm_wide_remote_resp_interco_ready}                       ),
+      .idx_o  (/* unused */                                                )
     );
-    assign tcdm.resp_valid   = rm_resp_out_valid;
-    assign rm_resp_out_ready = tcdm.resp_ready;
-    assign tcdm.resp_data    = rm_resp_out.data;
-    assign tcdm.resp_id      = rm_resp_out.meta_id[MetaIdWidth-1:RobW];
-    assign tcdm.resp_user    = rm_resp_out.meta_id[RobW-1:0];
+
+    // Every request ingress returns its response on the same numbered tile
+    // port. Separate request/response parameters remain visible in the
+    // hierarchy, but the current single-beat integration requires them equal.
+    initial begin : p_wide_inter_group_port_count
+      assert (NumWideInterGroupReqPortsPerTile ==
+              NumWideInterGroupRespPortsPerTile)
+        else $fatal(1, "[mempool_tile] Wide request/response port counts must match.");
+    end
+
+    assign tcdm_wide_rm_resp_in[0] = '{
+      data:  tcdm_wide_eng_resp_to_rm.rdata.data,
+      id:    tcdm_wide_eng_resp_to_rm.rdata.meta_id,
+      write: tcdm_wide_eng_resp_to_rm.is_write,
+      error: 1'b0
+    };
+    assign tcdm_wide_rm_resp_in_valid[0] = tcdm_wide_eng_resp_to_rm_valid;
+    assign tcdm_wide_eng_resp_to_rm_ready = tcdm_wide_rm_resp_in_ready[0];
+    assign tcdm_wide_rm_resp_in[1] = tcdm_wide_group_resp;
+    assign tcdm_wide_rm_resp_in_valid[1] = tcdm_wide_group_resp_out_valid;
+    assign tcdm_wide_group_resp_out_ready = tcdm_wide_rm_resp_in_ready[1];
+
+    stream_xbar #(
+      .NumInp   (NumWideRmRespSources),
+      .NumOut   (1                   ),
+      .payload_t(tcdm_wide_rm_resp_t )
+    ) i_tcdm_wide_rm_resp_interco (
+      .clk_i  (clk_i                      ),
+      .rst_ni (rst_ni                     ),
+      .flush_i(1'b0                       ),
+      // External priority flag
+      .rr_i   ('0                         ),
+      // Master
+      .data_i (tcdm_wide_rm_resp_in       ),
+      .valid_i(tcdm_wide_rm_resp_in_valid ),
+      .ready_o(tcdm_wide_rm_resp_in_ready ),
+      .sel_i  ('0                         ),
+      // Slave
+      .data_o (tcdm_wide_rm_resp          ),
+      .valid_o(tcdm.resp_valid            ),
+      .ready_i(tcdm.resp_ready            ),
+      .idx_o  (/* unused */               )
+    );
+
+    assign tcdm.req_ready =
+        tcdm_wide_rm_own_tile ? tcdm_wide_eng_req_from_rm_ready :
+                                tcdm_wide_group_req_input_ready;
+    assign tcdm.resp_data = tcdm_wide_rm_resp.data;
+    assign tcdm_wide_rm_resp_meta = tcdm_wide_rm_resp.id;
+    assign tcdm.resp_id   = tcdm_wide_rm_resp_meta[MetaIdWidth-1:RobW];
+    assign tcdm.resp_user = tcdm_wide_rm_resp_meta[RobW-1:0];
 
     // The RedMulE narrow interco slots are unused in the wide plane: tie them off
     // (leaving them undriven bleeds X into the remote router / response xbar).
@@ -1530,14 +1828,14 @@ module mempool_tile
     end : gen_rm_narrow_tieoff
 
 `ifndef SYNTHESIS
-    // WP2 assumes WIDE_W-aligned RedMulE accesses (one flit lands in one superbank
-    // and never crosses a tile). Flag violations loudly (roadmap T1.5 split TODO).
+    // WP2 assumes WIDE_W-aligned RedMulE accesses: one access lands in one
+    // superbank and never crosses a tile.
     localparam int unsigned RmWideAlignW = $clog2(WideTcdmDataWidth/DataWidth);
     always_ff @(posedge clk_i) begin
       if (rst_ni && tcdm.req_valid && tcdm.req_ready &&
-          (rm_wide_scrambled[ByteOffset +: RmWideAlignW] != '0))
+          (tcdm_wide_rm_scrambled[ByteOffset +: RmWideAlignW] != '0))
         $warning("[mempool_tile] RedMulE wide access misaligned (low bank bits=%0d): crosses a superbank/tile.",
-                 rm_wide_scrambled[ByteOffset +: RmWideAlignW]);
+                 tcdm_wide_rm_scrambled[ByteOffset +: RmWideAlignW]);
     end
 `endif
 
@@ -1669,7 +1967,8 @@ module mempool_tile
         .MaxOutStandingTrans (snitch_pkg::NumIntOutstandingLoads),
         .NrTCDM              (2                                 ),
         .NrSoC               (1                                 ),
-        .NumRules            (3                                 ),
+        .EnableSoC           (1'b0                              ),
+        .NumRules            (2                                 ),
         .req_t               (rm_dreq_t                         ),
         .resp_t              (rm_dresp_t                        )
       ) i_tcdm_shim (
@@ -1688,8 +1987,7 @@ module mempool_tile
         .tcdm_resp_ready_o  ({local_resp_interco_ready[c],                remote_resp_interco_ready[c]}           ),
         .tcdm_resp_rdata_i  ({local_resp_interco_payload[c].rdata.data,   remote_resp_interco[c].rdata.data}      ),
         .tcdm_resp_id_i     ({local_resp_interco_payload[c].rdata.meta_id,remote_resp_interco[c].rdata.meta_id}   ),
-        // No SoC region: tie off explicitly. soc_meta_id mux ignores soc_pvalid_i,
-        // so a floating soc_pwrite_i would pull X into data_pid_o (X-pessimism).
+        // SoC routing is disabled for RedMulE.
         .soc_qaddr_o        (/* unused */                                                                         ),
         .soc_qwrite_o       (/* unused */                                                                         ),
         .soc_qamo_o         (/* unused */                                                                         ),
@@ -1715,7 +2013,7 @@ module mempool_tile
         .data_pid_o         (redmule_tcdm_resp[p].id                                                              ),
         .data_pvalid_o      (redmule_tcdm_resp_valid[p]                                                           ),
         .data_pready_i      (redmule_tcdm_resp_ready[p]                                                           ),
-        .address_map_i      (mask_map                                                                             )
+        .address_map_i      (tcdm_mask_map                                                                        )
       );
       assign redmule_tcdm_resp[p].write = 1'b0;
 
@@ -1820,15 +2118,15 @@ module mempool_tile
 
     assign wake_up = wake_up_q;
 
-    // No RedMulE here: never source a wide local access or a wide flit. (This
-    // tile still LANDS remote wide flits — that path is the module-scope B2 block.)
+    // No RedMulE here: never source an own-tile or master-side wide access. This
+    // tile still accepts raw wide slave requests through the module-scope B2 path.
     `ifdef USE_WIDE_TCDM_PLANE
-    assign rm_local_req                   = '0;
-    assign rm_local_req_valid             = 1'b0;
-    assign rm_local_resp_ready            = 1'b1;
-    assign tcdm_burst_master_req_o        = '0;
-    assign tcdm_burst_master_req_valid_o  = '0;
-    assign tcdm_burst_master_resp_ready_o = '1;
+    assign tcdm_wide_eng_req_from_rm                   = '0;
+    assign tcdm_wide_eng_req_from_rm_valid             = 1'b0;
+    assign tcdm_wide_eng_resp_to_rm_ready              = 1'b1;
+    assign prereg_tcdm_wide_master_req                  = '0;
+    assign prereg_tcdm_wide_master_req_valid            = '0;
+    assign postreg_tcdm_wide_master_resp_ready          = '1;
     `endif
 
     for (genvar c = 0; c < NumSoCPorts; c++) begin: gen_redmule_soc_passthrough
@@ -1865,7 +2163,13 @@ module mempool_tile
   if (DataWidth > AxiDataWidth)
     $error("AxiDataWidth needs to be larger than DataWidth!");
 
-  // Wide TCDM plane (WP2): the master (source) side is driven per-tile by
-  // gen_redmule (RedMulE tiles issue wide flits) or gen_redmule_tieoff (others).
+  `ifdef USE_WIDE_TCDM_PLANE
+  if (WideTcdmDataWidth != RMDataWidth)
+    $fatal(1, "[mempool_tile] Wide width %0d must equal RedMulE TCDM width %0d.",
+           WideTcdmDataWidth, RMDataWidth);
+  `endif
+
+  // Wide TCDM plane (WP2): the raw master side is driven per tile by gen_redmule
+  // or gen_redmule_tieoff.
 
 endmodule : mempool_tile

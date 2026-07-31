@@ -230,19 +230,125 @@ vlog_defs += -DTILE_ID_REMAP=$(tile_id_remap)
 # --------------------------
 # NoC Channel Configuration
 # --------------------------
-vlog_defs += -DNOC_REQ_RD_CHANNEL_NUM=$(noc_req_rd_channel_num)
-ifneq (0, $(noc_req_rd_channel_num))
-	vlog_defs += -DUSE_NARROW_REQ_CHANNEL
+vlog_defs += -DNOC_REQ_NARROW_RO_CHANNEL_NUM=$(noc_req_narrow_ro_channel_num)
+ifneq (0, $(noc_req_narrow_ro_channel_num))
+	vlog_defs += -DUSE_RO_NARROW_REQ_CHANNEL
 endif
-vlog_defs += -DNOC_REQ_RDWR_CHANNEL_NUM=$(noc_req_rdwr_channel_num)
-vlog_defs += -DNOC_REQ_WR_CHANNEL_NUM=$(noc_req_wr_channel_num)
-vlog_defs += -DNOC_RESP_CHANNEL_NUM=$(noc_resp_channel_num)
+vlog_defs += -DNOC_REQ_NARROW_RW_CHANNEL_NUM=$(noc_req_narrow_rw_channel_num)
+vlog_defs += -DNOC_REQ_NARROW_WO_CHANNEL_NUM=$(noc_req_narrow_wo_channel_num)
+vlog_defs += -DNOC_RESP_NARROW_RD_CHANNEL_NUM=$(noc_resp_narrow_rd_channel_num)
+ifeq (0, $(noc_req_narrow_ro_channel_num))
+ifeq (0, $(noc_req_narrow_rw_channel_num))
+$(error Narrow TCDM plane requires at least one read-capable RO or RW request channel)
+endif
+endif
+ifeq (0, $(noc_req_narrow_rw_channel_num))
+ifeq (0, $(noc_req_narrow_wo_channel_num))
+$(error Narrow TCDM plane requires at least one write-capable RW or WO request channel)
+endif
+endif
+ifeq (0, $(noc_resp_narrow_rd_channel_num))
+$(error Narrow TCDM plane requires at least one RD response channel)
+endif
 # Wide TCDM plane (WP2): a separate single-beat FlooNoC net. Default 0 => absent
 # and bit-identical to a build without it; USE_WIDE_TCDM_PLANE gates the RTL.
-vlog_defs += -DNOC_REQ_BURST_CHANNEL_NUM=$(noc_req_burst_channel_num)
-vlog_defs += -DNOC_RESP_BURST_CHANNEL_NUM=$(noc_resp_burst_channel_num)
-ifneq (0, $(noc_req_burst_channel_num))
+# Four independently sized, per-group channel classes (stage-1 DSE plan §6.6).
+# The RW request and RW response classes are mandatory when the plane is on; the
+# meta-only RO request and WO response classes are optional and each gated by
+# its own define, because a zero-width member of a packed struct is illegal (the
+# same reason USE_RO_NARROW_REQ_CHANNEL gates the 32-bit net's meta-only read
+# class).
+vlog_defs += -DWIDE_TCDM_DATA_WIDTH=$(wide_tcdm_data_width)
+vlog_defs += -DNOC_REQ_WIDE_RO_CHANNEL_NUM=$(noc_req_wide_ro_channel_num)
+vlog_defs += -DNOC_REQ_WIDE_RW_CHANNEL_NUM=$(noc_req_wide_rw_channel_num)
+vlog_defs += -DNOC_RESP_WIDE_RW_CHANNEL_NUM=$(noc_resp_wide_rw_channel_num)
+vlog_defs += -DNOC_RESP_WIDE_WO_CHANNEL_NUM=$(noc_resp_wide_wo_channel_num)
+vlog_defs += \
+	-DNOC_WIDE_INTRA_GROUP_CHANNEL_NUM_PER_TILE=$(noc_wide_intra_group_channel_num_per_tile)
+vlog_defs += \
+	-DNOC_WIDE_INTER_GROUP_REQ_CHANNEL_NUM_PER_TILE=$(noc_wide_inter_group_req_channel_num_per_tile)
+vlog_defs += \
+	-DNOC_WIDE_INTER_GROUP_RESP_CHANNEL_NUM_PER_TILE=$(noc_wide_inter_group_resp_channel_num_per_tile)
+ifneq (0, $(noc_req_wide_ro_channel_num))
+	vlog_defs += -DUSE_RO_WIDE_REQ_CHANNEL
+endif
+ifneq (0, $(noc_resp_wide_wo_channel_num))
+	vlog_defs += -DUSE_WO_WIDE_RESP_CHANNEL
+endif
+ifeq (0, $(noc_req_wide_rw_channel_num))
+ifneq (0, $(noc_req_wide_ro_channel_num))
+$(error noc_req_wide_ro_channel_num is set but the wide plane is off: set noc_req_wide_rw_channel_num >= 1)
+endif
+ifneq (0, $(noc_resp_wide_rw_channel_num))
+$(error noc_resp_wide_rw_channel_num is set but the wide plane is off: set noc_req_wide_rw_channel_num >= 1)
+endif
+ifneq (0, $(noc_resp_wide_wo_channel_num))
+$(error noc_resp_wide_wo_channel_num is set but the wide plane is off: set noc_req_wide_rw_channel_num >= 1)
+endif
+else
 	vlog_defs += -DUSE_WIDE_TCDM_PLANE
+ifeq (0,$(strip $(num_redmule_tiles)))
+$(error Wide TCDM plane requires at least one RedMulE tile)
+endif
+ifeq (0,$(strip $(wide_tcdm_data_width)))
+$(error Wide TCDM plane requires wide_tcdm_data_width > 0)
+endif
+ifeq (0,$(strip $(noc_wide_intra_group_channel_num_per_tile)))
+$(error Wide TCDM plane requires at least one intra-group channel per tile)
+endif
+redmule_tcdm_data_width := $(shell printf '%s' $$((16 * $(redmule_height) * ($(redmule_regs) + 1))))
+ifneq ($(strip $(wide_tcdm_data_width)),$(strip $(redmule_tcdm_data_width)))
+$(error wide_tcdm_data_width=$(wide_tcdm_data_width) must equal the current RedMulE TCDM port width $(redmule_tcdm_data_width))
+endif
+wide_tcdm_word_remainder := $(shell printf '%s' $$(( $(wide_tcdm_data_width) % 32 )))
+ifneq (0,$(strip $(wide_tcdm_word_remainder)))
+$(error wide_tcdm_data_width=$(wide_tcdm_data_width) must be a multiple of the 32-bit TCDM word width)
+endif
+ifeq (0, $(noc_resp_wide_rw_channel_num))
+$(error Wide TCDM plane is on but noc_resp_wide_rw_channel_num=0: read data has no channel to return on)
+endif
+ifeq (0, $(noc_wide_inter_group_req_channel_num_per_tile))
+$(error Wide TCDM plane requires at least one inter-group request port per tile)
+endif
+ifeq (0, $(noc_wide_inter_group_resp_channel_num_per_tile))
+$(error Wide TCDM plane requires at least one inter-group response port per tile)
+endif
+wide_tcdm_num_tiles_per_group := $(shell printf '%s' \
+	$$(( $(num_cores) / $(num_cores_per_tile) / $(num_groups) )))
+wide_tcdm_req_ports_per_tile := $(strip $(noc_wide_inter_group_req_channel_num_per_tile))
+wide_tcdm_resp_ports_per_tile := $(strip $(noc_wide_inter_group_resp_channel_num_per_tile))
+ifneq ($(wide_tcdm_req_ports_per_tile),$(wide_tcdm_resp_ports_per_tile))
+$(error Wide TCDM logical request and response port counts per tile must match)
+endif
+wide_tcdm_req_ports_per_group := $(shell printf '%s' \
+	$$(( $(wide_tcdm_num_tiles_per_group) * \
+	     $(wide_tcdm_req_ports_per_tile) )))
+wide_tcdm_resp_ports_per_group := $(shell printf '%s' \
+	$$(( $(wide_tcdm_num_tiles_per_group) * \
+	     $(wide_tcdm_resp_ports_per_tile) )))
+# RO/RW/WO classes are mutually exclusive for each logical port. Each physical
+# class may use up to the aggregate generic tile-port count; their sum may be
+# larger (for example, four RO plus two RW channels fed by four tile ports).
+wide_tcdm_ro_req_channels_over_limit := $(shell printf '%s' \
+	$$(( $(noc_req_wide_ro_channel_num) > $(wide_tcdm_req_ports_per_group) )))
+wide_tcdm_rw_req_channels_over_limit := $(shell printf '%s' \
+	$$(( $(noc_req_wide_rw_channel_num) > $(wide_tcdm_req_ports_per_group) )))
+wide_tcdm_rw_resp_channels_over_limit := $(shell printf '%s' \
+	$$(( $(noc_resp_wide_rw_channel_num) > $(wide_tcdm_resp_ports_per_group) )))
+wide_tcdm_wo_resp_channels_over_limit := $(shell printf '%s' \
+	$$(( $(noc_resp_wide_wo_channel_num) > $(wide_tcdm_resp_ports_per_group) )))
+ifeq (1,$(strip $(wide_tcdm_ro_req_channels_over_limit)))
+$(error Wide TCDM RO request channels exceed aggregate inter-group request ports)
+endif
+ifeq (1,$(strip $(wide_tcdm_rw_req_channels_over_limit)))
+$(error Wide TCDM RW request channels exceed aggregate inter-group request ports)
+endif
+ifeq (1,$(strip $(wide_tcdm_rw_resp_channels_over_limit)))
+$(error Wide TCDM RW response channels exceed aggregate inter-group response ports)
+endif
+ifeq (1,$(strip $(wide_tcdm_wo_resp_channels_over_limit)))
+$(error Wide TCDM WO response channels exceed aggregate inter-group response ports)
+endif
 endif
 # --------------------------
 # Router Buffer Configuration

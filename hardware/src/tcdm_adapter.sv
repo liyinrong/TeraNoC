@@ -47,7 +47,7 @@ module tcdm_adapter #(
   import mempool_pkg::NumCores;
   import mempool_pkg::NumGroups;
   import mempool_pkg::NumCoresPerTile;
-  import mempool_pkg::NumRemoteReqPortsPerTile;
+  import mempool_pkg::NumNarrowRemoteReqPortsPerTile;
   import cf_math_pkg::idx_width;
 
   typedef enum logic [3:0] {
@@ -130,7 +130,7 @@ module tcdm_adapter #(
   );
 
   localparam int unsigned CoreIdWidth  = idx_width(NumCores);
-  localparam int unsigned IniAddrWidth = idx_width(NumCoresPerTile + NumRemoteReqPortsPerTile);
+  localparam int unsigned IniAddrWidth = idx_width(NumCoresPerTile + NumNarrowRemoteReqPortsPerTile);
 
   logic sc_successful_d, sc_successful_q;
   logic sc_q;

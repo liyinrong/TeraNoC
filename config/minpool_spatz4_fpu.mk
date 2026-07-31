@@ -53,37 +53,37 @@ noc_router_remapping ?= 0
 noc_virtual_channel_num ?= 1
 
 # Channel configuration mode (internal control only)
-# Options: baseline, narrow, enhanced
-channel_config_mode := baseline  # Current MinPool setting
+# Options: baseline, split, enhanced
+narrow_channel_config_mode := baseline  # Current MinPool setting
 
 # Channel configuration based on selected mode
-ifeq ($(strip $(channel_config_mode)), baseline)
-noc_req_rd_channel_num   ?= 0
-noc_req_rdwr_channel_num ?= 2
-noc_req_wr_channel_num   ?= 0
-noc_resp_channel_num     ?= 2
+ifeq ($(strip $(narrow_channel_config_mode)), baseline)
+noc_req_narrow_ro_channel_num ?= 0
+noc_req_narrow_rw_channel_num ?= 2
+noc_req_narrow_wo_channel_num ?= 0
+noc_resp_narrow_rd_channel_num ?= 2
 
-else ifeq ($(strip $(channel_config_mode)), narrow)
-noc_req_rd_channel_num   ?= 0
-noc_req_rdwr_channel_num ?= 1
-noc_req_wr_channel_num   ?= 0
-noc_resp_channel_num     ?= 1
+else ifeq ($(strip $(narrow_channel_config_mode)), split)
+noc_req_narrow_ro_channel_num ?= 0
+noc_req_narrow_rw_channel_num ?= 1
+noc_req_narrow_wo_channel_num ?= 0
+noc_resp_narrow_rd_channel_num ?= 1
 
-else ifeq ($(strip $(channel_config_mode)), enhanced)
-noc_req_rd_channel_num   ?= 1
-noc_req_rdwr_channel_num ?= 1
-noc_req_wr_channel_num   ?= 0
-noc_resp_channel_num     ?= 3
+else ifeq ($(strip $(narrow_channel_config_mode)), enhanced)
+noc_req_narrow_ro_channel_num ?= 1
+noc_req_narrow_rw_channel_num ?= 1
+noc_req_narrow_wo_channel_num ?= 0
+noc_resp_narrow_rd_channel_num ?= 3
 
 else
-$(error Unsupported channel_config_mode: $(channel_config_mode))
+$(error Unsupported narrow_channel_config_mode: $(narrow_channel_config_mode))
 endif
 
 # Print configuration info for debugging
-$(info [DEBUG:][noc_req_rd_channel_num]----$(noc_req_rd_channel_num))
-$(info [DEBUG:][noc_req_rdwr_channel_num]--$(noc_req_rdwr_channel_num))
-$(info [DEBUG:][noc_req_wr_channel_num]----$(noc_req_wr_channel_num))
-$(info [DEBUG:][noc_resp_channel_num]------$(noc_resp_channel_num))
+$(info [DEBUG:][noc_req_narrow_ro_channel_num]----$(noc_req_narrow_ro_channel_num))
+$(info [DEBUG:][noc_req_narrow_rw_channel_num]--$(noc_req_narrow_rw_channel_num))
+$(info [DEBUG:][noc_req_narrow_wo_channel_num]----$(noc_req_narrow_wo_channel_num))
+$(info [DEBUG:][noc_resp_narrow_rd_channel_num]------$(noc_resp_narrow_rd_channel_num))
 
 # Router buffer configuration
 noc_router_input_fifo_dep  ?= 2

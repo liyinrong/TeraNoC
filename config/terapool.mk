@@ -54,40 +54,40 @@ noc_router_remapping ?= 3
 noc_virtual_channel_num ?= 1
 
 # Channel configuration mode (internal control only)
-# Options: baseline, narrow, enhanced
-channel_config_mode := baseline  # Change this value to switch modes
+# Options: baseline, split, enhanced
+narrow_channel_config_mode := baseline  # Change this value to switch modes
 
 # Channel configuration based on selected mode
-ifeq ($(strip $(channel_config_mode)), baseline)
-# Baseline config, do NOT define USE_NARROW_REQ_CHANNEL
-noc_req_rd_channel_num   ?= 0
-noc_req_rdwr_channel_num ?= 2
-noc_req_wr_channel_num   ?= 0
-noc_resp_channel_num     ?= 2
+ifeq ($(strip $(narrow_channel_config_mode)), baseline)
+# Baseline config, do NOT define USE_RO_NARROW_REQ_CHANNEL
+noc_req_narrow_ro_channel_num ?= 0
+noc_req_narrow_rw_channel_num ?= 2
+noc_req_narrow_wo_channel_num ?= 0
+noc_resp_narrow_rd_channel_num ?= 2
 
-else ifeq ($(strip $(channel_config_mode)), narrow)
-# Reduced req link count, define USE_NARROW_REQ_CHANNEL
-noc_req_rd_channel_num   ?= 1
-noc_req_rdwr_channel_num ?= 1
-noc_req_wr_channel_num   ?= 0
-noc_resp_channel_num     ?= 2
+else ifeq ($(strip $(narrow_channel_config_mode)), split)
+# Reduced req link count, define USE_RO_NARROW_REQ_CHANNEL
+noc_req_narrow_ro_channel_num ?= 1
+noc_req_narrow_rw_channel_num ?= 1
+noc_req_narrow_wo_channel_num ?= 0
+noc_resp_narrow_rd_channel_num ?= 2
 
-else ifeq ($(strip $(channel_config_mode)), enhanced)
-# Enhanced resp link, define USE_NARROW_REQ_CHANNEL
-noc_req_rd_channel_num   ?= 1
-noc_req_rdwr_channel_num ?= 1
-noc_req_wr_channel_num   ?= 0
-noc_resp_channel_num     ?= 3
+else ifeq ($(strip $(narrow_channel_config_mode)), enhanced)
+# Enhanced resp link, define USE_RO_NARROW_REQ_CHANNEL
+noc_req_narrow_ro_channel_num ?= 1
+noc_req_narrow_rw_channel_num ?= 1
+noc_req_narrow_wo_channel_num ?= 0
+noc_resp_narrow_rd_channel_num ?= 3
 
 else
-$(error Unsupported channel_config_mode: $(channel_config_mode))
+$(error Unsupported narrow_channel_config_mode: $(narrow_channel_config_mode))
 endif
 
 # Print configuration info for debugging
-$(info [DEBUG:][noc_req_rd_channel_num]----$(noc_req_rd_channel_num))
-$(info [DEBUG:][noc_req_rdwr_channel_num]--$(noc_req_rdwr_channel_num))
-$(info [DEBUG:][noc_req_wr_channel_num]----$(noc_req_wr_channel_num))
-$(info [DEBUG:][noc_resp_channel_num]------$(noc_resp_channel_num))
+$(info [DEBUG:][noc_req_narrow_ro_channel_num]----$(noc_req_narrow_ro_channel_num))
+$(info [DEBUG:][noc_req_narrow_rw_channel_num]--$(noc_req_narrow_rw_channel_num))
+$(info [DEBUG:][noc_req_narrow_wo_channel_num]----$(noc_req_narrow_wo_channel_num))
+$(info [DEBUG:][noc_resp_narrow_rd_channel_num]------$(noc_resp_narrow_rd_channel_num))
 
 # Router buffer configuration
 noc_router_input_fifo_dep  ?= 2
@@ -96,12 +96,8 @@ noc_router_output_fifo_dep ?= 2
 # Router remapping xbar size configuration
 noc_router_remap_group_size ?= 4
 
-# Wide TCDM plane (WP2): a separate single-beat wide FlooNoC net carrying RedMulE
-# line traffic (WIDE_W = RMDataWidth). Default 0 (from config/config.mk) keeps it
-# absent and bit-identical. To enable, set both >= 1 (they must be enabled
-# together):
-# noc_req_burst_channel_num  ?= 1
-# noc_resp_burst_channel_num ?= 1
+# Wide TCDM plane (WP2): this flavor has no RedMulE wide endpoint, so the current
+# direct one-beat implementation requires wide_channel_config_mode=off.
 
 ###########################
 ## 3. AXI and DMA Config

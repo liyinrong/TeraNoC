@@ -12,11 +12,11 @@ module mempool_tile_remote_req_router
   import cf_math_pkg::idx_width;
 #(
   parameter int unsigned NumCoresPerTile              = 4,
-  parameter int unsigned NumRemoteReqPortsPerTile     = 4,
-  parameter int unsigned NumRdRemoteReqPortsPerTile   = 2,
-  parameter int unsigned NumWrRemoteReqPortsPerTile   = 2,
-  parameter int unsigned NumWideRemoteReqPortsPerTile = 0,
-  parameter int unsigned NumRdWrRemoteReqPortsPerTile = 0,
+  parameter int unsigned NumNarrowRemoteReqPortsPerTile     = 4,
+  parameter int unsigned NumNarrowRoReqPortsPerTile   = 2,
+  parameter int unsigned NumNarrowWoReqPortsPerTile   = 2,
+  parameter int unsigned NumNarrowPayloadReqPortsPerTile = 0,
+  parameter int unsigned NumNarrowRwReqPortsPerTile = 0,
   parameter int unsigned NumBanksPerTile              = 16,
   parameter int unsigned NumTilesPerGroup             = 4,
   parameter int unsigned NumGroups                    = 4,
@@ -28,7 +28,7 @@ module mempool_tile_remote_req_router
   input  addr_t               [NumCoresPerTile-1:0]                           remote_req_interco_addr_int_i,
   output tcdm_addr_t          [NumCoresPerTile-1:0]                           remote_req_tgt_addr_o,
   output group_id_t           [NumCoresPerTile-1:0]                           remote_req_tgt_group_id_o,
-  output logic [NumCoresPerTile-1:0][idx_width(NumRemoteReqPortsPerTile)-1:0] remote_req_tgt_sel_o
+  output logic [NumCoresPerTile-1:0][idx_width(NumNarrowRemoteReqPortsPerTile)-1:0] remote_req_tgt_sel_o
 );
 
   /*******************
@@ -65,13 +65,13 @@ module mempool_tile_remote_req_router
     // |    | ->  |    |   -> w     \/   4
     // ------     ------   -> w    High   5 ]
 
-    if((NumRdRemoteReqPortsPerTile > 0) || (NumWrRemoteReqPortsPerTile > 0)) begin
+    if((NumNarrowRoReqPortsPerTile > 0) || (NumNarrowWoReqPortsPerTile > 0)) begin
       assign remote_req_tgt_sel_o[c] = group_id_is_local[c] ? 0 :
                                       ~(remote_req_interco_wen_i[c] | remote_req_interco_amoen_i[c]) ?
-                                       (1 + (c % (NumRdRemoteReqPortsPerTile + NumRdWrRemoteReqPortsPerTile))) :
-                                       (1 + NumRdRemoteReqPortsPerTile + (c % (NumWideRemoteReqPortsPerTile)));
+                                       (1 + (c % (NumNarrowRoReqPortsPerTile + NumNarrowRwReqPortsPerTile))) :
+                                       (1 + NumNarrowRoReqPortsPerTile + (c % (NumNarrowPayloadReqPortsPerTile)));
     end else begin
-      assign remote_req_tgt_sel_o[c] = group_id_is_local[c] ? 0 : (1 + (c % (NumRemoteReqPortsPerTile - 1)));
+      assign remote_req_tgt_sel_o[c] = group_id_is_local[c] ? 0 : (1 + (c % (NumNarrowRemoteReqPortsPerTile - 1)));
     end
   end
 
