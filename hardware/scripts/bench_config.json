@@ -5,7 +5,8 @@
   "abbr_map": {
     "noc_req_narrow_ro_channel_num": "ro",
     "noc_req_narrow_rw_channel_num": "rw",
-    "noc_resp_narrow_rd_channel_num": "rd",
+    "noc_resp_narrow_rw_channel_num": "srw",
+    "noc_resp_narrow_wo_channel_num": "swo",
     "noc_router_input_fifo_dep": "idep",
     "noc_router_output_fifo_dep": "odep",
     "noc_router_remapping": "rrmp",
@@ -67,7 +68,8 @@
       "params": {
         "noc_req_narrow_ro_channel_num": 0,
         "noc_req_narrow_rw_channel_num": 2,
-        "noc_resp_narrow_rd_channel_num": 2,
+        "noc_resp_narrow_rw_channel_num": 2,
+        "noc_resp_narrow_wo_channel_num": 0,
         "noc_router_input_fifo_dep": 2,
         "noc_router_output_fifo_dep": 2,
         "noc_router_remapping": 0,
@@ -104,7 +106,8 @@
       "params": {
         "noc_req_narrow_ro_channel_num": 0,
         "noc_req_narrow_rw_channel_num": 2,
-        "noc_resp_narrow_rd_channel_num": 2,
+        "noc_resp_narrow_rw_channel_num": 2,
+        "noc_resp_narrow_wo_channel_num": 0,
         "noc_router_input_fifo_dep": 2,
         "noc_router_output_fifo_dep": 2,
         "noc_router_remapping": 3,

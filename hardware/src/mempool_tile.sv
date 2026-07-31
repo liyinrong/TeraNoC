@@ -412,6 +412,7 @@ module mempool_tile
     tile_group_id_t tile_id;
     tile_core_id_t core_id;
     logic wide;
+    logic is_write;
   } bank_metadata_t;
 
   // Memory interfaces
@@ -428,60 +429,35 @@ module mempool_tile
   logic                    [NumBanksPerTile-1:0] bank_resp_wide;
   local_resp_interco_addr_t[NumBanksPerTile-1:0] bank_resp_ini_addr;
 
-  // Condition bank_resp_ini_addr into the resp xbar's sel, handling
-  // req/resp port-count asymmetry; feeds i_tcdm_bank_interco.mst_resp_ini_addr_i.
+  // Condition the response xbar select. Local and same-group responses return
+  // on their original path; inter-group responses use an RW port, or a WO port
+  // for plain writes when that optional class is present.
   for (genvar b = 0; unsigned'(b) < NumBanksPerTile; b++) begin: gen_superbank_resp_ini_addr
-    if(NumNarrowRemoteReqPortsPerTile > NumNarrowRemoteRespPortsPerTile ) begin: gen_superbank_resp_ini_addr_req_gt_resp
+    logic [$bits(group_id_t) + $bits(tile_group_id_t) + $bits(tile_core_id_t) +
+           $bits(meta_id_t)-1:0] resp_hash;
+    assign resp_hash = {bank_resp_payload[b].src_group_id,
+                        bank_resp_payload[b].ini_addr,
+                        bank_resp_payload[b].rdata.core_id,
+                        bank_resp_payload[b].rdata.meta_id};
+    if (NumNarrowWoRespPortsPerTile > 0) begin : gen_wo_resp
       always_comb begin
-        superbank_resp_ini_addr[b] = '0;
         superbank_resp_ini_addr[b] = bank_resp_ini_addr[b];
-        if(bank_resp_ini_addr[b] > (NumLocalPorts + NumNarrowRemoteRespPortsPerTile - 1)) begin
-          superbank_resp_ini_addr[b] = bank_resp_ini_addr[b] - (NumNarrowRemoteReqPortsPerTile - NumNarrowRemoteRespPortsPerTile);
-        end
-      end
-    end else if (NumNarrowRemoteReqPortsPerTile == NumNarrowRemoteRespPortsPerTile) begin: gen_superbank_resp_ini_addr_req_eq_resp
-      always_comb begin
-        superbank_resp_ini_addr[b] = '0;
-        superbank_resp_ini_addr[b] = bank_resp_ini_addr[b];
-      end
-    end
-    else begin: gen_superbank_resp_ini_addr_req_lt_resp
-      localparam int unsigned bank_resp_payload_width = $bits(tcdm_slave_resp_t);
-      localparam int unsigned hash_width = $clog2(NumNarrowRemoteRespPortsPerTile - 1) + 2;
-      localparam int unsigned hash_binning_step = (1 << hash_width) / (NumNarrowRemoteRespPortsPerTile - 1);
-      logic [bank_resp_payload_width-1:0] bank_resp_payload_raw;
-      logic [hash_width-1:0] hash_src0, hash_src1, hash;
-      assign bank_resp_payload_raw = bank_resp_payload[b];
-      if(hash_width == 4) begin: gen_customed_hash_4
-        assign hash_src0 = {bank_resp_payload[b].rdata.core_id[0],
-                            bank_resp_payload[b].rdata.core_id[1],
-                            bank_resp_payload[b].src_group_id[0],
-                            bank_resp_payload[b].src_group_id[2]
-                            };
-        assign hash_src1 = {
-                            bank_resp_payload[b].ini_addr[2],
-                            bank_resp_payload[b].src_group_id[3],
-                            bank_resp_payload[b].ini_addr[0],
-                            bank_resp_payload[b].ini_addr[1]
-                            };
-      end else begin: gen_general_hash
-        $warning("Customed hashing is not implemented for hash_width = %0d, ",
-                  "using general congif, the performance may degrade.", hash_width);
-        assign hash_src0 = bank_resp_payload_raw[0 +: hash_width];
-        assign hash_src1 = bank_resp_payload_raw[hash_width +: hash_width];
-      end
-      assign hash = hash_src0 ^ hash_src1;
-      always_comb begin
-        superbank_resp_ini_addr[b] = '0;
-        superbank_resp_ini_addr[b] = bank_resp_ini_addr[b];
-        if(bank_resp_ini_addr[b] > NumLocalPorts) begin
-          superbank_resp_ini_addr[b] = NumLocalPorts + 1 + 0;
-          for (int i = 1; i < (NumNarrowRemoteRespPortsPerTile-1); i++) begin
-            if (hash >= i * hash_binning_step) begin
-              superbank_resp_ini_addr[b] = NumLocalPorts + 1 + i;
-            end
+        if (bank_resp_ini_addr[b] > NumLocalPorts) begin
+          if (bank_resp_payload[b].is_write) begin
+            superbank_resp_ini_addr[b] = NumLocalPorts + 1 + NumNarrowRwRespPortsPerTile +
+                (resp_hash % NumNarrowWoRespPortsPerTile);
+          end else begin
+            superbank_resp_ini_addr[b] = NumLocalPorts + 1 +
+                (resp_hash % NumNarrowRwRespPortsPerTile);
           end
         end
+      end
+    end else begin : gen_rw_resp_only
+      always_comb begin
+        superbank_resp_ini_addr[b] = bank_resp_ini_addr[b];
+        if (bank_resp_ini_addr[b] > NumLocalPorts)
+          superbank_resp_ini_addr[b] = NumLocalPorts + 1 +
+              (resp_hash % NumNarrowRwRespPortsPerTile);
       end
     end
   end
@@ -530,7 +506,8 @@ module mempool_tile
       core_id   : bank_req_payload[b].wdata.core_id,
       tile_id   : bank_req_payload[b].ini_addr,
       group_id  : bank_req_payload[b].src_group_id,
-      wide      : bank_req_wide[b]
+      wide      : bank_req_wide[b],
+      is_write  : bank_req_payload[b].wen && !(|bank_req_payload[b].wdata.amo)
     };
     always_comb begin
       bank_resp_ini_addr[b] = '0;
@@ -541,6 +518,7 @@ module mempool_tile
     assign bank_resp_payload[b].rdata.core_id = meta_out.core_id;
     assign bank_resp_payload[b].src_group_id  = meta_out.group_id;
     assign bank_resp_payload[b].rdata.amo     = '0; // Don't care
+    assign bank_resp_payload[b].is_write      = meta_out.is_write;
     assign bank_resp_wide[b]                  = meta_out.wide;
 
     tcdm_adapter #(
@@ -1047,9 +1025,7 @@ module mempool_tile
     .NumCoresPerTile                      (NumLocalPorts                       ),
     .NumNarrowRemoteReqPortsPerTile             (NumNarrowRemoteReqPortsPerTile            ),
     .NumNarrowRoReqPortsPerTile           (NumNarrowRoReqPortsPerTile          ),
-    .NumNarrowWoReqPortsPerTile           (NumNarrowWoReqPortsPerTile          ),
-    .NumNarrowPayloadReqPortsPerTile         (NumNarrowPayloadReqPortsPerTile        ),
-    .NumNarrowRwReqPortsPerTile         (NumNarrowRwReqPortsPerTile        ),
+    .NumNarrowRwReqPortsPerTile           (NumNarrowRwReqPortsPerTile          ),
     .NumBanksPerTile                      (NumBanksPerTile                     ),
     .NumTilesPerGroup                     (NumTilesPerGroup                    ),
     .NumGroups                            (NumGroups                           ),

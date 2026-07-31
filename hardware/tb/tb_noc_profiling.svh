@@ -94,8 +94,8 @@
 
   // Module-scope state registers so the end-of-sim `final` below can flush them.
   // router: [group][tile][port][portidx 0..4][io 0..1]
-  logic [1:0]  rsq_st    [NumGroups][NumTilesPerGroup][NumNarrowPayloadReqPortsPerTile][5][2];
-  logic [63:0] rsq_start [NumGroups][NumTilesPerGroup][NumNarrowPayloadReqPortsPerTile][5][2];
+  logic [1:0]  rsq_st    [NumGroups][NumTilesPerGroup][NumNarrowRwReqPortsPerTile][5][2];
+  logic [63:0] rsq_start [NumGroups][NumTilesPerGroup][NumNarrowRwReqPortsPerTile][5][2];
   logic [1:0]  rsp_st    [NumGroups][NumTilesPerGroup][NumNarrowRemoteRespPortsPerTile-1][5][2];
   logic [63:0] rsp_start [NumGroups][NumTilesPerGroup][NumNarrowRemoteRespPortsPerTile-1][5][2];
   // tile: [group][tile][port]
@@ -129,9 +129,9 @@
           rsp_st[g] <= '{default: '0}; rsp_start[g] <= '{default: '0};
         end else begin
           for (int t = 0; t < NumTilesPerGroup; t++) begin
-            // ---- narrow payload-bearing RW/WO request routers ----
-            for (int p = 0; p < NumNarrowPayloadReqPortsPerTile; p++) begin
-              automatic int rid = t*NumNarrowPayloadReqPortsPerTile + p;  // merged-file router tag
+            // ---- narrow payload-bearing RW request routers ----
+            for (int p = 0; p < NumNarrowRwReqPortsPerTile; p++) begin
+              automatic int rid = t*NumNarrowRwReqPortsPerTile + p;  // merged-file router tag
               for (int d = 0; d < 4; d++) begin
                 automatic logic [1:0] si = `NOC_GRP(g).floo_tcdm_narrow_rw_req_valid_in_trans[t][p][d]
                   ? (`NOC_GRP(g).floo_tcdm_narrow_rw_req_ready_out_trans[t][p][d]
@@ -210,17 +210,17 @@
                     `NOC_GRP(g).floo_tcdm_narrow_rw_req_from_router[t][p].hdr.meta_id);
               end
             end
-            // ---- resp routers (router slot p+1; no read/write split). P lines log every
+            // ---- RW/WO response routers (router slot p+1). P lines log every
             //      accepted RESPONSE flit; a resp flit has no tgt_addr. hdr carries dst_id
             //      (requester it returns to), src_id (responder), tile_id/core_id (requester).
             //   P <portidx> <io> <cycle> <dst_x> <dst_y> <src_x> <src_y> <req_tile> <req_core> <meta_id> ----
             for (int p = 0; p < NumNarrowRemoteRespPortsPerTile-1; p++) begin
               automatic int rid = t*(NumNarrowRemoteRespPortsPerTile-1) + p;  // merged-file router tag
               for (int d = 0; d < 4; d++) begin
-                automatic logic [1:0] si = `NOC_GRP(g).floo_tcdm_narrow_rd_resp_valid_in_trans[t][p+1][d]
-                  ? (`NOC_GRP(g).floo_tcdm_narrow_rd_resp_ready_out_trans[t][p+1][d] ? 2'd2 : 2'd1) : 2'd0;
-                automatic logic [1:0] so = `NOC_GRP(g).floo_tcdm_narrow_rd_resp_valid_out_trans[t][p+1][d]
-                  ? (`NOC_GRP(g).floo_tcdm_narrow_rd_resp_ready_in_trans[t][p+1][d] ? 2'd2 : 2'd1) : 2'd0;
+                automatic logic [1:0] si = `NOC_GRP(g).floo_tcdm_narrow_resp_valid_in_trans[t][p+1][d]
+                  ? (`NOC_GRP(g).floo_tcdm_narrow_resp_ready_out_trans[t][p+1][d] ? 2'd2 : 2'd1) : 2'd0;
+                automatic logic [1:0] so = `NOC_GRP(g).floo_tcdm_narrow_resp_valid_out_trans[t][p+1][d]
+                  ? (`NOC_GRP(g).floo_tcdm_narrow_resp_ready_in_trans[t][p+1][d] ? 2'd2 : 2'd1) : 2'd0;
                 if (si != rsp_st[g][t][p][d][0]) begin
                   $fwrite(f_rresp[g], "%0d S %0d 0 %0d %0d %0d\n", rid, d, rsp_start[g][t][p][d][0], cycle_q, rsp_st[g][t][p][d][0]);
                   rsp_st[g][t][p][d][0] <= si; rsp_start[g][t][p][d][0] <= cycle_q;
@@ -231,28 +231,28 @@
                 end
                 if (si >= 2)  // mesh input handshake -> one response flit accepted
                   $fwrite(f_rresp[g], "%0d P %0d 0 %0d %0d %0d %0d %0d %0d %0d %0d\n", rid, d, cycle_q,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_in_trans[t][p+1][d].hdr.dst_id.x,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_in_trans[t][p+1][d].hdr.dst_id.y,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_in_trans[t][p+1][d].hdr.src_id.x,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_in_trans[t][p+1][d].hdr.src_id.y,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_in_trans[t][p+1][d].hdr.tile_id,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_in_trans[t][p+1][d].hdr.core_id,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_in_trans[t][p+1][d].hdr.meta_id);
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_in_trans[t][p+1][d].hdr.dst_id.x,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_in_trans[t][p+1][d].hdr.dst_id.y,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_in_trans[t][p+1][d].hdr.src_id.x,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_in_trans[t][p+1][d].hdr.src_id.y,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_in_trans[t][p+1][d].hdr.tile_id,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_in_trans[t][p+1][d].hdr.core_id,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_in_trans[t][p+1][d].hdr.meta_id);
                 if (so >= 2)  // mesh output handshake
                   $fwrite(f_rresp[g], "%0d P %0d 1 %0d %0d %0d %0d %0d %0d %0d %0d\n", rid, d, cycle_q,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_out_trans[t][p+1][d].hdr.dst_id.x,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_out_trans[t][p+1][d].hdr.dst_id.y,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_out_trans[t][p+1][d].hdr.src_id.x,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_out_trans[t][p+1][d].hdr.src_id.y,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_out_trans[t][p+1][d].hdr.tile_id,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_out_trans[t][p+1][d].hdr.core_id,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_out_trans[t][p+1][d].hdr.meta_id);
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_out_trans[t][p+1][d].hdr.dst_id.x,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_out_trans[t][p+1][d].hdr.dst_id.y,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_out_trans[t][p+1][d].hdr.src_id.x,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_out_trans[t][p+1][d].hdr.src_id.y,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_out_trans[t][p+1][d].hdr.tile_id,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_out_trans[t][p+1][d].hdr.core_id,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_out_trans[t][p+1][d].hdr.meta_id);
               end
               begin : rsp_local
-                automatic logic [1:0] sli = `NOC_GRP(g).floo_tcdm_narrow_rd_resp_to_router_vc_valid[t][p+1]
-                  ? (`NOC_GRP(g).floo_tcdm_narrow_rd_resp_to_router_vc_ready[t][p+1] ? 2'd2 : 2'd1) : 2'd0;
-                automatic logic [1:0] slo = `NOC_GRP(g).floo_tcdm_narrow_rd_resp_from_router_vc_valid[t][p+1]
-                  ? (`NOC_GRP(g).floo_tcdm_narrow_rd_resp_from_router_vc_ready[t][p+1] ? 2'd2 : 2'd1) : 2'd0;
+                automatic logic [1:0] sli = `NOC_GRP(g).floo_tcdm_narrow_resp_to_router_valid[t][p+1]
+                  ? (`NOC_GRP(g).floo_tcdm_narrow_resp_to_router_ready[t][p+1] ? 2'd2 : 2'd1) : 2'd0;
+                automatic logic [1:0] slo = `NOC_GRP(g).floo_tcdm_narrow_resp_from_router_before_xbar_valid[t][p+1]
+                  ? (`NOC_GRP(g).floo_tcdm_narrow_resp_from_router_before_xbar_ready[t][p+1] ? 2'd2 : 2'd1) : 2'd0;
                 if (sli != rsp_st[g][t][p][4][0]) begin
                   $fwrite(f_rresp[g], "%0d S 4 0 %0d %0d %0d\n", rid, rsp_start[g][t][p][4][0], cycle_q, rsp_st[g][t][p][4][0]);
                   rsp_st[g][t][p][4][0] <= sli; rsp_start[g][t][p][4][0] <= cycle_q;
@@ -263,22 +263,22 @@
                 end
                 if (sli >= 2)  // local input (injection from tile = slave_resp) handshake
                   $fwrite(f_rresp[g], "%0d P 4 0 %0d %0d %0d %0d %0d %0d %0d %0d\n", rid, cycle_q,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_to_router[t][p+1].hdr.dst_id.x,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_to_router[t][p+1].hdr.dst_id.y,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_to_router[t][p+1].hdr.src_id.x,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_to_router[t][p+1].hdr.src_id.y,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_to_router[t][p+1].hdr.tile_id,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_to_router[t][p+1].hdr.core_id,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_to_router[t][p+1].hdr.meta_id);
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_to_router[t][p+1].hdr.dst_id.x,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_to_router[t][p+1].hdr.dst_id.y,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_to_router[t][p+1].hdr.src_id.x,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_to_router[t][p+1].hdr.src_id.y,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_to_router[t][p+1].hdr.tile_id,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_to_router[t][p+1].hdr.core_id,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_to_router[t][p+1].hdr.meta_id);
                 if (slo >= 2)  // local output (ejection to tile = master_resp) handshake
                   $fwrite(f_rresp[g], "%0d P 4 1 %0d %0d %0d %0d %0d %0d %0d %0d\n", rid, cycle_q,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_from_router[t][p+1].hdr.dst_id.x,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_from_router[t][p+1].hdr.dst_id.y,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_from_router[t][p+1].hdr.src_id.x,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_from_router[t][p+1].hdr.src_id.y,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_from_router[t][p+1].hdr.tile_id,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_from_router[t][p+1].hdr.core_id,
-                    `NOC_GRP(g).floo_tcdm_narrow_rd_resp_from_router[t][p+1].hdr.meta_id);
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_from_router[t][p+1].hdr.dst_id.x,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_from_router[t][p+1].hdr.dst_id.y,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_from_router[t][p+1].hdr.src_id.x,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_from_router[t][p+1].hdr.src_id.y,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_from_router[t][p+1].hdr.tile_id,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_from_router[t][p+1].hdr.core_id,
+                    `NOC_GRP(g).floo_tcdm_narrow_resp_from_router[t][p+1].hdr.meta_id);
               end
             end
           end
@@ -560,8 +560,8 @@
   final begin
     for (int g = 0; g < NumGroups; g++) begin
       for (int t = 0; t < NumTilesPerGroup; t++) begin
-        for (int p = 0; p < NumNarrowPayloadReqPortsPerTile; p++) begin
-          automatic int rid = t*NumNarrowPayloadReqPortsPerTile + p;
+        for (int p = 0; p < NumNarrowRwReqPortsPerTile; p++) begin
+          automatic int rid = t*NumNarrowRwReqPortsPerTile + p;
           for (int d = 0; d < 4; d++) begin
             $fwrite(f_rreq[g], "%0d S %0d 0 %0d %0d %0d\n", rid, d, rsq_start[g][t][p][d][0], cycle_q, rsq_st[g][t][p][d][0]);
             $fwrite(f_rreq[g], "%0d S %0d 1 %0d %0d %0d\n", rid, d, rsq_start[g][t][p][d][1], cycle_q, rsq_st[g][t][p][d][1]);

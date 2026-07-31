@@ -376,6 +376,7 @@ package mempool_pkg;
     tcdm_payload_t rdata;
     tile_group_id_t ini_addr;
     group_id_t src_group_id; // FlooNoC Added
+    logic is_write;
   } tcdm_slave_resp_t;
 
   /********************
@@ -467,7 +468,8 @@ package mempool_pkg;
   // TCDM feature-guard contract:
   //
   // * The narrow plane is always present. USE_RO_NARROW_REQ_CHANNEL adds its
-  //   optional, meta-only RO request array.
+  //   optional, meta-only RO request array; USE_WO_NARROW_RESP_CHANNEL adds its
+  //   optional, meta-only WO response array.
   // * USE_WIDE_TCDM_PLANE owns every wide type and packed interface member.
   //   Its RW request and RW response channel arrays are mandatory.
   // * USE_RO_WIDE_REQ_CHANNEL and USE_WO_WIDE_RESP_CHANNEL are optional children
@@ -478,20 +480,16 @@ package mempool_pkg;
   // count would create an illegal packed array. The build derives them from the
   // corresponding channel counts; source code must not define them independently.
 
-  // Narrow TCDM plane channel counts. The RO request class is meta-only; RW and
-  // WO request allocations share the payload-bearing RW flit type. RD is the
-  // data-bearing response class and also carries write acknowledgements.
+  // Narrow TCDM plane channel counts. RO requests and WO responses are
+  // meta-only; RW requests and responses carry the full narrow payload.
   localparam integer unsigned NumNarrowRoReqPortsPerTile =
       `ifdef NOC_REQ_NARROW_RO_CHANNEL_NUM `NOC_REQ_NARROW_RO_CHANNEL_NUM `else 0 `endif;
   localparam integer unsigned NumNarrowRwReqPortsPerTile =
       `ifdef NOC_REQ_NARROW_RW_CHANNEL_NUM `NOC_REQ_NARROW_RW_CHANNEL_NUM `else 2 `endif;
-  localparam integer unsigned NumNarrowWoReqPortsPerTile =
-      `ifdef NOC_REQ_NARROW_WO_CHANNEL_NUM `NOC_REQ_NARROW_WO_CHANNEL_NUM `else 0 `endif;
-  localparam integer unsigned NumNarrowRdRespPortsPerTile =
-      `ifdef NOC_RESP_NARROW_RD_CHANNEL_NUM `NOC_RESP_NARROW_RD_CHANNEL_NUM `else 2 `endif;
-
-  localparam integer unsigned NumNarrowPayloadReqPortsPerTile =
-      NumNarrowRwReqPortsPerTile + NumNarrowWoReqPortsPerTile;
+  localparam integer unsigned NumNarrowRwRespPortsPerTile =
+      `ifdef NOC_RESP_NARROW_RW_CHANNEL_NUM `NOC_RESP_NARROW_RW_CHANNEL_NUM `else 2 `endif;
+  localparam integer unsigned NumNarrowWoRespPortsPerTile =
+      `ifdef NOC_RESP_NARROW_WO_CHANNEL_NUM `NOC_RESP_NARROW_WO_CHANNEL_NUM `else 0 `endif;
 
   // Wide TCDM plane (WP2) group-channel counts. A SEPARATE FlooNoC net with its own
   // routers/links, so these are NOT folded into NumNarrowRemoteReqPortsPerTile (which
@@ -549,9 +547,9 @@ package mempool_pkg;
       NumWideRwRespChannelsPerGroup + NumWideWoRespChannelsPerGroup;
 
   localparam integer unsigned NumNarrowRemoteReqPortsPerTile =
-      1 + NumNarrowRoReqPortsPerTile + NumNarrowPayloadReqPortsPerTile;
+      1 + NumNarrowRoReqPortsPerTile + NumNarrowRwReqPortsPerTile;
   localparam integer unsigned NumNarrowRemoteRespPortsPerTile =
-      1 + NumNarrowRdRespPortsPerTile;
+      1 + NumNarrowRwRespPortsPerTile + NumNarrowWoRespPortsPerTile;
   localparam integer unsigned NumDirections = `ifdef NUM_DIRECTIONS `NUM_DIRECTIONS `else 5 `endif;
   localparam integer unsigned NumX = `ifdef NUM_X `NUM_X `else 2 `endif;
   localparam integer unsigned NumY = NumGroups/NumX;
@@ -669,7 +667,7 @@ package mempool_pkg;
     `ifdef USE_RO_NARROW_REQ_CHANNEL
     floo_tcdm_narrow_ro_req_if_entry_t [NumNarrowRoReqPortsPerTile-1:0] narrow_ro_req;
     `endif
-    floo_tcdm_narrow_rw_req_if_entry_t [NumNarrowPayloadReqPortsPerTile-1:0] narrow_rw_req;
+    floo_tcdm_narrow_rw_req_if_entry_t [NumNarrowRwReqPortsPerTile-1:0] narrow_rw_req;
   } floo_tcdm_req_if_per_tile_entry_t;
 
   typedef struct packed {
@@ -698,7 +696,11 @@ package mempool_pkg;
   typedef struct packed {
     floo_tcdm_narrow_resp_payload_t payload;
     floo_tcdm_resp_meta_t            hdr;
-  } floo_tcdm_narrow_rd_resp_t;
+  } floo_tcdm_narrow_rw_resp_t;
+
+  typedef struct packed {
+    floo_tcdm_resp_meta_t hdr;
+  } floo_tcdm_narrow_wo_resp_t;
 
   // Wide TCDM plane (WP2) response flits + group-channel interface (see request note).
   `ifdef USE_WIDE_TCDM_PLANE
@@ -706,41 +708,50 @@ package mempool_pkg;
     wide_tcdm_data_t data;
   } floo_tcdm_wide_resp_payload_t;
 
-  // RD flit format: carries the line on an RW response channel.
+  // RW flit format: carries the line on an RW response channel.
   typedef struct packed {
     floo_tcdm_wide_resp_payload_t payload;
     floo_tcdm_resp_meta_t           hdr;
-  } floo_tcdm_wide_rd_resp_t;
+  } floo_tcdm_wide_rw_resp_t;
 
-  // WR flit format: a meta-only ACK carried on a WO response channel. A write has
+  // WO flit format: a meta-only ACK carried on a WO response channel. A write has
   // no data to return, so giving it a full-width response would burn WIDE_W wires
   // to carry nothing. The engine still needs the handshake -- RedMulE retires
   // stores through the same meta_id path.
   typedef struct packed {
     floo_tcdm_resp_meta_t hdr;
-  } floo_tcdm_wide_wr_resp_t;
+  } floo_tcdm_wide_wo_resp_t;
 
   typedef struct packed {
-    floo_tcdm_wide_rd_resp_t resp;
+    floo_tcdm_wide_rw_resp_t resp;
     logic                     valid;
     logic                     ready;
   } floo_tcdm_wide_rw_rsp_if_entry_t;
 
   typedef struct packed {
-    floo_tcdm_wide_wr_resp_t resp;
+    floo_tcdm_wide_wo_resp_t resp;
     logic                     valid;
     logic                     ready;
   } floo_tcdm_wide_wo_rsp_if_entry_t;
   `endif
 
   typedef struct packed {
-    floo_tcdm_narrow_rd_resp_t resp;
-    logic            valid;
-    logic            ready;
-  } floo_tcdm_narrow_rd_rsp_if_entry_t;
+    floo_tcdm_narrow_rw_resp_t resp;
+    logic                      valid;
+    logic                      ready;
+  } floo_tcdm_narrow_rw_rsp_if_entry_t;
 
   typedef struct packed {
-    floo_tcdm_narrow_rd_rsp_if_entry_t     [NumTilesPerGroup-1:0][NumNarrowRemoteRespPortsPerTile-1:1]    floo_tcdm_narrow_rd_resp;
+    floo_tcdm_narrow_wo_resp_t resp;
+    logic                      valid;
+    logic                      ready;
+  } floo_tcdm_narrow_wo_rsp_if_entry_t;
+
+  typedef struct packed {
+    floo_tcdm_narrow_rw_rsp_if_entry_t [NumTilesPerGroup-1:0][NumNarrowRwRespPortsPerTile-1:0] floo_tcdm_narrow_rw_resp;
+    `ifdef USE_WO_NARROW_RESP_CHANNEL
+    floo_tcdm_narrow_wo_rsp_if_entry_t [NumTilesPerGroup-1:0][NumNarrowWoRespPortsPerTile-1:0] floo_tcdm_narrow_wo_resp;
+    `endif
     `ifdef USE_WIDE_TCDM_PLANE
     floo_tcdm_wide_rw_rsp_if_entry_t [NumWideRwRespChannelsPerGroup-1:0] floo_tcdm_wide_rw_resp;
     `ifdef USE_WO_WIDE_RESP_CHANNEL
