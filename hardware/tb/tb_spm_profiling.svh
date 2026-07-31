@@ -132,25 +132,25 @@
   // Count of requests targeting the same bank from multiple tiles
   logic [NumGroups-1:0]
         [NumTilesPerGroup * NumBanksPerTile - 1:0]
-        [$clog2(NumTilesPerGroup * (NumRemoteReqPortsPerTile - 1)) : 0]
+        [$clog2(NumTilesPerGroup * (NumNarrowRemoteReqPortsPerTile - 1)) : 0]
         group_xbar_req_to_same_bank_count;
   logic [NumGroups-1:0]
         [NumTilesPerGroup * NumBanksPerTile - 1:0]
-        [$clog2(NumTilesPerGroup * (NumRemoteReqPortsPerTile - 1)) : 0]
+        [$clog2(NumTilesPerGroup * (NumNarrowRemoteReqPortsPerTile - 1)) : 0]
         group_xbar_req_to_same_bank_conflict_count;
   logic [NumGroups-1:0]
-        [$clog2(NumTilesPerGroup * (NumRemoteReqPortsPerTile - 1)) : 0]
+        [$clog2(NumTilesPerGroup * (NumNarrowRemoteReqPortsPerTile - 1)) : 0]
         group_xbar_req_to_same_bank_conflict_count_sum;
-  logic [NumX-1:0][NumY-1:0][NumRemoteReqPortsPerTile - 2:0][NumTilesPerGroup-1:0]
+  logic [NumX-1:0][NumY-1:0][NumNarrowRemoteReqPortsPerTile - 2:0][NumTilesPerGroup-1:0]
         tcdm_slave_req_valid;
-  logic [NumX-1:0][NumY-1:0][NumRemoteReqPortsPerTile - 2:0][NumTilesPerGroup-1:0]
+  logic [NumX-1:0][NumY-1:0][NumNarrowRemoteReqPortsPerTile - 2:0][NumTilesPerGroup-1:0]
         [idx_width(NumTilesPerGroup) + idx_width(NumBanksPerTile) - 1 : 0]
         tcdm_slave_req_tgt_addr;
 
   generate
     for (genvar x_dim = 0; x_dim < NumX; x_dim++) begin : gen_x
       for (genvar y_dim = 0; y_dim < NumY; y_dim++) begin : gen_y
-        for (genvar p = 0; p < (NumRemoteReqPortsPerTile - 1); p++) begin : gen_port
+        for (genvar p = 0; p < (NumNarrowRemoteReqPortsPerTile - 1); p++) begin : gen_port
           for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_tile
             assign tcdm_slave_req_valid[x_dim][y_dim][p][t] =
                 dut.i_mempool_cluster.gen_groups_x[x_dim].gen_groups_y[y_dim]
@@ -169,7 +169,7 @@
   always_comb begin
     group_xbar_req_to_same_bank_count = '0;
     for (int g = 0; g < NumGroups; g++)
-      for (int p = 0; p < (NumRemoteReqPortsPerTile - 1); p++)
+      for (int p = 0; p < (NumNarrowRemoteReqPortsPerTile - 1); p++)
         for (int t = 0; t < NumTilesPerGroup; t++)
           if (tcdm_slave_req_valid[g / NumY][g % NumY][p][t])
             group_xbar_req_to_same_bank_count[g][

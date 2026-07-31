@@ -21,8 +21,8 @@ df["total_cycles"] = df["cycles_section1"] + df["cycles_section2"]
 # Configuration parameters (features) and performance metric (target)
 X = df[
     [
-        "noc_req_rd_channel_num",
-        "noc_req_rdwr_channel_num",
+        "noc_req_narrow_ro_channel_num",
+        "noc_req_narrow_rw_channel_num",
         "tile_id_remap",
         "spm_bank_id_remap",
         "noc_router_input_fifo_dep",
@@ -83,7 +83,7 @@ print("\n### Combined data saved to 'cycles_with_total.csv' ###")
 # df = pd.read_csv('cycles_analysis_data.csv')
 
 # # Configuration parameters (features) and performance metrics (targets)
-# X = df[['noc_req_rd_channel_num', 'noc_req_rdwr_channel_num',
+# X = df[['noc_req_narrow_ro_channel_num', 'noc_req_narrow_rw_channel_num',
 #         'tile_id_remap', 'spm_bank_id_remap',
 #         'noc_router_input_fifo_dep', 'noc_router_output_fifo_dep']]
 # y_section1 = df['cycles_section1']

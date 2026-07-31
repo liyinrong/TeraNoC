@@ -126,12 +126,12 @@ export -f run_job
 # configs=("terapool_64core")
 # tile_id_remaps=("1")
 # spm_bank_id_remaps=("1")
-# wr_nums=("0")
-# # For noc_req_rd_channel_num and noc_req_rdwr_channel_num:
-# pairs_wr0=("0,1")
-# pairs_wr1=("0,1")
-# # New option: noc_resp_channel_num:
-# resp_channels=("2")
+# narrow_wo_channels=("0")
+# # For noc_req_narrow_ro_channel_num and noc_req_narrow_rw_channel_num:
+# narrow_ro_rw_pairs_wo0=("0,1")
+# narrow_ro_rw_pairs_wo1=("0,1")
+# # New option: noc_resp_narrow_rd_channel_num:
+# narrow_rd_resp_channels=("2")
 # topologies=("2dmesh")
 # routing_algorithms=("xy")
 # req_remappings=("1")
@@ -145,12 +145,12 @@ export -f run_job
 configs=("terapool_64core" "mempool" "terapool")
 tile_id_remaps=("0" "1")
 spm_bank_id_remaps=("0" "1")
-wr_nums=("0")
-# For noc_req_rd_channel_num and noc_req_rdwr_channel_num:
-pairs_wr0=("0,1" "0,2" "1,1" "2,1")
-pairs_wr1=("0,1" "0,2" "1,1" "2,1" "1,0" "2,0")
-# New option: noc_resp_channel_num:
-resp_channels=("1" "2")
+narrow_wo_channels=("0")
+# For noc_req_narrow_ro_channel_num and noc_req_narrow_rw_channel_num:
+narrow_ro_rw_pairs_wo0=("0,1" "0,2" "1,1" "2,1")
+narrow_ro_rw_pairs_wo1=("0,1" "0,2" "1,1" "2,1" "1,0" "2,0")
+# New option: noc_resp_narrow_rd_channel_num:
+narrow_rd_resp_channels=("1" "2")
 topologies=("2dmesh" "torus")
 routing_algorithms=("xy" "o1" "odd_even")
 req_remappings=("1")
@@ -173,15 +173,15 @@ for config in "${configs[@]}"; do
 
   for tile_id_remap in "${tile_id_remaps[@]}"; do
     for spm_bank_id_remap in "${spm_bank_id_remaps[@]}"; do
-      for wr in "${wr_nums[@]}"; do
-        if [ "$wr" -eq 0 ]; then
-          pairs=("${pairs_wr0[@]}")
+      for narrow_wo_channel in "${narrow_wo_channels[@]}"; do
+        if [ "$narrow_wo_channel" -eq 0 ]; then
+          narrow_ro_rw_pairs=("${narrow_ro_rw_pairs_wo0[@]}")
         else
-          pairs=("${pairs_wr1[@]}")
+          narrow_ro_rw_pairs=("${narrow_ro_rw_pairs_wo1[@]}")
         fi
-        for pair in "${pairs[@]}"; do
-          IFS=',' read -r rd_channel rdwr_channel <<< "$pair"
-          for resp_channel in "${resp_channels[@]}"; do
+        for narrow_ro_rw_pair in "${narrow_ro_rw_pairs[@]}"; do
+          IFS=',' read -r narrow_ro_channel narrow_rw_channel <<< "$narrow_ro_rw_pair"
+          for narrow_rd_resp_channel in "${narrow_rd_resp_channels[@]}"; do
             for topology in "${topologies[@]}"; do
               # If topology is torus, restrict routing algorithm to xy.
               if [ "$topology" == "torus" ]; then
@@ -201,10 +201,10 @@ for config in "${configs[@]}"; do
                           #   config                => c
                           #   tile_id_remap         => t
                           #   spm_bank_id_remap     => s
-                          #   noc_req_wr_channel_num=> wr
-                          #   noc_req_rd_channel_num=> rd
-                          #   noc_req_rdwr_channel_num=> rr
-                          #   noc_resp_channel_num  => rch
+                          #   noc_req_narrow_wo_channel_num => wo
+                          #   noc_req_narrow_ro_channel_num => ro
+                          #   noc_req_narrow_rw_channel_num => rw
+                          #   noc_resp_narrow_rd_channel_num => rd
                           #   topology              => top
                           #   routing_algorithm     => ra
                           #   req_remapping         => rm
@@ -213,7 +213,7 @@ for config in "${configs[@]}"; do
                           #   noc_router_input_fifo_dep => in
                           #   noc_router_output_fifo_dep=> out
                           #   noc_router_remap_group_size=> rs
-                          SG_SCRIPT_SUF="_c${config}_t${tile_id_remap}_s${spm_bank_id_remap}_wr${wr}_rd${rd_channel}_rr${rdwr_channel}_rch${resp_channel}_top${topology}_ra${routing_algo}_rm${req_remap}_rsm${resp_remap}_vc${virt_chan}_in${input_fifo}_out${output_fifo}_rs${remap_size}"
+                          SG_SCRIPT_SUF="_c${config}_t${tile_id_remap}_s${spm_bank_id_remap}_wo${narrow_wo_channel}_ro${narrow_ro_channel}_rw${narrow_rw_channel}_rd${narrow_rd_resp_channel}_top${topology}_ra${routing_algo}_rm${req_remap}_rsm${resp_remap}_vc${virt_chan}_in${input_fifo}_out${output_fifo}_rs${remap_size}"
 
                           # Copy the run_lint.tcl file into the tmp directory with a new name.
                           tcl_src="${SPYGLASS_WORK_DIR}/scripts/run_lint.tcl"
@@ -234,12 +234,12 @@ for config in "${configs[@]}"; do
 
                           # Generate the file list.
                           rm ${SPYGLASS_WORK_DIR}/tmp/files_${SG_SCRIPT_SUF#_}
-                          cmd_flist="SG_SCRIPT_PATH=tmp/tcl SG_SCRIPT_SUF=${SG_SCRIPT_SUF} config=${config} tile_id_remap=${tile_id_remap} spm_bank_id_remap=${spm_bank_id_remap} noc_req_wr_channel_num=${wr} noc_req_rd_channel_num=${rd_channel} noc_req_rdwr_channel_num=${rdwr_channel} noc_resp_channel_num=${resp_channel} topology=${topology} routing_algorithm=${routing_algo} req_remapping=${req_remap} resp_remapping=${resp_remap} num_virtual_channel=${virt_chan} noc_router_input_fifo_dep=${input_fifo} noc_router_output_fifo_dep=${output_fifo} noc_router_remap_group_size=${remap_size} make ${SPYGLASS_WORK_DIR}/tmp/files_${SG_SCRIPT_SUF#_} SPYGLASS_WORK_DIR=${SPYGLASS_WORK_DIR}"
+                          cmd_flist="SG_SCRIPT_PATH=tmp/tcl SG_SCRIPT_SUF=${SG_SCRIPT_SUF} config=${config} tile_id_remap=${tile_id_remap} spm_bank_id_remap=${spm_bank_id_remap} noc_req_narrow_wo_channel_num=${narrow_wo_channel} noc_req_narrow_ro_channel_num=${narrow_ro_channel} noc_req_narrow_rw_channel_num=${narrow_rw_channel} noc_resp_narrow_rd_channel_num=${narrow_rd_resp_channel} topology=${topology} routing_algorithm=${routing_algo} req_remapping=${req_remap} resp_remapping=${resp_remap} num_virtual_channel=${virt_chan} noc_router_input_fifo_dep=${input_fifo} noc_router_output_fifo_dep=${output_fifo} noc_router_remap_group_size=${remap_size} make ${SPYGLASS_WORK_DIR}/tmp/files_${SG_SCRIPT_SUF#_} SPYGLASS_WORK_DIR=${SPYGLASS_WORK_DIR}"
                           eval "$cmd_flist"
                           mv ${SPYGLASS_WORK_DIR}/tmp/files_${SG_SCRIPT_SUF#_} ${SPYGLASS_WORK_DIR}/tmp/flist/files_${SG_SCRIPT_SUF#_}
 
                           # Build the command.
-                          cmd="SG_SCRIPT_PATH=tmp/tcl SG_SCRIPT_SUF=${SG_SCRIPT_SUF} config=${config} tile_id_remap=${tile_id_remap} spm_bank_id_remap=${spm_bank_id_remap} noc_req_wr_channel_num=${wr} noc_req_rd_channel_num=${rd_channel} noc_req_rdwr_channel_num=${rdwr_channel} noc_resp_channel_num=${resp_channel} topology=${topology} routing_algorithm=${routing_algo} req_remapping=${req_remap} resp_remapping=${resp_remap} num_virtual_channel=${virt_chan} noc_router_input_fifo_dep=${input_fifo} noc_router_output_fifo_dep=${output_fifo} noc_router_remap_group_size=${remap_size} make lint SPYGLASS_WORK_DIR=${SPYGLASS_WORK_DIR}"
+                          cmd="SG_SCRIPT_PATH=tmp/tcl SG_SCRIPT_SUF=${SG_SCRIPT_SUF} config=${config} tile_id_remap=${tile_id_remap} spm_bank_id_remap=${spm_bank_id_remap} noc_req_narrow_wo_channel_num=${narrow_wo_channel} noc_req_narrow_ro_channel_num=${narrow_ro_channel} noc_req_narrow_rw_channel_num=${narrow_rw_channel} noc_resp_narrow_rd_channel_num=${narrow_rd_resp_channel} topology=${topology} routing_algorithm=${routing_algo} req_remapping=${req_remap} resp_remapping=${resp_remap} num_virtual_channel=${virt_chan} noc_router_input_fifo_dep=${input_fifo} noc_router_output_fifo_dep=${output_fifo} noc_router_remap_group_size=${remap_size} make lint SPYGLASS_WORK_DIR=${SPYGLASS_WORK_DIR}"
 
                           echo "Waiting for resources before launching command:"
                           echo "$cmd"

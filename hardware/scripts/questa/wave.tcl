@@ -68,24 +68,24 @@ for {set group 0} {$group < [examine -radix dec /mempool_pkg::NumGroups]} {incr 
     add wave -group group_[$group] -group interconnect_local /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/tcdm_master_resp*
     add wave -group group_[$group] -group interconnect_local /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/tcdm_slave_req*
     add wave -group group_[$group] -group interconnect_local /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/tcdm_slave_resp*
-    # TCDM Router - Request Ports (wide + narrow)
+    # Narrow TCDM Router - Request Ports (RW/WO + optional RO)
     for {set tile 0} {$tile < [examine -radix dec /mempool_pkg::NumTilesPerGroup]} {incr tile} {
-        # Wide Request Ports
-        for {set port 1} {$port < [examine -radix dec /mempool_pkg::NumWideRemoteReqPortsPerTile]} {incr port} {
+        # Payload-bearing RW/WO request ports
+        for {set port 0} {$port < [examine -radix dec /mempool_pkg::NumNarrowPayloadReqPortsPerTile]} {incr port} {
             add wave -group group_[$group] -group floo_tcdm_router_req \
-            /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/gen_router_router_i[$tile]/gen_router_wide_req_router_j[$port]/gen_2dmesh/i_floo_tcdm_wide_req_router/*
+            /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/gen_router_router_i[$tile]/gen_router_narrow_rw_req_router_j[$port]/gen_2dmesh/i_floo_tcdm_narrow_rw_req_router/*
         }
-        # Narrow Request Ports (optional, only if enabled)
-        for {set port 1} {$port < [examine -radix dec /mempool_pkg::NumNarrowRemoteReqPortsPerTile]} {incr port} {
+        # Meta-only RO request ports (optional)
+        for {set port 0} {$port < [examine -radix dec /mempool_pkg::NumNarrowRoReqPortsPerTile]} {incr port} {
             add wave -group group_[$group] -group floo_tcdm_router_req \
-            /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/gen_router_router_i[$tile]/gen_router_narrow_req_router_j[$port]/gen_2dmesh/i_floo_tcdm_narrow_req_router/*
+            /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/gen_router_router_i[$tile]/gen_router_narrow_ro_req_router_j[$port]/gen_2dmesh/i_floo_tcdm_narrow_ro_req_router/*
         }
     }
-    # TCDM Router - Response Ports (only wide)
+    # Narrow TCDM Router - RD response ports
     for {set tile 0} {$tile < [examine -radix dec /mempool_pkg::NumTilesPerGroup]} {incr tile} {
-        for {set port 1} {$port < [examine -radix dec /mempool_pkg::NumRemoteRespPortsPerTile]} {incr port} {
+        for {set port 1} {$port < [examine -radix dec /mempool_pkg::NumNarrowRemoteRespPortsPerTile]} {incr port} {
             add wave -group group_[$group] -group floo_tcdm_router_resp \
-            /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/gen_router_router_i[$tile]/gen_router_wide_resp_router_j[$port]/gen_2dmesh/i_floo_tcdm_wide_resp_router/*
+            /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/gen_router_router_i[$tile]/gen_router_narrow_rd_resp_router_j[$port]/gen_2dmesh/i_floo_tcdm_narrow_rd_resp_router/*
         }
     }
     # Splitter & Interleaver

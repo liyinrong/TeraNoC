@@ -287,21 +287,21 @@ for {set group 0} {$group < [get -radix dec mempool_pkg::NumGroups]} {incr group
     wvAddSignal -win $_nWave2 "/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/i_mempool_group/tcdm_master_resp*"
     wvAddSignal -win $_nWave2 "/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/i_mempool_group/tcdm_slave_req*"
     wvAddSignal -win $_nWave2 "/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/i_mempool_group/tcdm_slave_resp*"
-    # TCDM Router - Request Ports (wide + narrow)
+    # Narrow TCDM Router - Request Ports (RW/WO + optional RO)
     for {set tile 0} {$tile < [get -radix dec mempool_pkg::NumTilesPerGroup]} {incr tile} {
-        # Wide Request Ports
-        for {set port 1} {$port < [get -radix dec mempool_pkg::NumWideRemoteReqPortsPerTile]} {incr port} {
-            wvAddSignal -win $_nWave2 "/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/gen_router_router_i\[${tile}\]/gen_router_wide_req_router_j\[${port}\]/gen_2dmesh/i_floo_tcdm_wide_req_router/*"
+        # Payload-bearing RW/WO request ports
+        for {set port 0} {$port < [get -radix dec mempool_pkg::NumNarrowPayloadReqPortsPerTile]} {incr port} {
+            wvAddSignal -win $_nWave2 "/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/gen_router_router_i\[${tile}\]/gen_router_narrow_rw_req_router_j\[${port}\]/gen_2dmesh/i_floo_tcdm_narrow_rw_req_router/*"
         }
-        # Narrow Request Ports (optional, only if enabled)
-        for {set port 1} {$port < [get -radix dec mempool_pkg::NumNarrowRemoteReqPortsPerTile]} {incr port} {
-            wvAddSignal -win $_nWave2 "/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/gen_router_router_i\[${tile}\]/gen_router_narrow_req_router_j\[${port}\]/gen_2dmesh/i_floo_tcdm_narrow_req_router/*"
+        # Meta-only RO request ports (optional)
+        for {set port 0} {$port < [get -radix dec mempool_pkg::NumNarrowRoReqPortsPerTile]} {incr port} {
+            wvAddSignal -win $_nWave2 "/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/gen_router_router_i\[${tile}\]/gen_router_narrow_ro_req_router_j\[${port}\]/gen_2dmesh/i_floo_tcdm_narrow_ro_req_router/*"
         }
     }
-    # TCDM Router - Response Ports (only wide)
+    # Narrow TCDM Router - RD response ports
     for {set tile 0} {$tile < [get -radix dec mempool_pkg::NumTilesPerGroup]} {incr tile} {
-        for {set port 1} {$port < [get -radix dec mempool_pkg::NumRemoteRespPortsPerTile]} {incr port} {
-            wvAddSignal -win $_nWave2 "/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/gen_router_router_i\[${tile}\]/gen_router_wide_resp_router_j\[${port}\]/gen_2dmesh/i_floo_tcdm_wide_resp_router/*"
+        for {set port 1} {$port < [get -radix dec mempool_pkg::NumNarrowRemoteRespPortsPerTile]} {incr port} {
+            wvAddSignal -win $_nWave2 "/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/gen_router_router_i\[${tile}\]/gen_router_narrow_rd_resp_router_j\[${port}\]/gen_2dmesh/i_floo_tcdm_narrow_rd_resp_router/*"
         }
     }
     # Splitter & Interleaver
