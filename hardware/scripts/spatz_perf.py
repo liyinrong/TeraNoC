@@ -57,11 +57,23 @@ SPATZ_LOG_RE = re.compile(r"spatz_g(\d+)_t(\d+)_c(\d+)\.log$")
 CPI = ["compute", "mem", "stall", "drain", "idle"]
 
 
+# Issue-stall causes, in `istall` bit order (tb_spatz_profiling.svh).
+ISTALL = ["VFU not ready", "VLSU not ready", "VSLDU not ready",
+          "scoreboard full"]
+# VFU stall causes, in `vstall` bit order.
+VSTALL = ["operand vs1 wait", "operand vs2 wait", "operand vd wait",
+          "FU inputs busy", "IPU<->FPU switch", "scalar wb wait"]
+# Retire units, and the ex_unit -> retire-unit map (ex_unit: 0=CON 1=LSU
+# 2=SLD 3=VFU; CON instructions retire in the controller, with no R line).
+UNITS = ["VFU", "VLSU", "VSLDU", "CSR"]
+EXUNIT2UNIT = {3: 0, 1: 1, 2: 2, 0: 3}
+
+
 class CoreEngine:
     """Engine-trace reduction of one Spatz core."""
 
     def __init__(self):
-        self.dims = (0, 0, 0)   # VLEN, N_FU, NrMemPorts
+        self.dims = (0, 0, 0, 0)  # VLEN, N_FU, NrMemPorts, VRFWordBytes
         self.end_cyc = 0
         self.active = 0         # cycles with a C row (engine not idle)
         self.bucket = collections.Counter()
@@ -71,6 +83,23 @@ class CoreEngine:
         self.memact = 0         # port-cycles with a request valid
         self.first = None
         self.last = 0
+        # -- stall causes (cycles) and VFU lane occupancy (bytes) --
+        self.istall = collections.Counter()   # cause -> cycles
+        self.iblocked = 0       # cycles blocked by ANY cause (no double count)
+        self.iwait = 0          # cycles with an instruction buffered
+        self.vstall = collections.Counter()
+        self.vfu_req_cyc = 0    # VFU-busy cycles
+        self.vfu_clear = 0      # ... of those, with no stall cause asserted
+        self.lin = self.lout = 0
+        self.feed = 0           # cycles a word was fed to the FUs
+        self.extended = False   # log carries the 2026-08 fields
+        # -- per vector instruction (I/R lines) --
+        self.n_insn = [0, 0, 0, 0]          # per UNITS
+        self.vl_sum = [0, 0, 0, 0]
+        self.sew = collections.Counter()    # (unit, vsew) -> count
+        self.lmul = collections.Counter()   # (unit, vlmul) -> count
+        self.lat = [mt.LatStats() for _ in UNITS]
+        self.n_unretired = 0
 
 
 def _bucket(stall, vfu_busy, vlsu_busy, vsldu_busy):
@@ -92,25 +121,87 @@ def load_engine(sp_dir, lo, hi):
             continue
         g, t, c = (int(v) for v in m.groups())
         e = CoreEngine()
+        # (unit, scoreboard id) -> issue cycles awaiting their retire
+        pend = collections.defaultdict(collections.deque)
         with open(path, "r", errors="replace") as f:
             for line in f:
                 x = line.split()
                 if not x:
                     continue
-                if x[0] == "D" and len(x) == 4:
-                    e.dims = tuple(int(v) for v in x[1:])
+                if x[0] == "D" and len(x) in (4, 5):
+                    e.dims = tuple(int(v) for v in x[1:]) + (
+                        (0,) if len(x) == 4 else ())
                     continue
                 if x[0] == "E" and len(x) == 2:
                     e.end_cyc = int(x[1])
                     continue
-                if x[0] != "C" or len(x) != 14:
+                # I <cyc> <id> <ex_unit> <vl> <vsew> <vlmul>
+                if x[0] == "I" and len(x) == 7:
+                    try:
+                        cyc, iid, exu = int(x[1]), int(x[2]), int(x[3])
+                        vl, sew, lmul = int(x[4]), int(x[5]), int(x[6])
+                    except ValueError:
+                        continue
+                    if not (lo <= cyc < hi):
+                        continue
+                    u = EXUNIT2UNIT.get(exu, 3)
+                    e.n_insn[u] += 1
+                    e.vl_sum[u] += vl
+                    e.sew[(u, sew)] += 1
+                    e.lmul[(u, lmul)] += 1
+                    if u != 3:                    # CSR ops have no R line
+                        pend[(u, iid)].append(cyc)
+                    continue
+                # R <cyc> <unit> <id>
+                if x[0] == "R" and len(x) == 4:
+                    try:
+                        cyc, u, iid = int(x[1]), int(x[2]), int(x[3])
+                    except ValueError:
+                        continue
+                    if not (lo <= cyc < hi):
+                        continue
+                    q = pend.get((u, iid))
+                    if q:
+                        e.lat[u].add(cyc - q.popleft())
+                    continue
+                if x[0] != "C" or len(x) not in (14, 18):
                     continue
                 v = [int(z) for z in x[1:]]
                 cyc = v[0]
                 if not (lo <= cyc < hi):
                     continue
                 (_cyc, _occ, stall, issue, vfu_b, _vfu_st, vlsu_b, _vlsu_st,
-                 vsldu_b, vfu_r, vlsu_r, vsldu_r, memact) = v
+                 vsldu_b, vfu_r, vlsu_r, vsldu_r, memact) = v[:13]
+                if len(v) == 17:                  # 2026-08 fields
+                    istall, vstall, lin, lout = v[13:]
+                    e.extended = True
+                    # A cause only means "blocked" while something is
+                    # actually waiting to issue (bit 4). The RTL's own `stall`
+                    # ANDs req_buffer_valid for the same reason; without it a
+                    # stale ex_unit or a full scoreboard would look like a
+                    # stall on an idle engine.
+                    if istall & (1 << 4):
+                        e.iwait += 1
+                        for i, nm in enumerate(ISTALL):
+                            if istall & (1 << i):
+                                e.istall[nm] += 1
+                        if istall & 0xf:
+                            e.iblocked += 1
+                    if vstall or True:
+                        # vstall is only meaningful while the VFU holds a
+                        # request; the RTL already zeroes it otherwise, and a
+                        # busy VFU with no cause is a cycle of real work.
+                        if vfu_b:
+                            e.vfu_req_cyc += 1
+                            if not vstall:
+                                e.vfu_clear += 1
+                        for i, nm in enumerate(VSTALL):
+                            if vstall & (1 << i):
+                                e.vstall[nm] += 1
+                    e.lin += lin
+                    e.lout += lout
+                    if lin:
+                        e.feed += 1
                 e.active += 1
                 e.bucket[_bucket(stall, vfu_b, vlsu_b, vsldu_b)] += 1
                 e.issue += issue
@@ -124,6 +215,7 @@ def load_engine(sp_dir, lo, hi):
                 if e.first is None:
                     e.first = cyc
                 e.last = cyc
+        e.n_unretired = sum(len(q) for q in pend.values())
         out[(g, t, c)] = e
     return out
 
@@ -189,6 +281,24 @@ def _merged(stats):
     for s in stats:
         m.merge(s)
     return m
+
+
+def _sew_str(c):
+    """SEW histogram as e8/e16/e32/e64 shares."""
+    tot = sum(c.values())
+    return " ".join(f"e{8 << k}:{100.0 * v / tot:.0f}%"
+                    for k, v in sorted(c.items())) if tot else "-"
+
+
+# vlmul_e: 0..3 = 1,2,4,8 ; 5..7 = 1/8,1/4,1/2 (rvv_pkg)
+LMUL_NAME = {0: "1", 1: "2", 2: "4", 3: "8",
+             4: "res", 5: "1/8", 6: "1/4", 7: "1/2"}
+
+
+def _lmul_str(c):
+    tot = sum(c.values())
+    return " ".join(f"m{LMUL_NAME.get(k, k)}:{100.0 * v / tot:.0f}%"
+                    for k, v in sorted(c.items())) if tot else "-"
 
 
 def _lat_line(name, s, total_n):
@@ -274,6 +384,95 @@ def report(eng, mem, dims, args, out):
               "   <- model target", file=out)
         print("    mem-port valid cycles     "
               f"{s_memact / n:>12.1f}", file=out)
+
+    # ---------------- stall causes + VFU datapath ----------------
+    if eng and any(e.extended for e in eng.values()):
+        n = len(eng)
+        allc = float(span * n)
+        print("", file=out)
+        print("-- why an instruction did not issue (all cores, % of window) "
+              + "-" * 15, file=out)
+        print("   causes are a per-cycle bitmap and can overlap, so they do "
+              "not partition", file=out)
+        tot_i = collections.Counter()
+        iwait = iblocked = 0
+        for e in eng.values():
+            tot_i.update(e.istall)
+            iwait += e.iwait
+            iblocked += e.iblocked
+        for nm in ISTALL:
+            print(f"    {nm:<22}{_fmt(_pct(tot_i[nm], allc), 9, 2)}%",
+                  file=out)
+        print(f"    {'ANY of the above':<22}"
+              f"{_fmt(_pct(iblocked, allc), 9, 2)}%   <- true blocked time",
+              file=out)
+        print(f"    {'insn buffered':<22}"
+              f"{_fmt(_pct(iwait, allc), 9, 2)}%   "
+              "<- something to issue (waiting or issuing)", file=out)
+
+        peak = next((e.dims[3] for e in eng.values() if e.dims[3]), 0)
+        lin = sum(e.lin for e in eng.values())
+        lout = sum(e.lout for e in eng.values())
+        feed = sum(e.feed for e in eng.values())
+        vfu_b = sum(e.vfu_busy for e in eng.values())
+        print("", file=out)
+        print("-- VFU datapath (peak %d B/cycle) " % peak + "-" * 40, file=out)
+        print(f"    cycles feeding the FUs    {feed / n:>12.1f}"
+              f"   ({_pct(feed, vfu_b):.1f}% of VFU-busy cycles)", file=out)
+        print(f"    bytes fed / core          {lin / n:>12.1f}", file=out)
+        print("    lane utilization          "
+              f"{_pct(lin, feed * peak) if (feed and peak) else 0:>12.2f}%"
+              "   <- of the cycles it feeds", file=out)
+        print("    lane utilization (window) "
+              f"{_pct(lin, allc * peak) if peak else 0:>12.2f}%", file=out)
+        print(f"    result-valid bytes / core {lout / n:>12.1f}"
+              "   (held across writeback back-pressure)", file=out)
+        vreq = sum(e.vfu_req_cyc for e in eng.values())
+        if vreq:
+            tot_v = collections.Counter()
+            for e in eng.values():
+                tot_v.update(e.vstall)
+            clear = sum(e.vfu_clear for e in eng.values())
+            print(f"    no stall cause asserted   "
+                  f"{_pct(clear, vreq):>12.2f}%   <- of VFU-busy cycles",
+                  file=out)
+            print("    stall causes (% of VFU-busy cycles; overlapping "
+                  "bitmap, they do not sum):", file=out)
+            for nm in VSTALL:
+                if tot_v[nm]:
+                    print(f"      {nm:<22}"
+                          f"{_fmt(_pct(tot_v[nm], vreq), 9, 2)}%", file=out)
+
+    # ---------------- vector instruction mix ----------------
+    if eng and any(sum(e.n_insn) for e in eng.values()):
+        n = len(eng)
+        print("", file=out)
+        print("-- vector instructions issued (per core, mean) " + "-" * 29,
+              file=out)
+        print(f"    {'unit':<8}{'count':>9}{'mean vl':>10}{'SEW':>22}"
+              f"{'LMUL':>16}{'cycles I->R':>13}", file=out)
+        for u, nm in enumerate(UNITS):
+            cnt = sum(e.n_insn[u] for e in eng.values())
+            if not cnt:
+                continue
+            vl = sum(e.vl_sum[u] for e in eng.values())
+            sew = collections.Counter()
+            lmul = collections.Counter()
+            lat = _merged([e.lat[u] for e in eng.values()])
+            for e in eng.values():
+                for (uu_, k), v in e.sew.items():
+                    if uu_ == u:
+                        sew[k] += v
+                for (uu_, k), v in e.lmul.items():
+                    if uu_ == u:
+                        lmul[k] += v
+            print(f"    {nm:<8}{cnt / n:>9.1f}{vl / cnt:>10.1f}"
+                  f"{_sew_str(sew):>22}{_lmul_str(lmul):>16}"
+                  f"{(lat.mean if lat.n else 0):>13.1f}", file=out)
+        unret = sum(e.n_unretired for e in eng.values())
+        if unret:
+            print(f"    ({unret} issued but not retired inside the window)",
+                  file=out)
 
     # ---------------- memory ----------------
     if mem:

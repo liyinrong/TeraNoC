@@ -1902,13 +1902,20 @@ def load_spatz_logs(sp_dir):
                 x = line.split()
                 if not x:
                     continue
-                if x[0] == "D" and len(x) == 4:
-                    dims = (int(x[1]), int(x[2]), int(x[3]))
-                elif x[0] == "C" and len(x) == 14:
+                if x[0] == "D" and len(x) in (4, 5):
+                    # 5th field (VRFWordBytes) = the VFU's per-cycle byte peak
+                    dims = (int(x[1]), int(x[2]), int(x[3]),
+                            int(x[4]) if len(x) == 5 else 0)
+                elif x[0] == "C" and len(x) in (14, 18):
+                    # 18 = the 2026-08 fields (istall, vstall, lin, lout); rows
+                    # keep the first 13 so every consumer below is unchanged,
+                    # with the lane bytes appended for the utilization counter.
                     try:
                         if not (WIN_CYC_LO <= int(x[1]) < WIN_CYC_HI):
                             continue
-                        rows.append(tuple(int(v) for v in x[1:]))
+                        v = [int(z) for z in x[1:]]
+                        rows.append(tuple(v[:13]) +
+                                    ((v[15],) if len(v) == 17 else (0,)))
                     except ValueError:
                         continue
                 elif x[0] == "E" and len(x) == 2:
@@ -1992,7 +1999,7 @@ def _emit_spatz_fsm(builder, leaf, urows, names, end_cyc):
 
 
 def _emit_spatz_counters(builder, ctr, mem_ctr, rows, nr_mem, win,
-                         args, end_cyc):
+                         args, end_cyc, lane_ctr=None, lane_peak=0):
     """Windowed occupancy/CPI stack (change-detected, pinned [0,1]): the 4
     active buckets as per-cycle fractions (cycles-in-bucket / window) plus idle
     = the row-less window cycles, computed across [0, end_cyc] so the engine's
@@ -2002,12 +2009,14 @@ def _emit_spatz_counters(builder, ctr, mem_ctr, rows, nr_mem, win,
     bcyc = collections.defaultdict(lambda: collections.defaultdict(int))
     memsum = collections.defaultdict(int)
     act = collections.defaultdict(int)
+    lanesum = collections.defaultdict(int)
     for (cyc, occ, stall, issue, vfu_busy, vfu_st, vlsu_busy, vlsu_st,
-         vsldu_busy, vfu_rsp, vlsu_rsp, vsldu_rsp, memact) in rows:
+         vsldu_busy, vfu_rsp, vlsu_rsp, vsldu_rsp, memact, lin) in rows:
         w = cyc // win
         bcyc[w][_spatz_bucket(occ, stall, issue, vfu_busy,
                               vlsu_busy, vsldu_busy)] += 1
         memsum[w] += memact
+        lanesum[w] += lin
         act[w] += 1
     maxw = end_cyc // win
     nrm = max(1, nr_mem)
@@ -2025,13 +2034,21 @@ def _emit_spatz_counters(builder, ctr, mem_ctr, rows, nr_mem, win,
         if last.get("__mem__") != mv:
             emit_counter(builder, ts, mem_ctr, mv)
             last["__mem__"] = mv
+        if lane_ctr is not None:
+            lv = lanesum.get(w, 0) / (win * lane_peak)
+            if last.get("__lane__") != lv:
+                emit_counter(builder, ts, lane_ctr, lv)
+                last["__lane__"] = lv
     ts_end = (maxw + 1) * win * TICK
     for m, u in ctr.items():
         if last.get(m):
             emit_counter(builder, ts_end, u, 0.0)
     if last.get("__mem__"):
         emit_counter(builder, ts_end, mem_ctr, 0.0)
-    pin_counter_range(builder, list(ctr.values()) + [mem_ctr],
+    if lane_ctr is not None and last.get("__lane__"):
+        emit_counter(builder, ts_end, lane_ctr, 0.0)
+    pin_counter_range(builder, list(ctr.values()) + [mem_ctr] +
+                      ([lane_ctr] if lane_ctr is not None else []),
                       ts_end + 2 * TICK, TICK)
 
 
@@ -2074,9 +2091,10 @@ def process_spatz(sp_dir, builder, uu, args):
     neng = nsl = 0
     # row layout: 0=cyc 1=occ 2=stall 3=issue 4=vfu_busy 5=vfu_st 6=vlsu_busy
     #             7=vlsu_st 8=vsldu_busy 9=vfu_rsp 10=vlsu_rsp 11=vsldu_rsp
-    #             12=memact
+    #             12=memact 13=lin (VFU bytes fed; 0 in pre-2026-08 logs)
     for (g, t, c), (dims, rows, end_cyc) in sorted(data.items()):
         nr_mem = dims[2]
+        lane_peak = dims[3] if len(dims) > 3 else 0
         eng = _ensure_spatz_engine(builder, uu, g, t, c, args)
         # VFU busy/sub-state ON the engine line.
         nsl += _emit_spatz_fsm(
@@ -2101,8 +2119,13 @@ def process_spatz(sp_dir, builder, uu, args):
                             parent=eng, counter=True) for b in SPATZ_CPI}
         mem_ctr = add_track(builder, uu.get(("sp_mem", g, t, c)),
                             "mem_ports", parent=eng, counter=True)
+        # VFU lane utilization: bytes fed to the FUs / the per-cycle peak.
+        # Only meaningful once the trace carries the lane fields.
+        lane_ctr = (add_track(builder, uu.get(("sp_lane", g, t, c)),
+                              "vfu_lanes", parent=eng, counter=True)
+                    if lane_peak else None)
         _emit_spatz_counters(builder, ctr, mem_ctr, rows, nr_mem, win,
-                             args, end_cyc)
+                             args, end_cyc, lane_ctr, lane_peak)
         neng += 1
     print(f"  Spatz engine: {neng} engine nodes "
           f"(VFU+VLSU+VSLDU FSM + 5-way occupancy/CPI incl. idle + "
