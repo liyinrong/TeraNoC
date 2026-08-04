@@ -578,6 +578,15 @@ tracevis:
 slices ?= function
 freq ?= 500
 noc_slices ?= state
+# TCDM data ports per core (mempool_pkg::NumDataPortsPerCore): 1 for scalar
+# builds, 1 + NumFUsPerCore for Spatz builds. The tile's local-port axis is
+# ports_per_core*core + port, so the exporter needs it to map a NoC packet's
+# core_id back to a core (and to place the RedMulE ports after them).
+ifeq ($(spatz), 1)
+ports_per_core := $(shell awk 'BEGIN{print 1 + (($(n_ipu) > $(n_fpu)) ? $(n_ipu) : $(n_fpu))}')
+else
+ports_per_core := 1
+endif
 ifeq ($(flows),1)
 override noc_slices := packet
 endif
@@ -591,6 +600,7 @@ perfetto-gen:
 	$(python) $(ROOT_DIR)/scripts/perfetto_gen.py $(buildpath)/trace_hart_*.dasm \
 		--cores-per-tile $(num_cores_per_tile) \
 		--tiles-per-group $(shell echo $$(( $(num_cores) / $(num_cores_per_tile) / $(num_groups) ))) \
+		--ports-per-core $(ports_per_core) \
 		--mesh-y $(shell echo $$(( $(num_groups) / $(num_x) ))) \
 		--clk-freq $(freq) \
 		--slices $(slices) $(if $(preload),--elf $(preload),) \
@@ -609,6 +619,55 @@ perfetto-gen:
 perfetto_dir := $(INSTALL_DIR)/perfetto
 tp_shell     := $(perfetto_dir)/trace_processor_shell
 perfetto_sif := $(perfetto_dir)/ubuntu2404.sif
+
+# Plain-text performance reports -- the same always-on profiling logs the
+# Perfetto export uses, reduced to numbers you can diff, paste, or feed a model
+# calibration. Written to $(buildpath)/*_perf.txt as well as stdout. Knobs:
+#   window=START:END   restrict to a cycle range (same syntax as perfetto-gen)
+#   percore=1          add the per-core table
+#   hist=1             add the round-trip-latency histogram (Spatz)
+#   csv=<file>         also dump the per-core / per-task table as CSV
+#   dump=<file>        also dump ONE ROW PER REQUEST as CSV (use window=/core=)
+#   core=G,T,C         restrict dump= to one core
+.PHONY: perf-report spatz-perf redmule-perf interco-perf
+# Engine trace: $(buildpath)/spatz_profiling (always on). Per-request memory
+# trace: $(buildpath)/noc_profiling, beside the pe_/rm_ port traces and under
+# the same noc_profiling=1 gate. The script picks both out of the build dir.
+spatz-perf:
+	@test -d $(buildpath)/spatz_profiling || \
+		{ echo "ERROR: no $(buildpath)/spatz_profiling -- run a Spatz sim first"; exit 1; }
+	$(python) $(ROOT_DIR)/scripts/spatz_perf.py $(buildpath) \
+		$(if $(win_start),--cycle-start $(win_start),) \
+		$(if $(win_end),--cycle-end $(win_end),) \
+		--per-group $(if $(filter 1,$(percore)),--per-core,) \
+		$(if $(filter 1,$(hist)),--hist,) $(if $(csv),--csv $(csv),) \
+		$(if $(dump),--dump $(dump),) $(if $(core),--core $(core),) \
+		| tee $(buildpath)/spatz_perf.txt
+
+redmule-perf:
+	@test -d $(buildpath)/redmule_profiling || \
+		{ echo "ERROR: no $(buildpath)/redmule_profiling -- run a RedMulE sim first"; exit 1; }
+	$(python) $(ROOT_DIR)/scripts/redmule_perf.py $(buildpath)/redmule_profiling \
+		$(if $(csv),--csv $(csv),) | tee $(buildpath)/redmule_perf.txt
+
+# Whole memory path: per-requester round-trip latency (snitch scalar / spatz
+# vector / redmule, split by address class) + fabric occupancy (tile ports,
+# routers, SPM banks). Needs noc_profiling=1 (spm_profiling=1 for the banks).
+interco-perf:
+	@test -d $(buildpath)/noc_profiling -o -d $(buildpath)/spm_profiling || \
+		{ echo "ERROR: no $(buildpath)/{noc,spm}_profiling -- re-run with noc_profiling=1 spm_profiling=1"; exit 1; }
+	$(python) $(ROOT_DIR)/scripts/interco_perf.py $(buildpath) \
+		--ports-per-core $(ports_per_core) \
+		--tiles-per-group $(shell echo $$(( $(num_cores) / $(num_cores_per_tile) / $(num_groups) ))) \
+		$(if $(win_start),--cycle-start $(win_start),) \
+		$(if $(win_end),--cycle-end $(win_end),) \
+		| tee $(buildpath)/interco_perf.txt
+
+# Everything the run actually produced (skips what is not there).
+perf-report:
+	@$(if $(wildcard $(buildpath)/spatz_profiling),$(MAKE) --no-print-directory spatz-perf,true)
+	@$(if $(wildcard $(buildpath)/redmule_profiling),$(MAKE) --no-print-directory redmule-perf,true)
+	@$(if $(wildcard $(buildpath)/noc_profiling),$(MAKE) --no-print-directory interco-perf,true)
 
 .PHONY: perfetto-view
 perfetto-view:

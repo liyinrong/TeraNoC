@@ -1,0 +1,521 @@
+#!/usr/bin/env python3
+# Copyright 2026 ETH Zurich and University of Bologna.
+# Solderpad Hardware License, Version 0.51, see LICENSE for details.
+# SPDX-License-Identifier: SHL-0.51
+#
+# Author: Yinrong Li, ETH Zurich
+"""Spatz vector-engine performance summary in PLAIN TEXT.
+
+The Perfetto exporter (``scripts/perfetto_gen.py``) is for browsing; this is
+the same data reduced to numbers you can diff, paste into a report, or feed a
+model calibration. It is the Spatz analogue of ``scripts/redmule_perf.py``.
+
+Two inputs, split the way RedMulE splits its logs -- engine internals in their
+own directory (always on), memory-port traffic captured by the NoC testbench
+beside the other port traces (needs ``noc_profiling=1``):
+
+* ``spatz_profiling/spatz_g<g>_t<t>_c<c>.log`` -- the per-cycle ENGINE trace:
+  scoreboard occupancy, per-unit busy/sub-state, retire handshakes, active
+  memory ports. Gives the occupancy/CPI stack and *VLSU cycles per memory
+  instruction*.
+* ``noc_profiling/spmem_g<g>_t<t>.log`` -- the per-REQUEST memory trace: one
+  record per accepted word request with its round-trip latency and destination
+  class. Gives what the engine trace cannot: where the VLSU occupancy goes.
+
+Reported per-memory-instruction decomposition (all per core, per kernel
+window):
+
+    VLSU busy / mem insn   how long a vle/vse occupies the VLSU end to end
+      requests / mem insn  word requests it fans out into (vl * SEW / 32 / 4)
+      grant wait / request cycles the request sat with valid high before the
+                           TCDM accepted it (issue-side back-pressure; from
+                           the engine trace's memact)
+      round trip / request accepted-request -> response, split by address
+                           class (local tile / intra-group / inter-group /
+                           SoC), read vs write
+
+Usage::
+
+    scripts/spatz_perf.py build/                     # or .../spatz_profiling
+    scripts/spatz_perf.py build/ --cycle-start 4000  # kernel window only
+    scripts/spatz_perf.py build/ --per-core --csv spatz.csv
+"""
+
+import argparse
+import collections
+import glob
+import os
+import re
+import sys
+
+import memtrace as mt
+
+SPATZ_LOG_RE = re.compile(r"spatz_g(\d+)_t(\d+)_c(\d+)\.log$")
+
+# Occupancy/CPI buckets, same attribution as the Perfetto exporter
+# (perfetto_gen.py:_spatz_bucket) so the two views cannot disagree.
+CPI = ["compute", "mem", "stall", "drain", "idle"]
+
+
+class CoreEngine:
+    """Engine-trace reduction of one Spatz core."""
+
+    def __init__(self):
+        self.dims = (0, 0, 0)   # VLEN, N_FU, NrMemPorts
+        self.end_cyc = 0
+        self.active = 0         # cycles with a C row (engine not idle)
+        self.bucket = collections.Counter()
+        self.issue = 0
+        self.vfu_busy = self.vlsu_busy = self.vsldu_busy = 0
+        self.vfu_rsp = self.vlsu_rsp = self.vsldu_rsp = 0
+        self.memact = 0         # port-cycles with a request valid
+        self.first = None
+        self.last = 0
+
+
+def _bucket(stall, vfu_busy, vlsu_busy, vsldu_busy):
+    if vfu_busy:
+        return "compute"
+    if vlsu_busy or vsldu_busy:
+        return "mem"
+    if stall:
+        return "stall"
+    return "drain"
+
+
+def load_engine(sp_dir, lo, hi):
+    """Parse every spatz_g*_t*_c*.log -> {(g,t,c): CoreEngine}."""
+    out = {}
+    for path in sorted(glob.glob(os.path.join(sp_dir, "spatz_g*_t*_c*.log"))):
+        m = SPATZ_LOG_RE.search(os.path.basename(path))
+        if not m:
+            continue
+        g, t, c = (int(v) for v in m.groups())
+        e = CoreEngine()
+        with open(path, "r", errors="replace") as f:
+            for line in f:
+                x = line.split()
+                if not x:
+                    continue
+                if x[0] == "D" and len(x) == 4:
+                    e.dims = tuple(int(v) for v in x[1:])
+                    continue
+                if x[0] == "E" and len(x) == 2:
+                    e.end_cyc = int(x[1])
+                    continue
+                if x[0] != "C" or len(x) != 14:
+                    continue
+                v = [int(z) for z in x[1:]]
+                cyc = v[0]
+                if not (lo <= cyc < hi):
+                    continue
+                (_cyc, _occ, stall, issue, vfu_b, _vfu_st, vlsu_b, _vlsu_st,
+                 vsldu_b, vfu_r, vlsu_r, vsldu_r, memact) = v
+                e.active += 1
+                e.bucket[_bucket(stall, vfu_b, vlsu_b, vsldu_b)] += 1
+                e.issue += issue
+                e.vfu_busy += vfu_b
+                e.vlsu_busy += vlsu_b
+                e.vsldu_busy += vsldu_b
+                e.vfu_rsp += vfu_r
+                e.vlsu_rsp += vlsu_r
+                e.vsldu_rsp += vsldu_r
+                e.memact += memact
+                if e.first is None:
+                    e.first = cyc
+                e.last = cyc
+        out[(g, t, c)] = e
+    return out
+
+
+class CoreMem:
+    """Memory-trace reduction of one Spatz core (all latency stats streamed,
+    so a 256-core run never holds every record)."""
+
+    def __init__(self, nr_ports):
+        self.all = mt.LatStats()
+        self.cls = [mt.LatStats() for _ in mt.CLASSES]
+        self.rw = [mt.LatStats(), mt.LatStats()]     # [read, write]
+        self.port = [mt.LatStats() for _ in range(max(1, nr_ports))]
+        self.n_req = self.n_rsp = self.n_inflight = self.n_orphan = 0
+        self.n_cls = [0] * len(mt.CLASSES)
+        self.n_rw = [0, 0]
+        self.occ = 0            # sum of latencies = request-cycles in flight
+
+    def add(self, r):
+        self.n_cls[r.cls] += 1
+        self.n_rw[r.wr] += 1
+        if r.lat is None:
+            return
+        self.all.add(r.lat)
+        self.cls[r.cls].add(r.lat)
+        self.rw[r.wr].add(r.lat)
+        if r.port < len(self.port):
+            self.port[r.port].add(r.lat)
+        self.occ += r.lat
+
+
+def load_mem(sp_dir, lo, hi):
+    """Parse every spmem_g*_t*.log -> ({(g,t,c): CoreMem}, dims)."""
+    out, dims = {}, None
+    for g, t, d, cores, _end in mt.iter_spmem_tiles(sp_dir):
+        dims = d
+        for c, ct in cores.items():
+            cm = CoreMem(d.nr_ports)
+            for r in ct.recs:
+                if not (lo <= r.cyc < hi):
+                    continue
+                cm.n_req += 1
+                if r.lat is None:
+                    cm.n_inflight += 1
+                cm.add(r)
+            cm.n_rsp = ct.n_rsp
+            cm.n_orphan = ct.n_orphan
+            out[(g, t, c)] = cm
+    return out, dims
+
+
+def _fmt(v, w=10, p=2):
+    return f"{v:>{w}.{p}f}"
+
+
+def _pct(n, d):
+    return 100.0 * n / d if d else 0.0
+
+
+def _merged(stats):
+    """Merge a list of LatStats into one."""
+    m = mt.LatStats()
+    for s in stats:
+        m.merge(s)
+    return m
+
+
+def _lat_line(name, s, total_n):
+    if not s.n:
+        return f"    {name:<10} {'-':>10}"
+    return (f"    {name:<10} {s.n:>10d} {_pct(s.n, total_n):>7.1f}%"
+            f" {s.mean:>9.2f} {s.quantile(50):>7d} {s.quantile(90):>7d}"
+            f" {s.quantile(99):>7d} {s.hi:>7d}")
+
+
+def report(eng, mem, dims, args, out):
+    cores = sorted(set(eng) | set(mem))
+    if not cores:
+        print("no Spatz logs found", file=sys.stderr)
+        return 1
+    ngrp = len({g for g, _t, _c in cores})
+    ntile = len({(g, t) for g, t, _c in cores})
+    any_e = next(iter(eng.values())) if eng else None
+    end_cyc = max((e.end_cyc for e in eng.values()), default=0)
+    win_lo = max(0, args.cycle_start)
+    win_hi = args.cycle_end if args.cycle_end is not None else end_cyc + 1
+    span = max(1, min(win_hi, end_cyc + 1) - win_lo)
+
+    print("=" * 78, file=out)
+    print("Spatz performance summary", file=out)
+    print("=" * 78, file=out)
+    print(f"  logs      : {args.dir}", file=out)
+    print(f"  geometry  : {len(cores)} Spatz cores "
+          f"({ngrp} groups x {ntile // max(1, ngrp)} tiles x "
+          f"{len(cores) // max(1, ntile)} cores/tile)", file=out)
+    if any_e:
+        print(f"  engine    : VLEN={any_e.dims[0]}, N_FU={any_e.dims[1]}, "
+              f"mem ports/core={any_e.dims[2]}", file=out)
+    if dims:
+        print(f"  memory    : {dims.num_tiles} tiles, "
+              f"{dims.tiles_per_group} tiles/group, "
+              f"id bits={dims.id_bits}", file=out)
+    print(f"  run       : {end_cyc} cycles; window "
+          f"[{win_lo}, {win_hi if args.cycle_end is not None else 'end'}) "
+          f"= {span} cycles", file=out)
+    if not mem:
+        print("  NOTE: no spmem_g*_t*.log -- engine section only. The "
+              "per-request memory trace needs noc_profiling=1 (it is captured "
+              "by tb_noc_profiling.svh, with the pe_/rm_ port traces).",
+              file=out)
+
+    # ---------------- engine ----------------
+    if eng:
+        tot = collections.Counter()
+        for e in eng.values():
+            for b in CPI[:-1]:
+                tot[b] += e.bucket[b]
+            tot["idle"] += span - e.active
+        allc = float(span * len(eng))
+        print("", file=out)
+        print("-- engine occupancy (all cores, % of window cycles) "
+              + "-" * 24, file=out)
+        for b in CPI:
+            print(f"    {b:<10}{_fmt(_pct(tot[b], allc), 9, 2)}%", file=out)
+
+        s_issue = sum(e.issue for e in eng.values())
+        s_vfu_r = sum(e.vfu_rsp for e in eng.values())
+        s_vlsu_r = sum(e.vlsu_rsp for e in eng.values())
+        s_vsldu_r = sum(e.vsldu_rsp for e in eng.values())
+        s_vfu_b = sum(e.vfu_busy for e in eng.values())
+        s_vlsu_b = sum(e.vlsu_busy for e in eng.values())
+        s_memact = sum(e.memact for e in eng.values())
+        n = len(eng)
+        print("", file=out)
+        print("-- vector instructions (per core, mean) " + "-" * 36, file=out)
+        print(f"    issued                    {s_issue / n:>12.1f}", file=out)
+        print(f"    VFU retired               {s_vfu_r / n:>12.1f}", file=out)
+        print(f"    VLSU retired (mem insns)  {s_vlsu_r / n:>12.1f}", file=out)
+        print(f"    VSLDU retired             {s_vsldu_r / n:>12.1f}",
+              file=out)
+        print(f"    VFU busy cycles           {s_vfu_b / n:>12.1f}", file=out)
+        print(f"    VLSU busy cycles          {s_vlsu_b / n:>12.1f}", file=out)
+        print("", file=out)
+        print("    VFU  cycles / VFU insn    "
+              f"{(s_vfu_b / s_vfu_r if s_vfu_r else 0):>12.2f}", file=out)
+        print("    VLSU cycles / mem insn    "
+              f"{(s_vlsu_b / s_vlsu_r if s_vlsu_r else 0):>12.2f}"
+              "   <- model target", file=out)
+        print("    mem-port valid cycles     "
+              f"{s_memact / n:>12.1f}", file=out)
+
+    # ---------------- memory ----------------
+    if mem:
+        allm = _merged([m.all for m in mem.values()])
+        n_req = sum(m.n_req for m in mem.values())
+        n_infl = sum(m.n_inflight for m in mem.values())
+        n_orph = sum(m.n_orphan for m in mem.values())
+        occ = sum(m.occ for m in mem.values())
+        n = len(mem)
+        print("", file=out)
+        print("-- memory requests (per core, mean) " + "-" * 40, file=out)
+        print(f"    accepted word requests    {n_req / n:>12.1f}", file=out)
+        print(f"    reads / writes            "
+              f"{sum(m.n_rw[0] for m in mem.values()) / n:>12.1f} /"
+              f"{sum(m.n_rw[1] for m in mem.values()) / n:>10.1f}", file=out)
+        if eng:
+            s_vlsu_r = sum(e.vlsu_rsp for e in eng.values())
+            s_memact = sum(e.memact for e in eng.values())
+            if s_vlsu_r:
+                print("    requests / mem insn       "
+                      f"{n_req / s_vlsu_r:>12.2f}", file=out)
+            if n_req:
+                # memact counts every cycle a port holds valid, the granted
+                # cycle included -> subtract one cycle per accepted request to
+                # get the pure wait-for-grant time.
+                print("    grant wait / request      "
+                      f"{(s_memact - n_req) / n_req:>12.2f}", file=out)
+        print("    mean outstanding          "
+              f"{occ / span / n:>12.2f}", file=out)
+
+        print("", file=out)
+        print("-- round-trip latency (accepted request -> response, cycles) "
+              + "-" * 15, file=out)
+        print(f"    {'':<10} {'count':>10} {'share':>8} {'mean':>9} "
+              f"{'p50':>7} {'p90':>7} {'p99':>7} {'max':>7}", file=out)
+        print(_lat_line("ALL", allm, allm.n), file=out)
+        for k, name in enumerate(mt.CLASSES):
+            print(_lat_line(name, _merged([m.cls[k] for m in mem.values()]),
+                            allm.n), file=out)
+        for k, name in enumerate(["read", "write"]):
+            print(_lat_line(name, _merged([m.rw[k] for m in mem.values()]),
+                            allm.n), file=out)
+        nports = len(next(iter(mem.values())).port)
+        for p in range(nports):
+            print(_lat_line(f"port {p}",
+                            _merged([m.port[p] for m in mem.values()]),
+                            allm.n), file=out)
+
+        if args.hist:
+            print("", file=out)
+            print("-- latency histogram (all cores) " + "-" * 43, file=out)
+            hist = collections.Counter()
+            for m in mem.values():
+                for lat, cnt in m.all.hist.items():
+                    hist[lat] += cnt
+            top = sorted(hist.items())
+            wide = max((c for _l, c in top), default=1)
+            for lat, cnt in top[:args.hist]:
+                bar = "#" * max(1, int(40 * cnt / wide))
+                print(f"    {lat:>6} cyc {cnt:>10d} "
+                      f"{_pct(cnt, allm.n):>6.2f}%  {bar}", file=out)
+            if len(top) > args.hist:
+                rest = sum(c for _l, c in top[args.hist:])
+                print(f"    (+{len(top) - args.hist} longer buckets, "
+                      f"{rest} requests)", file=out)
+
+        print("", file=out)
+        print("-- acceptance check " + "-" * 56, file=out)
+        print(f"    requests (Q)              {n_req:>12d}", file=out)
+        print(f"    paired with a response    {allm.n:>12d}", file=out)
+        print(f"    in flight at end of trace {n_infl:>12d}", file=out)
+        print(f"    orphan responses          {n_orph:>12d}", file=out)
+        if n_orph:
+            print("    WARNING: responses with no outstanding request -- the "
+                  "window may cut a\n             transaction in half "
+                  "(use the full run) or the pairing key is wrong.", file=out)
+
+    # ---------------- per-core / per-group ----------------
+    if args.per_core or args.per_group:
+        _detail(eng, mem, span, args, out)
+    return 0
+
+
+def _core_row(e, m, span):
+    """One (engine, memory) row of derived per-core numbers."""
+    vlsu_pi = (e.vlsu_busy / e.vlsu_rsp) if (e and e.vlsu_rsp) else 0.0
+    req = m.n_req if m else 0
+    lat = m.all.mean if m else 0.0
+    grant = ((e.memact - req) / req) if (e and req) else 0.0
+    return {
+        "active_pct": _pct(e.active, span) if e else 0.0,
+        "mem_insn": e.vlsu_rsp if e else 0,
+        "vlsu_cyc_per_insn": vlsu_pi,
+        "requests": req,
+        "grant_wait": grant,
+        "lat_mean": lat,
+        "lat_p99": m.all.quantile(99) if m and m.all.n else 0,
+        "local_pct": _pct(m.n_cls[mt.CLS_LOCAL], req) if m else 0.0,
+        "intra_pct": _pct(m.n_cls[mt.CLS_INTRA], req) if m else 0.0,
+        "inter_pct": _pct(m.n_cls[mt.CLS_INTER], req) if m else 0.0,
+    }
+
+
+COLS = [("act%", "active_pct", 6, 1), ("memins", "mem_insn", 8, 0),
+        ("vlsu/ins", "vlsu_cyc_per_insn", 9, 2), ("reqs", "requests", 9, 0),
+        ("grant", "grant_wait", 7, 2), ("lat", "lat_mean", 7, 2),
+        ("p99", "lat_p99", 6, 0), ("loc%", "local_pct", 6, 1),
+        ("intra%", "intra_pct", 7, 1), ("inter%", "inter_pct", 7, 1)]
+
+
+def _detail(eng, mem, span, args, out):
+    keys = sorted(set(eng) | set(mem))
+    hdr = "  " + " ".join(f"{h:>{w}}" for h, _k, w, _p in COLS)
+    if args.per_group:
+        print("", file=out)
+        print("-- per group " + "-" * 63, file=out)
+        print(f"  {'group':<8}{hdr}", file=out)
+        bygrp = collections.defaultdict(list)
+        for g, t, c in keys:
+            bygrp[g].append((g, t, c))
+        for g in sorted(bygrp):
+            rows = [_core_row(eng.get(k), mem.get(k), span)
+                    for k in bygrp[g]]
+            avg = {k: sum(r[k] for r in rows) / len(rows) for k in rows[0]}
+            print(f"  G{g:<7d}" + " ".join(
+                f"{avg[k]:>{w}.{p}f}" for _h, k, w, p in COLS), file=out)
+    if args.per_core:
+        print("", file=out)
+        print("-- per core " + "-" * 64, file=out)
+        print(f"  {'core':<12}{hdr}", file=out)
+        for k in keys:
+            r = _core_row(eng.get(k), mem.get(k), span)
+            print(f"  G{k[0]}T{k[1]}C{k[2]:<7}" + " ".join(
+                f"{r[c]:>{w}.{p}f}" for _h, c, w, p in COLS), file=out)
+
+
+def write_csv(path, eng, mem, span):
+    keys = sorted(set(eng) | set(mem))
+    with open(path, "w") as f:
+        f.write("group,tile,core," + ",".join(k for _h, k, _w, _p in COLS)
+                + "\n")
+        for k in keys:
+            r = _core_row(eng.get(k), mem.get(k), span)
+            f.write(f"{k[0]},{k[1]},{k[2]}," + ",".join(
+                f"{r[c]:.4f}" for _h, c, _w, _p in COLS) + "\n")
+
+
+def write_dump(path, mem_dir, lo, hi, core):
+    """One row per paired request -- the raw events, decoded (class resolved,
+    request paired with its response). Streams tile by tile so a whole-machine
+    dump never has to fit in memory."""
+    want = tuple(int(v) for v in core.split(",")) if core else None
+    n = 0
+    with open(path, "w") as f:
+        f.write("cycle,group,tile,core,port,rw,addr,dst_tile,class,latency\n")
+        if not mem_dir:
+            return 0
+        for g, t, _d, cores, _e in mt.iter_spmem_tiles(mem_dir):
+            for c, ct in sorted(cores.items()):
+                if want and (g, t, c) != want:
+                    continue
+                for r in ct.recs:
+                    if not (lo <= r.cyc < hi) or r.lat is None:
+                        continue
+                    f.write(f"{r.cyc},{g},{t},{c},{r.port},"
+                            f"{'w' if r.wr else 'r'},0x{r.addr:x},{r.dst},"
+                            f"{mt.CLASSES[r.cls]},{r.lat}\n")
+                    n += 1
+    return n
+
+
+def _find(root, pattern, subdirs):
+    """Directory holding `pattern`: `root` itself, else the first of `subdirs`
+    under it that has the files. None if nowhere."""
+    for d in (root,) + tuple(os.path.join(root, s) for s in subdirs):
+        if glob.glob(os.path.join(d, pattern)):
+            return d
+    return None
+
+
+def main():
+    ap = argparse.ArgumentParser("spatz_perf")
+    ap.add_argument("dir", help="build dir (finds spatz_profiling/ for the "
+                                "engine trace and noc_profiling/ for the "
+                                "memory trace), or either of those dirs")
+    ap.add_argument("--cycle-start", type=int, default=0,
+                    help="ignore samples before this cycle (kernel window)")
+    ap.add_argument("--cycle-end", type=int, default=None,
+                    help="ignore samples at/after this cycle")
+    ap.add_argument("--per-core", action="store_true",
+                    help="add the per-core table")
+    ap.add_argument("--per-group", action="store_true",
+                    help="add the per-group table (NUMA spread)")
+    ap.add_argument("--hist", type=int, nargs="?", const=20, default=0,
+                    metavar="N", help="add a latency histogram (N shortest "
+                                      "buckets, default 20)")
+    ap.add_argument("--csv", help="also write the per-core table as CSV")
+    ap.add_argument("--dump", metavar="CSV",
+                    help="also write ONE ROW PER PAIRED REQUEST to this CSV "
+                         "(cycle, core, port, rw, addr, dst, class, latency) "
+                         "for drilling into a specific discrepancy. Combine "
+                         "with --core and --cycle-start/--cycle-end: "
+                         "the whole machine is millions of rows.")
+    ap.add_argument("--core", metavar="G,T,C",
+                    help="restrict --dump to one core, e.g. --core 0,1,2")
+    ap.add_argument("-o", "--output", help="write the report here "
+                                           "(default: stdout)")
+    args = ap.parse_args()
+
+    # The two traces live in different directories (engine internals vs
+    # memory-port traffic); accept the build dir, or either dir directly.
+    eng_dir = _find(args.dir, "spatz_g*_t*_c*.log", ("spatz_profiling",))
+    # spatz_profiling is the last resort: that is where spmem landed before it
+    # was moved beside the other port traces.
+    mem_dir = _find(args.dir, "spmem_g*_t*.log",
+                    ("noc_profiling", "spatz_profiling"))
+    args.dir = f"{eng_dir or '-'} + {mem_dir or '-'}"
+
+    lo = max(0, args.cycle_start)
+    hi = args.cycle_end if args.cycle_end is not None else (1 << 62)
+    eng = load_engine(eng_dir, lo, hi) if eng_dir else {}
+    mem, dims = load_mem(mem_dir, lo, hi) if mem_dir else ({}, None)
+    if not eng and not mem:
+        print(f"no spatz_g*_t*_c*.log / spmem_g*_t*.log under {args.dir} "
+              "(or its spatz_profiling/ , noc_profiling/)", file=sys.stderr)
+        return 1
+    out = open(args.output, "w") if args.output else sys.stdout
+    try:
+        rc = report(eng, mem, dims, args, out)
+    finally:
+        if args.output:
+            out.close()
+    if args.csv:
+        end_cyc = max((e.end_cyc for e in eng.values()), default=0)
+        span = max(1, min(hi, end_cyc + 1) - lo)
+        write_csv(args.csv, eng, mem, span)
+        print(f"wrote {args.csv}", file=sys.stderr)
+    if args.dump:
+        n = write_dump(args.dump, mem_dir, lo, hi, args.core)
+        print(f"wrote {args.dump} ({n} requests)", file=sys.stderr)
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

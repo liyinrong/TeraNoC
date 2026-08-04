@@ -38,6 +38,8 @@ import sys
 from perfetto.trace_builder.proto_builder import TraceProtoBuilder
 from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackEvent
 
+import memtrace as mt
+
 SEQ = 1  # trusted_packet_sequence_id (single producer; absolute timestamps)
 
 # One .dasm line:  <time> <cyc> <pc> <instr-or-DASM(hex)> #; {'k': 0x.., ...}
@@ -478,24 +480,32 @@ def process_dasm(path, hart, builder, uu, args, a2l, pe_data=None, flows=None):
     # node, beside IPC/stalls. No bw/util for PE ports (traffic); req shows
     # read/write/stall, resp shows hsk/stall, idle = grey gaps. --noc-slices
     # packet shows one slice per load/store with its address.
-    pe = pe_data.get((g, t, c)) if pe_data else None
-    if pe:
+    # A core drives ports_per_core TCDM ports (scalar + the Spatz vector
+    # ports), flattened as ppc*c + p on the tile's local-port axis; each gets
+    # its own req/resp lines, suffixed 's' / 'v<n>' when there is >1 port.
+    ppc = max(1, args.ports_per_core)
+    for p in range(ppc):
+        pe = pe_data.get((g, t, ppc * c + p)) if pe_data else None
+        if not pe:
+            continue
         pe_runs, pe_pkts = pe
         _emit_pe_ports(
             builder,
             uu,
             core_uuid,
             ("pe",
-             hart),
+             hart,
+             p),
             pe_runs,
             pe_pkts,
             args,
-            len(METRICS),
+            len(METRICS) + 2 * p,
             flows=flows,
             req_ctx=(
                 g,
                 t,
-                c))
+                ppc * c + p),
+            port_label=None if ppc == 1 else ("s" if p == 0 else f"v{p - 1}"))
 
     if need_names:
         a2l.resolve(collect_pcs(path))
@@ -770,8 +780,11 @@ def load_pe_logs(noc_dir, pattern="pe_g*_t*.log", regex=PE_LOG_RE):
                         runs.setdefault(
                             (rr, io, port), []).append(
                             (w[0], w[1], st))
-                # REQ: P io port cyc wen addr meta_id
-                elif len(x) == 7 and x[0] == "P":
+                # REQ: P io port cyc wen addr meta_id [dst_tile]
+                # dst_tile (2026-08-04 onward) is appended AFTER meta_id in the
+                # log but stored BEFORE it, so meta_id stays rec[-1] for every
+                # layout the emitters below assume.
+                elif len(x) in (7, 8) and x[0] == "P":
                     try:
                         io, port, cyc, wen = int(
                             x[1]), int(
@@ -780,8 +793,11 @@ def load_pe_logs(noc_dir, pattern="pe_g*_t*.log", regex=PE_LOG_RE):
                             x[4])
                         if not (WIN_CYC_LO <= cyc < WIN_CYC_HI):
                             continue
-                        packets.setdefault((io, port), []).append(
-                            [cyc, wen, int(x[5], 16), int(x[6])])
+                        rec = [cyc, wen, int(x[5], 16)]
+                        if len(x) == 8:
+                            rec.append(int(x[7]))       # dst tile
+                        rec.append(int(x[6]))           # meta_id (rec[-1])
+                        packets.setdefault((io, port), []).append(rec)
                     except ValueError:
                         continue
                 # RESP: P io port cyc meta_id
@@ -975,13 +991,15 @@ class Flows:
     (overlapping outstanding) and leave them UNFLOWED -- their packets keep
     annotations, just no arrows.
 
-    The local-port idx is the unified core_id space: [0,cpt) Snitch cores,
-    [cpt,..) RedMulE ports (a remote RedMulE request carries core_id =
-    cpt+port; a local one is named by the bank's winning input-port index)."""
+    The local-port idx is the unified core_id space: [0,ncp) core data ports
+    (ncp = cores_per_tile * ports_per_core -- scalar port + Spatz vector ports
+    of every core), [ncp,..) RedMulE ports (a remote RedMulE request carries
+    core_id = ncp+port; a local one is named by the bank's winning input-port
+    index)."""
 
     INF = float("inf")
 
-    def __init__(self, pe_data, rm_data, cpt):
+    def __init__(self, pe_data, rm_data, ncp):
         # (g,t,idx) -> {meta_id: (req_cyc list, resp_cyc list, [(rc,sc,fid)])}
         self.ix = {}
         # (g,t,idx,meta_id) buckets that are in-order streams (no flows)
@@ -991,15 +1009,15 @@ class Flows:
         self.n_txn = self.n_inflight = self.n_orphan_resp = self.n_stream = 0
         self.bound = self.unbound = self.stream_pkts = 0
         self._build(pe_data or {}, 0)
-        self._build(rm_data or {}, cpt)
+        self._build(rm_data or {}, ncp)
 
     def _build(self, data, base):
         for (g, t, sub), (_runs, pkts) in data.items():
             idx = base + sub
             req_by_m = collections.defaultdict(list)
             resp_by_m = collections.defaultdict(list)
-            for rec in pkts.get((1, 0), []):     # req  [cyc,wen,addr,meta_id]
-                req_by_m[rec[3]].append(rec[0])
+            for rec in pkts.get((1, 0), []):     # req [cyc,wen,addr,(dst,)mid]
+                req_by_m[rec[-1]].append(rec[0])
             for rec in pkts.get((0, 0), []):     # resp [cyc,meta_id]
                 resp_by_m[rec[1]].append(rec[0])
             d = {}
@@ -1106,10 +1124,20 @@ def _emit_state_slices(rl, leaf, rr, builder, args, only=None):
     return n
 
 
-def _req_eng(core, cpt):
-    """Render an originating local-port id as a core (C) or RedMulE master port
-    (RM): ports [0,cpt) are Snitch cores, [cpt,..) RedMulE master ports."""
-    return f"C{core}" if core < cpt else f"RM{core - cpt}"
+def _req_eng(idx, cpt, ppc=1):
+    """Render an originating local-port id as a core data port (C) or a RedMulE
+    master port (RM). The local-port axis flattens each core's
+    NumDataPortsPerCore TCDM ports (mempool_tile.sv:904): port p of core c is
+    ppc*c + p, with p=0 the scalar port and p>=1 the Spatz vector ports; the
+    RedMulE master ports follow at cpt*ppc. Scalar builds have ppc == 1, so the
+    index is the core id."""
+    ncp = cpt * ppc
+    if idx >= ncp:
+        return f"RM{idx - ncp}"
+    if ppc <= 1:
+        return f"C{idx}"
+    c, p = divmod(idx, ppc)
+    return f"C{c}" if p == 0 else f"C{c}.v{p - 1}"
 
 
 def _emit_req_packet_slices(
@@ -1142,6 +1170,7 @@ def _emit_req_packet_slices(
     returns to."""
     ny = args.mesh_y
     cpt = args.cores_per_tile
+    ppc = args.ports_per_core
     # items carry a 5th field = flow_id (None for stall runs and when --flows
     # is off). The requester key (group,tile,idx) is read straight from the
     # packet's own fields, so every hop binds independently.
@@ -1153,8 +1182,8 @@ def _emit_req_packet_slices(
             cyc, dstx, dsty, srcx, srcy, tile, core = rec[:7]
             annos = [("src (x,y)", f"({srcx},{srcy})"),
                      ("dst (x,y)", f"({dstx},{dsty})"),
-                     ("requester",
-                      f"G{dstx * ny + dsty} T{tile} {_req_eng(core, cpt)}"),
+                     ("requester", f"G{dstx * ny + dsty} T{tile} "
+                      f"{_req_eng(core, cpt, ppc)}"),
                      ("meta_id", str(mid)), ("op", "resp")]
             fid = flows.fid(dstx * ny + dsty, tile, core, mid,
                             cyc, is_resp=True) if flows else None
@@ -1173,7 +1202,7 @@ def _emit_req_packet_slices(
                 annos.append(
                     ("dst (x,y)", f"({dst_grp // ny},{dst_grp % ny})"))
             annos += [("requester",
-                       f"G{dst_grp} T{req_tile} {_req_eng(core, cpt)}"),
+                       f"G{dst_grp} T{req_tile} {_req_eng(core, cpt, ppc)}"),
                       ("meta_id",
                        str(mid)),
                       ("op",
@@ -1187,6 +1216,9 @@ def _emit_req_packet_slices(
         # requester is the port itself (req_ctx)
         if pe:
             annos = [("addr", f"0x{addr:x}"), ("op", op)]
+            if len(rec) == 5:            # dst tile decoded by the testbench
+                annos.append(("dst tile", "SoC/L2" if rec[3] < 0
+                              else str(rec[3])))
             rg, rt, ridx = req_ctx
         # src/dst already mesh (x,y)
         elif is_router:
@@ -1194,8 +1226,8 @@ def _emit_req_packet_slices(
             annos = [("addr", f"0x{addr:x}"),
                      ("src (x,y)", f"({srcx},{srcy})"),
                      ("dst (x,y)", f"({dstx},{dsty})"),
-                     ("requester",
-                     f"G{srcx * ny + srcy} T{src_tile} {_req_eng(core, cpt)}"),
+                     ("requester", f"G{srcx * ny + srcy} T{src_tile} "
+                      f"{_req_eng(core, cpt, ppc)}"),
                      ("op", op)]
             rg, rt, ridx = srcx * ny + srcy, src_tile, core
         # tile: src/dst groups linear -> mesh (x,y)
@@ -1207,7 +1239,7 @@ def _emit_req_packet_slices(
                 annos += [("src (x,y)", f"({src_grp // ny},{src_grp % ny})"),
                           ("dst (x,y)", f"({dst_grp // ny},{dst_grp % ny})")]
             annos += [("requester",
-                       f"G{src_grp} T{req_tile} {_req_eng(core, cpt)}"),
+                       f"G{src_grp} T{req_tile} {_req_eng(core, cpt, ppc)}"),
                       ("op", op)]
             rg, rt, ridx = src_grp, req_tile, core
         annos.append(("meta_id", str(mid)))
@@ -1425,7 +1457,9 @@ def process_rm_ports(noc_dir, builder, uu, args, flows=None, rm_data=None):
     00, resp 00, req 01, ...) directly under each Tile's RedMulE ENGINE node
     (created by process_redmule / _ensure_rm_engine). The rank base (>0) keeps
     the ports below the FSM/CPI children. Returns #RM ports emitted."""
-    cpt = args.cores_per_tile
+    # RedMulE master ports sit after every core DATA PORT on the tile's
+    # local-port axis, not after every core (Spatz cores own ppc ports each).
+    ncp = args.cores_per_tile * max(1, args.ports_per_core)
     rm = rm_data if rm_data is not None else load_pe_logs(
         noc_dir, "rm_g*_t*.log", RM_LOG_RE)
     if not rm:
@@ -1449,7 +1483,7 @@ def process_rm_ports(noc_dir, builder, uu, args, flows=None, rm_data=None):
             req_ctx=(
                 g,
                 t,
-                cpt + p),
+                ncp + p),
             port_label=f"{p:02d}")
         nrm += 1
     print(
@@ -1744,12 +1778,13 @@ def _emit_bank_packets(rl, recs, leaf, bg, bt, builder, args, flows=None):
     sg/it/core. DMA/wide accesses have no core/RedMulE flow -> they stay
     unbound."""
     cpt = args.cores_per_tile
+    ppc = args.ports_per_core
 
     # (group, tile, local-port idx) + label
     def _req(loc, wide, port, sg, it, core):
         if loc and not wide:  # this tile's own core / RedMulE port
-            return (bg, bt, port), f"G{bg} T{bt} {_req_eng(port, cpt)}"
-        return (sg, it, core), f"G{sg} T{it} {_req_eng(core, cpt)}"
+            return (bg, bt, port), f"G{bg} T{bt} {_req_eng(port, cpt, ppc)}"
+        return (sg, it, core), f"G{sg} T{it} {_req_eng(core, cpt, ppc)}"
 
     items = [(s, e, "stall", None, None) for s, e, st in rl if st == 1]
     for cyc, wen, addr, loc, wide, port, sg, it, core, meta_id in recs:
@@ -2075,12 +2110,125 @@ def process_spatz(sp_dir, builder, uu, args):
     return neng
 
 
+def _spmem_bucket(recs, win):
+    """Bucket one core's paired requests into per-window aggregates:
+      lat[cls][w] = (sum, n) of round-trip latencies of the requests ISSUED in
+                    window w (cls None = all classes)
+      occ[w]      = cycles spent with a request in flight (sum over requests,
+                    so occ/win is the mean number outstanding)
+      nreq[w]     = accepted requests
+    In-flight-at-EOS records have no latency: they count in nreq but not in
+    lat/occ, so a truncated trace cannot inflate either."""
+    lat = collections.defaultdict(lambda: collections.defaultdict(int))
+    latn = collections.defaultdict(lambda: collections.defaultdict(int))
+    occ = collections.defaultdict(int)
+    nreq = collections.defaultdict(int)
+    for r in recs:
+        if not (WIN_CYC_LO <= r.cyc < WIN_CYC_HI):
+            continue
+        w = r.cyc // win
+        nreq[w] += 1
+        if r.lat is None:
+            continue
+        for k in (None, r.cls):
+            lat[k][w] += r.lat
+            latn[k][w] += 1
+        s, e = r.cyc, r.cyc + r.lat
+        for ww in range(s // win, (e - 1) // win + 1):
+            occ[ww] += min(e, (ww + 1) * win) - max(s, ww * win)
+    return lat, latn, occ, nreq
+
+
+def process_spatz_mem(sp_dir, builder, uu, args):
+    """Per-request Spatz VLSU memory trace (noc_profiling/spmem_g<g>_t<t>.log,
+    beside the pe_/rm_ port traces): adds a
+    'VLSU mem' counter group under each Spatz engine node carrying the
+    round-trip latency the engine trace cannot show -- mean cycles from the
+    accepted request handshake to the response, overall and split by address
+    class (local tile / intra-group / inter-group / SoC) -- plus the mean
+    number of outstanding word requests and the accepted-request rate. These
+    are cycle counts, so their y-axes auto-scale (never pinned to [0,1]).
+    Returns #cores with a memory trace."""
+    if not mt.have_trace(sp_dir):
+        print(f"  Spatz mem: no spmem_g*_t*.log in {sp_dir}; skipping "
+              "(pre-2026-08 run?)", file=sys.stderr)
+        return 0
+    win = max(1, int(round(args.window_ns / args.clk_ns)))
+    ncore = nrec = ninfl = norph = 0
+    for g, t, dims, cores, end_cyc in mt.iter_spmem_tiles(sp_dir):
+        for c, ct in sorted(cores.items()):
+            if not ct.recs:
+                continue
+            lat, latn, occ, nreq = _spmem_bucket(ct.recs, win)
+            if not nreq:
+                continue
+            eng = _ensure_spatz_engine(builder, uu, g, t, c, args)
+            node = add_track(builder, uu.get(("sp_mem_node", g, t, c)),
+                             "VLSU mem", parent=eng,
+                             child_order=CHILD_ORDER_EXPLICIT)
+            # overall latency first, then only the classes actually used
+            series = [(None, "lat")] + [
+                (k, f"lat {mt.CLASSES[k]}")
+                for k in sorted(x for x in latn if x is not None)]
+            ctr = {k: add_track(builder, uu.get(("sp_mlat", g, t, c, k)),
+                                nm, parent=node, counter=True,
+                                order_rank=i)
+                   for i, (k, nm) in enumerate(series)}
+            out_ctr = add_track(builder, uu.get(("sp_mout", g, t, c)),
+                                "outstanding", parent=node, counter=True,
+                                order_rank=len(series))
+            req_ctr = add_track(builder, uu.get(("sp_mreq", g, t, c)),
+                                "req/cyc", parent=node, counter=True,
+                                order_rank=len(series) + 1)
+            wlo = WIN_CYC_LO // win
+            whi = min(end_cyc, WIN_CYC_HI - 1) // win
+            last = {}
+            for w in range(wlo, whi + 1):
+                ts = w * win * TICK
+                for k, u in ctr.items():
+                    n = latn[k].get(w, 0)
+                    v = lat[k].get(w, 0) / n if n else 0.0
+                    if last.get(("l", k)) != v:
+                        emit_counter(builder, ts, u, v)
+                        last[("l", k)] = v
+                for key, u, v in (("o", out_ctr, occ.get(w, 0) / win),
+                                  ("r", req_ctr, nreq.get(w, 0) / win)):
+                    if last.get(key) != v:
+                        emit_counter(builder, ts, u, v)
+                        last[key] = v
+            ts_end = (whi + 1) * win * TICK
+            for k, u in ctr.items():
+                if last.get(("l", k)):
+                    emit_counter(builder, ts_end, u, 0.0)
+            for key, u in (("o", out_ctr), ("r", req_ctr)):
+                if last.get(key):
+                    emit_counter(builder, ts_end, u, 0.0)
+            ncore += 1
+            nrec += ct.n_req
+            ninfl += ct.n_inflight
+            norph += ct.n_orphan
+    print(f"  Spatz mem: {ncore} cores, {nrec} word requests paired "
+          f"(latency + per-class latency + outstanding + req-rate counters)"
+          + (f"; {ninfl} in flight at EOS, {norph} orphan responses"
+             if (ninfl or norph) else ""))
+    return ncore
+
+
 def main():
     ap = argparse.ArgumentParser("perfetto_gen")
     ap.add_argument("traces", nargs="+", help="trace_hart_*.dasm files")
     ap.add_argument("-o", "--output", default="perf.perfetto-trace")
     ap.add_argument("--cores-per-tile", type=int, default=4)
     ap.add_argument("--tiles-per-group", type=int, default=4)
+    ap.add_argument(
+        "--ports-per-core",
+        type=int,
+        default=1,
+        help="TCDM data ports per core (NumDataPortsPerCore = 1 for scalar "
+        "builds, 1 + NumMemPortsPerSpatz for Spatz builds). The tile's "
+        "local-port axis is ppc*core + port, so this is what maps a NoC "
+        "packet's core_id back to a core (and where the RedMulE ports "
+        "start). Pass from config (the Makefile does).")
     ap.add_argument(
         "--mesh-y",
         type=int,
@@ -2125,8 +2273,9 @@ def main():
         "--spike-dasm",
         help="spike-dasm path (default: auto-detect)")
     ap.add_argument(
-        "--noc", help="noc_profiling/ dir (router_g*/tile_g* full logs); "
-        "overlays NoC state-runs + derived counters on the timeline")
+        "--noc", help="noc_profiling/ dir (router_g*/tile_g* full logs, plus "
+        "the always-on Spatz spmem_g*_t*.log memory trace); overlays NoC "
+        "state-runs + derived counters on the timeline")
     ap.add_argument(
         "--spm", help="spm_profiling/ dir (bank_g*_t*.log); adds per-SPM-bank "
         "access tracks under each Tile node (needs --noc for the tiles)")
@@ -2139,7 +2288,8 @@ def main():
         "--spatz",
         help="spatz_profiling/ dir (spatz_g*_t*_c*.log); adds the always-on "
         "Spatz vector-engine node (VFU/VLSU/VSLDU FSM, occupancy/CPI stack, "
-        "mem-port util) under each Spatz core")
+        "mem-port util) under each Spatz core. The per-request VLSU memory "
+        "round-trip latency counters come from --noc (spmem_g*_t*.log)")
     ap.add_argument(
         "--cycle-start",
         type=int,
@@ -2238,7 +2388,8 @@ def main():
                 "  WARNING: --flows needs --noc-slices packet; flows disabled",
                 file=sys.stderr)
         else:
-            flows = Flows(pe_data, rm_data, args.cores_per_tile)
+            flows = Flows(pe_data, rm_data,
+                          args.cores_per_tile * max(1, args.ports_per_core))
     n = 0
     for path in files:
         m = HART_RE.search(path)
@@ -2259,6 +2410,13 @@ def main():
     # always-on Spatz vector-engine node (under each Core node)
     if args.spatz:
         process_spatz(args.spatz, builder, uu, args)
+    # The per-request memory trace is captured by tb_noc_profiling.svh and
+    # sits in noc_profiling/ with the other port traces (pe_/rm_); interim
+    # 2026-08-04 runs had it in spatz_profiling/, hence the fallback.
+    sp_mem_dir = (args.noc if (args.noc and mt.have_trace(args.noc))
+                  else args.spatz)
+    if sp_mem_dir:
+        process_spatz_mem(sp_mem_dir, builder, uu, args)
     if args.noc:
         process_rm_ports(
             args.noc,
