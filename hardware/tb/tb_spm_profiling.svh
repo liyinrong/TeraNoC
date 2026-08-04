@@ -56,11 +56,12 @@
   generate
     for (genvar g = 0; g < NumGroups; g++) begin : gen_spm_bank_g
       for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_spm_bank_t
-        // local/remote boundary = this tile's NumLocalPorts. Only the first
-        // NumRMTilesPerGroup tiles host a RedMulE (widening the local side by
-        // RMMasterPorts); the rest expose just the NumCoresPerTile core ports.
-        localparam int unsigned NLP =
-            (t < NumRMTilesPerGroup) ? (RMMasterPorts + NumCoresPerTile) : NumCoresPerTile;
+        // local/remote boundary = this tile's NumLocalPorts (mempool_tile.sv:20):
+        // every core contributes NumDataPortsPerCore ports (1 scalar + the Spatz
+        // vector ports), and only the first NumRMTilesPerGroup tiles host a
+        // RedMulE, which widens the local side by RMMasterPorts.
+        localparam int unsigned NLP = NumCoresPerTile * NumDataPortsPerCore +
+            ((t < NumRMTilesPerGroup) ? RMMasterPorts : 0);
         always_ff @(posedge clk or negedge rst_n) begin
           if (!rst_n) begin
             bank_st[g][t] <= '{default: '0}; bank_s[g][t] <= '{default: '0};

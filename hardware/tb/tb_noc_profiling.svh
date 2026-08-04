@@ -43,6 +43,26 @@
   // RMPorts>=1 keeps the state-register array legal when RedMulE is disabled.
   localparam int unsigned RMPorts = (RMMasterPorts > 0) ? RMMasterPorts : 1;
   int f_rm    [NumGroups][NumTilesPerGroup];
+  // Spatz VLSU per-request memory trace (Spatz builds only), one file per tile.
+  int f_spmem [NumGroups][NumTilesPerGroup];
+
+  // Global destination TILE of a request, decoded from the tile-side SCRAMBLED
+  // address (i.e. after the seq/interleave swap and the tile-id remap), so an
+  // offline pass can split traffic into local-tile / intra-group / inter-group
+  // without re-implementing mempool_addr_scrambler. Mirrors the tile's own
+  // local/remote address map (mempool_tile.sv:899) and its bank-address slice
+  // (mempool_tile.sv:910); destination group = dst / NumTilesPerGroup
+  // (mempool_tile.sv:91). Returns -1 for a non-TCDM (SoC/L2) access.
+  localparam int unsigned MemTileLsb  = ByteOffset + idx_width(NumBanksPerTile);
+  localparam int unsigned MemTileBits = idx_width(NumTiles);
+  // The testbench instantiates the DUT with TCDMBaseAddr = 32'h0
+  // (mempool_tb.sv:125); same test as mempool_addr_scrambler's not_io_address.
+  localparam addr_t       MemTcdmBase = 32'h0;
+
+  function automatic int mem_dst_tile(input addr_t scrambled);
+    mem_dst_tile = ((scrambled & mempool_pkg::TCDMMask) == MemTcdmBase)
+                 ? int'(scrambled[MemTileLsb +: MemTileBits]) : -1;
+  endfunction
 
   initial begin
     void'($value$plusargs("APP=%s", app));
@@ -61,6 +81,13 @@
         f_pe[g][t]   = $fopen($sformatf("%s/pe_g%0d_t%0d.log",   log_path, g, t), "w");
         if (t < NumRMTilesPerGroup)
           f_rm[g][t] = $fopen($sformatf("%s/rm_g%0d_t%0d.log",   log_path, g, t), "w");
+        if (mempool_pkg::RVV) begin
+          f_spmem[g][t] = $fopen($sformatf("%s/spmem_g%0d_t%0d.log", log_path, g, t), "w");
+          $fwrite(f_spmem[g][t], "D %0d %0d %0d %0d %0d\n",
+                  mempool_pkg::NumMemPortsPerSpatz, NumCoresPerTile,
+                  NumTilesPerGroup, NumTiles,
+                  $clog2(snitch_pkg::NumIntOutstandingLoads));
+        end
       end
     end
   end
@@ -76,9 +103,15 @@
   logic [1:0]  ts_sreq_st [NumGroups][NumTilesPerGroup][NumRemoteReqPortsPerTile];  logic [63:0] ts_sreq_s [NumGroups][NumTilesPerGroup][NumRemoteReqPortsPerTile];
   logic [1:0]  ts_mrsp_st [NumGroups][NumTilesPerGroup][NumRemoteRespPortsPerTile]; logic [63:0] ts_mrsp_s [NumGroups][NumTilesPerGroup][NumRemoteRespPortsPerTile];
   logic [1:0]  ts_srsp_st [NumGroups][NumTilesPerGroup][NumRemoteRespPortsPerTile]; logic [63:0] ts_srsp_s [NumGroups][NumTilesPerGroup][NumRemoteRespPortsPerTile];
-  // PE (Snitch core data port): req = data_q* (out, read/write by qwrite), resp = data_p* (in).
-  logic [1:0]  pe_req_st [NumGroups][NumTilesPerGroup][NumCoresPerTile]; logic [63:0] pe_req_s [NumGroups][NumTilesPerGroup][NumCoresPerTile];
-  logic [1:0]  pe_rsp_st [NumGroups][NumTilesPerGroup][NumCoresPerTile]; logic [63:0] pe_rsp_s [NumGroups][NumTilesPerGroup][NumCoresPerTile];
+  // PE (core data port): req = data_q* (out, read/write by qwrite), resp = data_p* (in).
+  // One entry per CORE PORT, not per core: a core drives NumDataPortsPerCore
+  // TCDM ports flattened as port p of core c = NumDataPortsPerCore*c + p
+  // (mempool_tile.sv:122). Scalar builds have NumDataPortsPerCore == 1, so the
+  // index stays the core id; Spatz builds add the NumMemPortsPerSpatz vector
+  // ports after each core's scalar port.
+  localparam int unsigned NumPeCorePorts = NumCoresPerTile * NumDataPortsPerCore;
+  logic [1:0]  pe_req_st [NumGroups][NumTilesPerGroup][NumPeCorePorts]; logic [63:0] pe_req_s [NumGroups][NumTilesPerGroup][NumPeCorePorts];
+  logic [1:0]  pe_rsp_st [NumGroups][NumTilesPerGroup][NumPeCorePorts]; logic [63:0] pe_rsp_s [NumGroups][NumTilesPerGroup][NumPeCorePorts];
   // RedMulE master-port state (RedMulE tiles only); same S/P format as PE cores.
   logic [1:0]  rm_req_st [NumGroups][NumTilesPerGroup][RMPorts]; logic [63:0] rm_req_s [NumGroups][NumTilesPerGroup][RMPorts];
   logic [1:0]  rm_rsp_st [NumGroups][NumTilesPerGroup][RMPorts]; logic [63:0] rm_rsp_s [NumGroups][NumTilesPerGroup][RMPorts];
@@ -343,10 +376,19 @@
   endgenerate
 
   // ------------------------------------------------------------
-  // PE (Snitch core) data-port capture -> per-tile file (one line per core). Same
+  // PE (core) data-port capture -> per-tile file (one line per CORE PORT). Same
   // format as a tile port; req = snitch_data_q* (out, read/write by qwrite, addr=qaddr),
   // resp = snitch_data_p* (in). No bw/util derived for PE ports.
-  //   S <rr> <io> <port> <start> <end> <state> ; P <io> <port> <cycle> <wen> <addr(hex)>
+  //   S <rr> <io> <port> <start> <end> <state>
+  //   req  P 1 0 <cyc> <wen> <addr(hex)> <meta_id> <dst_tile>
+  //   resp P 0 0 <cyc> <meta_id>
+  // dst_tile = global destination tile (mem_dst_tile of the SCRAMBLED address),
+  // -1 for a SoC/L2 access; pairing req->resp by meta_id gives the port's
+  // round-trip latency, split by address class (scripts/interco_perf.py).
+  // The leading demux index is the FLAT core-port index (core c port p =
+  // NumDataPortsPerCore*c + p), so Spatz builds log the scalar port AND all
+  // NumMemPortsPerSpatz vector ports of every core, not just the first four
+  // ports of core 0.
   // ------------------------------------------------------------
   generate
     for (genvar g = 0; g < NumGroups; g++) begin : gen_pe_g
@@ -356,7 +398,7 @@
             pe_req_st[g][t] <= '{default: '0}; pe_req_s[g][t] <= '{default: '0};
             pe_rsp_st[g][t] <= '{default: '0}; pe_rsp_s[g][t] <= '{default: '0};
           end else begin
-            for (int c = 0; c < NumCoresPerTile; c++) begin
+            for (int c = 0; c < NumPeCorePorts; c++) begin
               automatic logic [1:0] rq = `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qvalid[c]
                 ? (`NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qready[c]
                    ? (`NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qwrite[c] ? 2'd3 : 2'd2) : 2'd1) : 2'd0;
@@ -373,10 +415,12 @@
               if (rq >= 2)  // req handshake -> one core load/store accepted (qid = meta_id)
                 // mask qid to the low snitch_pkg::MetaIdWidth bits (upper bits are X) so the
                 // printed id matches the NoC's zero-extended meta_id for this request.
-                $fwrite(f_pe[g][t], "%0d P 1 0 %0d %0d %0h %0d\n", c, cycle_q,
+                // dst = destination tile (from the scrambled address), -1 = SoC/L2.
+                $fwrite(f_pe[g][t], "%0d P 1 0 %0d %0d %0h %0d %0d\n", c, cycle_q,
                   `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qwrite[c],
                   `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qaddr[c],
-                  `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qid[c][snitch_pkg::MetaIdWidth-1:0]);
+                  `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qid[c][snitch_pkg::MetaIdWidth-1:0],
+                  mem_dst_tile(`NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qaddr_scrambled[c]));
               if (rp >= 2)  // resp handshake -> a response returns to this core (pid = meta_id)
                 $fwrite(f_pe[g][t], "%0d P 0 0 %0d %0d\n", c, cycle_q,
                   `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_pid[c]);
@@ -393,8 +437,8 @@
   // local/remote split -- so it sees every access (local AND remote NoC ones). Remote
   // requests carry core_id = NumCoresPerTile+p, so a NoC packet maps back to rm port p.
   // Same S/P format as a PE core port:
-  //   S <rr> <io> 0 <start> <end> <state> ; req P 1 0 <cyc> <wen> <addr> <meta_id> ;
-  //   resp P 0 0 <cyc> <meta_id>.
+  //   S <rr> <io> 0 <start> <end> <state> ;
+  //   req  P 1 0 <cyc> <wen> <addr> <meta_id> <dst_tile> ; resp P 0 0 <cyc> <meta_id>.
   // ------------------------------------------------------------
   generate
     if (NumRMTiles > 0) begin : gen_rm
@@ -420,13 +464,80 @@
                   rm_rsp_st[g][t][p] <= rp; rm_rsp_s[g][t][p] <= cycle_q;
                 end
                 if (rq >= 2)  // req handshake -> one RedMulE load/store accepted (id = meta_id)
-                  $fwrite(f_rm[g][t], "%0d P 1 0 %0d %0d %0h %0d\n", p, cycle_q,
+                  // dst = destination tile (from the scrambled address), -1 = SoC/L2.
+                  $fwrite(f_rm[g][t], "%0d P 1 0 %0d %0d %0h %0d %0d\n", p, cycle_q,
                     `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_req[p].write,
                     `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_req[p].addr,
-                    `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_req[p].id);
+                    `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_req[p].id,
+                    mem_dst_tile(`NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_addr_scrambled[p]));
                 if (rp >= 2)  // resp handshake -> a response returns to this RedMulE port (id = meta_id)
                   $fwrite(f_rm[g][t], "%0d P 0 0 %0d %0d\n", p, cycle_q,
                     `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_resp[p].id);
+              end
+            end
+          end
+        end
+      end
+    end
+  endgenerate
+
+  // ------------------------------------------------------------
+  // Spatz VLSU per-REQUEST memory trace -> per-tile file (Spatz builds only).
+  // The pe_ capture above already shows these ports as state runs + packets; this
+  // adds the one thing the state runs cannot give: the ROUND TRIP of each word
+  // request, i.e. the two instants that bracket it --
+  //   Q = the request-ACCEPTED handshake (valid & ready; bare valid is already
+  //       covered by the Spatz engine trace's `memact`)
+  //   P = the response arriving back at the Spatz boundary (no ready there)
+  // Pairing key = the per-port ROB id the VLSU already puts on the request
+  // (spatz_vlsu.sv: mem_req_id[port] = rob_id[port]) and gets back on the
+  // response, so no new RTL signal is needed. Stores are logged too: their ROB
+  // entry frees at send rather than at response, so `wr` keeps a store-ack
+  // distinguishable from a load reply that reuses the same id. Only the low
+  // IdBits of `id` round-trip (mempool_cc.sv packs {write, id[IdBits-1:0]} into
+  // meta_id), so a matcher must mask to IdBits -- hence IdBits in the D header.
+  //
+  // One file per TILE (merged like pe_/rm_, line PREFIXED with the core index):
+  //   spmem_g<g>_t<t>.log
+  //     D <NrMemPorts> <NumCoresPerTile> <NumTilesPerGroup> <NumTiles> <IdBits>
+  //     <c> Q <cyc> <port> <id> <addr_hex> <wr> <dst_tile>
+  //     <c> P <cyc> <port> <id> <wr>
+  //     E <last_cyc>
+  // `addr` is the RAW core address (pre-scrambler) so it can be matched back to
+  // the kernel's data structures. `dst_tile` is the GLOBAL destination tile id
+  // taken from the tile's SCRAMBLED address of the SAME request -- i.e. after the
+  // seq/interleave swap and the tile-id remap -- or -1 for a non-TCDM (SoC/L2)
+  // access; the Spatz port feeds the tile's core data port combinationally
+  // (mempool_cc.sv:451), so both are valid in the handshake cycle. Destination
+  // group = dst_tile / NumTilesPerGroup (mempool_tile.sv:91), so an offline pass
+  // classifies every request as local-tile / intra-group / inter-group / SoC
+  // without re-implementing the address scrambler.
+  // ------------------------------------------------------------
+  // Core c's Spatz vector unit (mempool_cc.riscv_core.gen_spatz.i_spatz).
+  `define SPMEM_SPATZ(gg,tt,cc) `NOC_GRP(gg).i_mempool_group.gen_tiles[tt].i_tile.gen_cores[cc].gen_mempool_cc.riscv_core.gen_spatz.i_spatz
+  generate
+    if (mempool_pkg::RVV) begin : gen_spmem
+      for (genvar g = 0; g < NumGroups; g++) begin : gen_spmem_g
+        for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_spmem_t
+          for (genvar c = 0; c < NumCoresPerTile; c++) begin : gen_spmem_c
+            always_ff @(posedge clk or negedge rst_n) begin
+              if (rst_n) begin
+                for (int p = 0; p < mempool_pkg::NumMemPortsPerSpatz; p++) begin
+                  if (`SPMEM_SPATZ(g,t,c).spatz_mem_req_valid_o[p] &&
+                      `SPMEM_SPATZ(g,t,c).spatz_mem_req_ready_i[p])
+                    $fwrite(f_spmem[g][t], "%0d Q %0d %0d %0d %0h %0d %0d\n",
+                      c, cycle_q, p,
+                      `SPMEM_SPATZ(g,t,c).spatz_mem_req_o[p].id,
+                      `SPMEM_SPATZ(g,t,c).spatz_mem_req_o[p].addr,
+                      `SPMEM_SPATZ(g,t,c).spatz_mem_req_o[p].write,
+                      mem_dst_tile(`NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qaddr_scrambled[
+                                     mempool_pkg::NumDataPortsPerCore*c + 1 + p]));
+                  if (`SPMEM_SPATZ(g,t,c).spatz_mem_rsp_valid_i[p])
+                    $fwrite(f_spmem[g][t], "%0d P %0d %0d %0d %0d\n",
+                      c, cycle_q, p,
+                      `SPMEM_SPATZ(g,t,c).spatz_mem_rsp_i[p].id,
+                      `SPMEM_SPATZ(g,t,c).spatz_mem_rsp_i[p].write);
+                end
               end
             end
           end
@@ -469,11 +580,15 @@
           $fwrite(f_tile[g][t], "S 1 1 %0d %0d %0d %0d\n", p, ts_srsp_s[g][t][p], cycle_q, ts_srsp_st[g][t][p]);
         end
         $fclose(f_tile[g][t]);
-        for (int c = 0; c < NumCoresPerTile; c++) begin
+        for (int c = 0; c < NumPeCorePorts; c++) begin
           $fwrite(f_pe[g][t], "%0d S 0 1 0 %0d %0d %0d\n", c, pe_req_s[g][t][c], cycle_q, pe_req_st[g][t][c]);
           $fwrite(f_pe[g][t], "%0d S 1 0 0 %0d %0d %0d\n", c, pe_rsp_s[g][t][c], cycle_q, pe_rsp_st[g][t][c]);
         end
         $fclose(f_pe[g][t]);
+        if (mempool_pkg::RVV) begin
+          $fwrite(f_spmem[g][t], "E %0d\n", cycle_q);
+          $fclose(f_spmem[g][t]);
+        end
         if (t < NumRMTilesPerGroup) begin
           for (int p = 0; p < RMMasterPorts; p++) begin
             $fwrite(f_rm[g][t], "%0d S 0 1 0 %0d %0d %0d\n", p, rm_req_s[g][t][p], cycle_q, rm_req_st[g][t][p]);
