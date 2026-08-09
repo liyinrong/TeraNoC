@@ -235,21 +235,20 @@ ifneq (0, $(noc_req_narrow_ro_channel_num))
 	vlog_defs += -DUSE_RO_NARROW_REQ_CHANNEL
 endif
 vlog_defs += -DNOC_REQ_NARROW_RW_CHANNEL_NUM=$(noc_req_narrow_rw_channel_num)
+vlog_defs += -DNOC_REQ_NARROW_WO_CHANNEL_NUM=$(noc_req_narrow_wo_channel_num)
 vlog_defs += -DNOC_RESP_NARROW_RW_CHANNEL_NUM=$(noc_resp_narrow_rw_channel_num)
-vlog_defs += -DNOC_RESP_NARROW_WO_CHANNEL_NUM=$(noc_resp_narrow_wo_channel_num)
-ifneq (0, $(noc_resp_narrow_wo_channel_num))
-	vlog_defs += -DUSE_WO_NARROW_RESP_CHANNEL
-endif
 ifeq (0, $(noc_req_narrow_ro_channel_num))
 ifeq (0, $(noc_req_narrow_rw_channel_num))
 $(error Narrow TCDM plane requires at least one read-capable RO or RW request channel)
 endif
 endif
 ifeq (0, $(noc_req_narrow_rw_channel_num))
-$(error Narrow TCDM plane requires at least one write-capable RW request channel)
+ifeq (0, $(noc_req_narrow_wo_channel_num))
+$(error Narrow TCDM plane requires at least one write-capable RW or WO request channel)
+endif
 endif
 ifeq (0, $(noc_resp_narrow_rw_channel_num))
-$(error Narrow TCDM plane requires at least one data-bearing RW response channel)
+$(error Narrow TCDM plane requires at least one RD response channel)
 endif
 # Wide TCDM plane (WP2): a separate single-beat FlooNoC net. Default 0 => absent
 # and bit-identical to a build without it; USE_WIDE_TCDM_PLANE gates the RTL.

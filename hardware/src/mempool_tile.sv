@@ -423,7 +423,6 @@ module mempool_tile
     tile_group_id_t tile_id;
     tile_core_id_t core_id;
     logic wide;
-    logic is_write;
   } bank_metadata_t;
 
   // Memory interfaces
@@ -442,34 +441,8 @@ module mempool_tile
 
   // Condition bank_resp_ini_addr into the resp xbar's sel, handling
   // req/resp port-count asymmetry; feeds i_tcdm_bank_interco.mst_resp_ini_addr_i.
-  //
-  // Without a WO response class the request and response port ranges still line
-  // up one-for-one, so this is the ORIGINAL pre-wide-plane mapping, unchanged.
-  // A WO class breaks that correspondence -- requests are {RO, RW} while
-  // responses are {RW, WO} -- so it gets its own class-aware branch.
   for (genvar b = 0; unsigned'(b) < NumBanksPerTile; b++) begin: gen_superbank_resp_ini_addr
-    if (NumNarrowWoRespPortsPerTile > 0) begin: gen_superbank_resp_ini_addr_wo
-      // A plain write is acknowledged on a WO port, every other response on an
-      // RW port; spread within the class by hashing the response identity.
-      logic [$bits(group_id_t) + $bits(tile_group_id_t) + $bits(tile_core_id_t) +
-             $bits(meta_id_t)-1:0] resp_hash;
-      assign resp_hash = {bank_resp_payload[b].src_group_id,
-                          bank_resp_payload[b].ini_addr,
-                          bank_resp_payload[b].rdata.core_id,
-                          bank_resp_payload[b].rdata.meta_id};
-      always_comb begin
-        superbank_resp_ini_addr[b] = bank_resp_ini_addr[b];
-        if (bank_resp_ini_addr[b] > NumLocalPorts) begin
-          if (bank_resp_payload[b].is_write) begin
-            superbank_resp_ini_addr[b] = NumLocalPorts + 1 + NumNarrowRwRespPortsPerTile +
-                (resp_hash % NumNarrowWoRespPortsPerTile);
-          end else begin
-            superbank_resp_ini_addr[b] = NumLocalPorts + 1 +
-                (resp_hash % NumNarrowRwRespPortsPerTile);
-          end
-        end
-      end
-    end else if(NumNarrowRemoteReqPortsPerTile > NumNarrowRemoteRespPortsPerTile ) begin: gen_superbank_resp_ini_addr_req_gt_resp
+    if(NumNarrowRemoteReqPortsPerTile > NumNarrowRemoteRespPortsPerTile ) begin: gen_superbank_resp_ini_addr_req_gt_resp
       always_comb begin
         superbank_resp_ini_addr[b] = '0;
         superbank_resp_ini_addr[b] = bank_resp_ini_addr[b];
@@ -568,8 +541,7 @@ module mempool_tile
       core_id   : bank_req_payload[b].wdata.core_id,
       tile_id   : bank_req_payload[b].ini_addr,
       group_id  : bank_req_payload[b].src_group_id,
-      wide      : bank_req_wide[b],
-      is_write  : bank_req_payload[b].wen && !(|bank_req_payload[b].wdata.amo)
+      wide      : bank_req_wide[b]
     };
     always_comb begin
       bank_resp_ini_addr[b] = '0;
@@ -580,7 +552,6 @@ module mempool_tile
     assign bank_resp_payload[b].rdata.core_id = meta_out.core_id;
     assign bank_resp_payload[b].src_group_id  = meta_out.group_id;
     assign bank_resp_payload[b].rdata.amo     = '0; // Don't care
-    assign bank_resp_payload[b].is_write      = meta_out.is_write;
     assign bank_resp_wide[b]                  = meta_out.wide;
 
     tcdm_adapter #(
@@ -1115,7 +1086,9 @@ module mempool_tile
     .NumCoresPerTile                      (NumLocalPorts                       ),
     .NumNarrowRemoteReqPortsPerTile             (NumNarrowRemoteReqPortsPerTile            ),
     .NumNarrowRoReqPortsPerTile           (NumNarrowRoReqPortsPerTile          ),
-    .NumNarrowRwReqPortsPerTile           (NumNarrowRwReqPortsPerTile          ),
+    .NumNarrowWoReqPortsPerTile           (NumNarrowWoReqPortsPerTile          ),
+    .NumNarrowPayloadReqPortsPerTile         (NumNarrowPayloadReqPortsPerTile        ),
+    .NumNarrowRwReqPortsPerTile         (NumNarrowRwReqPortsPerTile        ),
     .NumBanksPerTile                      (NumBanksPerTile                     ),
     .NumTilesPerGroup                     (NumTilesPerGroup                    ),
     .NumGroups                            (NumGroups                           ),

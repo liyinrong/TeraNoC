@@ -14,7 +14,9 @@ module mempool_tile_remote_req_router
   parameter int unsigned NumCoresPerTile              = 4,
   parameter int unsigned NumNarrowRemoteReqPortsPerTile     = 4,
   parameter int unsigned NumNarrowRoReqPortsPerTile   = 2,
-  parameter int unsigned NumNarrowRwReqPortsPerTile   = 2,
+  parameter int unsigned NumNarrowWoReqPortsPerTile   = 2,
+  parameter int unsigned NumNarrowPayloadReqPortsPerTile = 0,
+  parameter int unsigned NumNarrowRwReqPortsPerTile = 0,
   parameter int unsigned NumBanksPerTile              = 16,
   parameter int unsigned NumTilesPerGroup             = 4,
   parameter int unsigned NumGroups                    = 4,
@@ -60,14 +62,14 @@ module mempool_tile_remote_req_router
     // |    | ->  |    |   -> r     Low  1
     // |Tile| ->  |xbar|   -> r     ||   2
     // |    | ->  |    |   -> rw    ||   3
-    // |    | ->  |    |   -> rw    \/   4
-    // ------     ------   -> rw   High   5 ]
+    // |    | ->  |    |   -> w     \/   4
+    // ------     ------   -> w    High   5 ]
 
-    if (NumNarrowRoReqPortsPerTile > 0) begin
+    if((NumNarrowRoReqPortsPerTile > 0) || (NumNarrowWoReqPortsPerTile > 0)) begin
       assign remote_req_tgt_sel_o[c] = group_id_is_local[c] ? 0 :
                                       ~(remote_req_interco_wen_i[c] | remote_req_interco_amoen_i[c]) ?
                                        (1 + (c % (NumNarrowRoReqPortsPerTile + NumNarrowRwReqPortsPerTile))) :
-                                       (1 + NumNarrowRoReqPortsPerTile + (c % NumNarrowRwReqPortsPerTile));
+                                       (1 + NumNarrowRoReqPortsPerTile + (c % (NumNarrowPayloadReqPortsPerTile)));
     end else begin
       assign remote_req_tgt_sel_o[c] = group_id_is_local[c] ? 0 : (1 + (c % (NumNarrowRemoteReqPortsPerTile - 1)));
     end
