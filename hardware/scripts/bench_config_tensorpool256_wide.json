@@ -1,0 +1,92 @@
+{
+  "exec_root": "..",
+  "results_dir": "../results",
+  "abbr_map": {
+    "noc_req_narrow_ro_channel_num": "nro",
+    "noc_req_narrow_rw_channel_num": "nrw",
+    "noc_req_narrow_wo_channel_num": "nwo",
+    "noc_resp_narrow_rw_channel_num": "nsrw",
+    "noc_req_wide_rw_channel_num": "wrw",
+    "noc_resp_wide_rw_channel_num": "wsrw",
+    "noc_router_input_fifo_dep": "idep",
+    "noc_router_output_fifo_dep": "odep",
+    "noc_router_remapping": "rrmp",
+    "noc_router_remap_group_size": "rgrp",
+    "spm_bank_id_remap": "brmp",
+    "tile_id_remap": "trmp"
+  },
+  "ulimit_nofile": 4096,
+  "env": {
+    "conda_sh": "/usr/local/anaconda3-2025.06/etc/profile.d/conda.sh",
+    "conda_env": "/home/msc26f31/.conda/envs/teranoc"
+  },
+  "paths": {
+    "build_prefix": "build_"
+  },
+  "make_steps": [
+    "make clean buildpath={buildpath}",
+    "make simcvcs app={app} {config} buildpath={buildpath}",
+    "make trace {config} result_dir={result_dir} buildpath={buildpath}",
+    "make clean buildpath={buildpath}"
+  ],
+  "copy_rules": [
+    {
+      "type": "dir",
+      "src": "{buildpath}/noc_profiling",
+      "dst": "{result_dir}/noc_profiling",
+      "optional": true
+    },
+    {
+      "type": "dir",
+      "src": "{buildpath}/spm_profiling",
+      "dst": "{result_dir}/spm_profiling",
+      "optional": true
+    },
+    {
+      "type": "dir",
+      "src": "{buildpath}/redmule_profiling",
+      "dst": "{result_dir}/redmule_profiling",
+      "optional": true
+    },
+    {
+      "type": "file",
+      "src": "{buildpath}/dma.log",
+      "dst": "{result_dir}/dma.log",
+      "optional": true
+    }
+  ],
+  "load_control": {
+    "max_parallel": 4,
+    "poll_interval_sec": 1.0,
+    "cpu_threshold_percent": 70.0,
+    "mem_threshold_percent": 70.0,
+    "disk_threshold_percent": 90.0,
+    "nice": 10,
+    "ionice_class": 2,
+    "ionice_level": 7
+  },
+  "configs": [
+    {
+      "config": "tensorpool256",
+      "name": "tp256_wideoff",
+      "binary_dir": "apps/baremetal/tensorpool256",
+      "extra_info": "_narrow4rw_wideoff",
+      "apps": [
+        "rm_gemm_f16_128x128x128",
+        "rm_gemm_f16_128x256x128",
+        "rm_gemm_f16_256x256x256"
+      ]
+    },
+    {
+      "config": "tensorpool256_wide",
+      "name": "tp256_wide512",
+      "binary_dir": "apps/baremetal/tensorpool256",
+      "extra_info": "_narrow4rw_wide512",
+      "apps": [
+        "rm_gemm_f16_128x128x128",
+        "rm_gemm_f16_128x256x128",
+        "rm_gemm_f16_256x256x256"
+      ]
+    }
+  ]
+}

@@ -55,14 +55,21 @@ noc_router_remapping ?= 3
 noc_virtual_channel_num ?= 1
 
 # Channel configuration mode (internal control only)
-# Options: baseline, split, enhanced
-narrow_channel_config_mode := baseline
+# Options: baseline, rw4, split, enhanced
+narrow_channel_config_mode := rw4
 
 ifeq ($(strip $(narrow_channel_config_mode)), baseline)
 noc_req_narrow_ro_channel_num ?= 0
 noc_req_narrow_rw_channel_num ?= 2
 noc_req_narrow_wo_channel_num ?= 0
 noc_resp_narrow_rw_channel_num ?= 2
+else ifeq ($(strip $(narrow_channel_config_mode)), rw4)
+# Four payload request channels and four response channels per tile. Request and
+# response port counts stay equal, so the response crossbar keeps its identity map.
+noc_req_narrow_ro_channel_num ?= 0
+noc_req_narrow_rw_channel_num ?= 4
+noc_req_narrow_wo_channel_num ?= 0
+noc_resp_narrow_rw_channel_num ?= 4
 else ifeq ($(strip $(narrow_channel_config_mode)), split)
 noc_req_narrow_ro_channel_num ?= 1
 noc_req_narrow_rw_channel_num ?= 1

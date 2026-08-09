@@ -15,12 +15,14 @@ module mempool_tile_remote_req_router
   parameter int unsigned NumNarrowRemoteReqPortsPerTile     = 4,
   parameter int unsigned NumNarrowRoReqPortsPerTile   = 2,
   parameter int unsigned NumNarrowWoReqPortsPerTile   = 2,
-  parameter int unsigned NumNarrowPayloadReqPortsPerTile = 0,
   parameter int unsigned NumNarrowRwReqPortsPerTile = 0,
   parameter int unsigned NumBanksPerTile              = 16,
   parameter int unsigned NumTilesPerGroup             = 4,
   parameter int unsigned NumGroups                    = 4,
-  parameter int unsigned ByteOffset                   = 2
+  parameter int unsigned ByteOffset                   = 2,
+  // Payload-bearing request ports: the RW and WO classes share one port range.
+  localparam int unsigned NumNarrowPayloadReqPortsPerTile =
+      NumNarrowRwReqPortsPerTile + NumNarrowWoReqPortsPerTile
 ) (
   input  group_id_t                                                           group_id_i,
   input  logic                [NumCoresPerTile-1:0]                           remote_req_interco_wen_i,
