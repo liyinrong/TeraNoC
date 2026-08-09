@@ -1,0 +1,46 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+  "rename_tag_rules": {
+    "rm_gemm_f16": [
+      "matrix_M",
+      "matrix_N",
+      "matrix_P"
+    ]
+  },
+  "extra_args": {
+    "rm_gemm_f16": "COMPILER=llvm"
+  },
+  "configs": [
+    {
+      "name": "tensorpool256",
+      "pack_dir": "tensorpool256",
+      "apps": {
+        "rm_gemm_f16": {
+          "tasks": [
+            {
+              "matrix_M": 256,
+              "matrix_N": 256,
+              "matrix_P": 256
+            },
+            {
+              "matrix_M": 128,
+              "matrix_N": 256,
+              "matrix_P": 128
+            },
+            {
+              "matrix_M": 128,
+              "matrix_N": 128,
+              "matrix_P": 128
+            }
+          ],
+          "variants": {
+            "": "-DPARALLEL",
+            "_wshift": "-DPARALLEL -DWSHIFT=1"
+          }
+        }
+      }
+    }
+  ]
+}

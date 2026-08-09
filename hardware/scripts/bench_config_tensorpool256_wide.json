@@ -74,7 +74,10 @@
       "apps": [
         "rm_gemm_f16_128x128x128",
         "rm_gemm_f16_128x256x128",
-        "rm_gemm_f16_256x256x256"
+        "rm_gemm_f16_256x256x256",
+        "rm_gemm_f16_wshift_128x128x128",
+        "rm_gemm_f16_wshift_128x256x128",
+        "rm_gemm_f16_wshift_256x256x256"
       ]
     },
     {
@@ -85,7 +88,10 @@
       "apps": [
         "rm_gemm_f16_128x128x128",
         "rm_gemm_f16_128x256x128",
-        "rm_gemm_f16_256x256x256"
+        "rm_gemm_f16_256x256x256",
+        "rm_gemm_f16_wshift_128x128x128",
+        "rm_gemm_f16_wshift_128x256x128",
+        "rm_gemm_f16_wshift_256x256x256"
       ]
     }
   ]

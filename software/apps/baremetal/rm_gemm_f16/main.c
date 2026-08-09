@@ -26,8 +26,14 @@
 #if !defined(SINGLE) && !defined(PARALLEL)
 #define SINGLE
 #endif
+// Stagger each engine's X panel in L1 / its starting W column, so the engines
+// do not all hit the same banks at the same time. Overridable from the build.
+#ifndef XSHIFT
 #define XSHIFT 0
+#endif
+#ifndef WSHIFT
 #define WSHIFT 0
+#endif
 
 __fp16 l1_X[(matrix_M * matrix_N) +
             PORT_WIDTH * NUM_REDMULE_TILES * (NUM_REDMULE_TILES + 1)]
