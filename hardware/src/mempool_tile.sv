@@ -440,17 +440,23 @@ module mempool_tile
   logic                    [NumBanksPerTile-1:0] bank_resp_wide;
   local_resp_interco_addr_t[NumBanksPerTile-1:0] bank_resp_ini_addr;
 
-  // Condition the response xbar select. Local and same-group responses return
-  // on their original path; inter-group responses use an RW port, or a WO port
-  // for plain writes when that optional class is present.
+  // Condition bank_resp_ini_addr into the resp xbar's sel, handling
+  // req/resp port-count asymmetry; feeds i_tcdm_bank_interco.mst_resp_ini_addr_i.
+  //
+  // Without a WO response class the request and response port ranges still line
+  // up one-for-one, so this is the ORIGINAL pre-wide-plane mapping, unchanged.
+  // A WO class breaks that correspondence -- requests are {RO, RW} while
+  // responses are {RW, WO} -- so it gets its own class-aware branch.
   for (genvar b = 0; unsigned'(b) < NumBanksPerTile; b++) begin: gen_superbank_resp_ini_addr
-    logic [$bits(group_id_t) + $bits(tile_group_id_t) + $bits(tile_core_id_t) +
-           $bits(meta_id_t)-1:0] resp_hash;
-    assign resp_hash = {bank_resp_payload[b].src_group_id,
-                        bank_resp_payload[b].ini_addr,
-                        bank_resp_payload[b].rdata.core_id,
-                        bank_resp_payload[b].rdata.meta_id};
-    if (NumNarrowWoRespPortsPerTile > 0) begin : gen_wo_resp
+    if (NumNarrowWoRespPortsPerTile > 0) begin: gen_superbank_resp_ini_addr_wo
+      // A plain write is acknowledged on a WO port, every other response on an
+      // RW port; spread within the class by hashing the response identity.
+      logic [$bits(group_id_t) + $bits(tile_group_id_t) + $bits(tile_core_id_t) +
+             $bits(meta_id_t)-1:0] resp_hash;
+      assign resp_hash = {bank_resp_payload[b].src_group_id,
+                          bank_resp_payload[b].ini_addr,
+                          bank_resp_payload[b].rdata.core_id,
+                          bank_resp_payload[b].rdata.meta_id};
       always_comb begin
         superbank_resp_ini_addr[b] = bank_resp_ini_addr[b];
         if (bank_resp_ini_addr[b] > NumLocalPorts) begin
@@ -463,12 +469,57 @@ module mempool_tile
           end
         end
       end
-    end else begin : gen_rw_resp_only
+    end else if(NumNarrowRemoteReqPortsPerTile > NumNarrowRemoteRespPortsPerTile ) begin: gen_superbank_resp_ini_addr_req_gt_resp
       always_comb begin
+        superbank_resp_ini_addr[b] = '0;
         superbank_resp_ini_addr[b] = bank_resp_ini_addr[b];
-        if (bank_resp_ini_addr[b] > NumLocalPorts)
-          superbank_resp_ini_addr[b] = NumLocalPorts + 1 +
-              (resp_hash % NumNarrowRwRespPortsPerTile);
+        if(bank_resp_ini_addr[b] > (NumLocalPorts + NumNarrowRemoteRespPortsPerTile - 1)) begin
+          superbank_resp_ini_addr[b] = bank_resp_ini_addr[b] - (NumNarrowRemoteReqPortsPerTile - NumNarrowRemoteRespPortsPerTile);
+        end
+      end
+    end else if (NumNarrowRemoteReqPortsPerTile == NumNarrowRemoteRespPortsPerTile) begin: gen_superbank_resp_ini_addr_req_eq_resp
+      always_comb begin
+        superbank_resp_ini_addr[b] = '0;
+        superbank_resp_ini_addr[b] = bank_resp_ini_addr[b];
+      end
+    end
+    else begin: gen_superbank_resp_ini_addr_req_lt_resp
+      localparam int unsigned bank_resp_payload_width = $bits(tcdm_slave_resp_t);
+      localparam int unsigned hash_width = $clog2(NumNarrowRemoteRespPortsPerTile - 1) + 2;
+      localparam int unsigned hash_binning_step = (1 << hash_width) / (NumNarrowRemoteRespPortsPerTile - 1);
+      logic [bank_resp_payload_width-1:0] bank_resp_payload_raw;
+      logic [hash_width-1:0] hash_src0, hash_src1, hash;
+      assign bank_resp_payload_raw = bank_resp_payload[b];
+      if(hash_width == 4) begin: gen_customed_hash_4
+        assign hash_src0 = {bank_resp_payload[b].rdata.core_id[0],
+                            bank_resp_payload[b].rdata.core_id[1],
+                            bank_resp_payload[b].src_group_id[0],
+                            bank_resp_payload[b].src_group_id[2]
+                            };
+        assign hash_src1 = {
+                            bank_resp_payload[b].ini_addr[2],
+                            bank_resp_payload[b].src_group_id[3],
+                            bank_resp_payload[b].ini_addr[0],
+                            bank_resp_payload[b].ini_addr[1]
+                            };
+      end else begin: gen_general_hash
+        $warning("Customed hashing is not implemented for hash_width = %0d, ",
+                  "using general congif, the performance may degrade.", hash_width);
+        assign hash_src0 = bank_resp_payload_raw[0 +: hash_width];
+        assign hash_src1 = bank_resp_payload_raw[hash_width +: hash_width];
+      end
+      assign hash = hash_src0 ^ hash_src1;
+      always_comb begin
+        superbank_resp_ini_addr[b] = '0;
+        superbank_resp_ini_addr[b] = bank_resp_ini_addr[b];
+        if(bank_resp_ini_addr[b] > NumLocalPorts) begin
+          superbank_resp_ini_addr[b] = NumLocalPorts + 1 + 0;
+          for (int i = 1; i < (NumNarrowRemoteRespPortsPerTile-1); i++) begin
+            if (hash >= i * hash_binning_step) begin
+              superbank_resp_ini_addr[b] = NumLocalPorts + 1 + i;
+            end
+          end
+        end
       end
     end
   end
