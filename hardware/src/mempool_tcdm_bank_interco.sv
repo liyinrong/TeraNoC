@@ -304,7 +304,10 @@ module mempool_tcdm_bank_interco
   assign eng_fork_valid   = '0;
   assign eng_resp_ready   = '0;
   assign ctag_push_ready  = '1;   // never blocks a (DMA-only) wide grant
-  assign ctag_pop_valid   = '0;
+  // The DMA owns every wide response, so the tag is permanently available: this
+  // feeds dma_resp_valid in gen_resp_split. Tying it low instead would stall the
+  // DMA join forever and wedge the tile.
+  assign ctag_pop_valid   = '1;
   assign ctag_pop_data    = '0;   // route every wide response to the DMA
   `endif
 
