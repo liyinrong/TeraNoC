@@ -30,9 +30,8 @@ noc_req_wide_rw_channel_num   := 1
 noc_resp_wide_rw_channel_num  := 1
 noc_resp_wide_wo_channel_num  := 0
 
-noc_wide_intra_group_channel_num_per_tile := 1
-noc_wide_inter_group_req_channel_num_per_tile := 1
-noc_wide_inter_group_resp_channel_num_per_tile := 1
+num_intra_group_ports_per_tile := 1
+num_inter_group_ports_per_tile := 1
 
 num_redmule_tiles ?= 64
 redmule_height    ?= 8

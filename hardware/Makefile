@@ -263,12 +263,8 @@ vlog_defs += -DNOC_REQ_WIDE_RO_CHANNEL_NUM=$(noc_req_wide_ro_channel_num)
 vlog_defs += -DNOC_REQ_WIDE_RW_CHANNEL_NUM=$(noc_req_wide_rw_channel_num)
 vlog_defs += -DNOC_RESP_WIDE_RW_CHANNEL_NUM=$(noc_resp_wide_rw_channel_num)
 vlog_defs += -DNOC_RESP_WIDE_WO_CHANNEL_NUM=$(noc_resp_wide_wo_channel_num)
-vlog_defs += \
-	-DNOC_WIDE_INTRA_GROUP_CHANNEL_NUM_PER_TILE=$(noc_wide_intra_group_channel_num_per_tile)
-vlog_defs += \
-	-DNOC_WIDE_INTER_GROUP_REQ_CHANNEL_NUM_PER_TILE=$(noc_wide_inter_group_req_channel_num_per_tile)
-vlog_defs += \
-	-DNOC_WIDE_INTER_GROUP_RESP_CHANNEL_NUM_PER_TILE=$(noc_wide_inter_group_resp_channel_num_per_tile)
+vlog_defs += -DNUM_INTRA_GROUP_PORTS_PER_TILE=$(num_intra_group_ports_per_tile)
+vlog_defs += -DNUM_INTER_GROUP_PORTS_PER_TILE=$(num_inter_group_ports_per_tile)
 ifneq (0, $(noc_req_wide_ro_channel_num))
 	vlog_defs += -DUSE_RO_WIDE_REQ_CHANNEL
 endif
@@ -293,8 +289,8 @@ endif
 ifeq (0,$(strip $(wide_tcdm_data_width)))
 $(error Wide TCDM plane requires wide_tcdm_data_width > 0)
 endif
-ifeq (0,$(strip $(noc_wide_intra_group_channel_num_per_tile)))
-$(error Wide TCDM plane requires at least one intra-group channel per tile)
+ifeq (0,$(strip $(num_intra_group_ports_per_tile)))
+$(error Wide TCDM plane requires at least one intra-group port per tile)
 endif
 redmule_tcdm_data_width := $(shell printf '%s' $$((16 * $(redmule_height) * ($(redmule_regs) + 1))))
 ifneq ($(strip $(wide_tcdm_data_width)),$(strip $(redmule_tcdm_data_width)))
@@ -307,36 +303,27 @@ endif
 ifeq (0, $(noc_resp_wide_rw_channel_num))
 $(error Wide TCDM plane is on but noc_resp_wide_rw_channel_num=0: read data has no channel to return on)
 endif
-ifeq (0, $(noc_wide_inter_group_req_channel_num_per_tile))
-$(error Wide TCDM plane requires at least one inter-group request port per tile)
-endif
-ifeq (0, $(noc_wide_inter_group_resp_channel_num_per_tile))
-$(error Wide TCDM plane requires at least one inter-group response port per tile)
+ifeq (0, $(num_inter_group_ports_per_tile))
+$(error Wide TCDM plane requires at least one inter-group port per tile)
 endif
 wide_tcdm_num_tiles_per_group := $(shell printf '%s' \
 	$$(( $(num_cores) / $(num_cores_per_tile) / $(num_groups) )))
-wide_tcdm_req_ports_per_tile := $(strip $(noc_wide_inter_group_req_channel_num_per_tile))
-wide_tcdm_resp_ports_per_tile := $(strip $(noc_wide_inter_group_resp_channel_num_per_tile))
-ifneq ($(wide_tcdm_req_ports_per_tile),$(wide_tcdm_resp_ports_per_tile))
-$(error Wide TCDM logical request and response port counts per tile must match)
-endif
-wide_tcdm_req_ports_per_group := $(shell printf '%s' \
+# The tile's inter-group ports are symmetric: one count sizes both the request
+# and the response side, so no request/response equality check is needed.
+wide_tcdm_ports_per_group := $(shell printf '%s' \
 	$$(( $(wide_tcdm_num_tiles_per_group) * \
-	     $(wide_tcdm_req_ports_per_tile) )))
-wide_tcdm_resp_ports_per_group := $(shell printf '%s' \
-	$$(( $(wide_tcdm_num_tiles_per_group) * \
-	     $(wide_tcdm_resp_ports_per_tile) )))
+	     $(strip $(num_inter_group_ports_per_tile)) )))
 # RO/RW/WO classes are mutually exclusive for each logical port. Each physical
 # class may use up to the aggregate generic tile-port count; their sum may be
 # larger (for example, four RO plus two RW channels fed by four tile ports).
 wide_tcdm_ro_req_channels_over_limit := $(shell printf '%s' \
-	$$(( $(noc_req_wide_ro_channel_num) > $(wide_tcdm_req_ports_per_group) )))
+	$$(( $(noc_req_wide_ro_channel_num) > $(wide_tcdm_ports_per_group) )))
 wide_tcdm_rw_req_channels_over_limit := $(shell printf '%s' \
-	$$(( $(noc_req_wide_rw_channel_num) > $(wide_tcdm_req_ports_per_group) )))
+	$$(( $(noc_req_wide_rw_channel_num) > $(wide_tcdm_ports_per_group) )))
 wide_tcdm_rw_resp_channels_over_limit := $(shell printf '%s' \
-	$$(( $(noc_resp_wide_rw_channel_num) > $(wide_tcdm_resp_ports_per_group) )))
+	$$(( $(noc_resp_wide_rw_channel_num) > $(wide_tcdm_ports_per_group) )))
 wide_tcdm_wo_resp_channels_over_limit := $(shell printf '%s' \
-	$$(( $(noc_resp_wide_wo_channel_num) > $(wide_tcdm_resp_ports_per_group) )))
+	$$(( $(noc_resp_wide_wo_channel_num) > $(wide_tcdm_ports_per_group) )))
 ifeq (1,$(strip $(wide_tcdm_ro_req_channels_over_limit)))
 $(error Wide TCDM RO request channels exceed aggregate inter-group request ports)
 endif

@@ -284,9 +284,9 @@ module mempool_group
   `ifdef USE_WIDE_TCDM_PLANE
   localparam int unsigned WideTileSelW = idx_width(NumTilesPerGroup);
   localparam int unsigned NumWideReqPortsPerGroup =
-      NumTilesPerGroup * NumWideInterGroupReqPortsPerTile;
+      NumTilesPerGroup * NumWideInterGroupPortsPerTile;
   localparam int unsigned NumWideRespPortsPerGroup =
-      NumTilesPerGroup * NumWideInterGroupRespPortsPerTile;
+      NumTilesPerGroup * NumWideInterGroupPortsPerTile;
 
   // The first tile ports are dedicated same-group, other-tile links. Each owns
   // an independent xbar and bank-interconnect ingress and never enters FlooNoC.
@@ -374,9 +374,9 @@ module mempool_group
   logic [NumWideReqPortsPerGroup-1:0] tcdm_wide_master_req_before_mapper_class1;
 
   for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_wide_req_mapper_t
-    for (genvar r = 0; r < NumWideInterGroupReqPortsPerTile; r++) begin :
+    for (genvar r = 0; r < NumWideInterGroupPortsPerTile; r++) begin :
         gen_wide_req_mapper_r
-      localparam int unsigned ReqIdx = t * NumWideInterGroupReqPortsPerTile + r;
+      localparam int unsigned ReqIdx = t * NumWideInterGroupPortsPerTile + r;
       assign tcdm_wide_master_req_before_mapper[ReqIdx] =
           tcdm_wide_master_req[r+NumWideIntraGroupPortsPerTile][t];
       assign tcdm_wide_master_req_before_mapper_valid[ReqIdx] =
@@ -417,18 +417,18 @@ module mempool_group
   for (genvar c = 0; c < NumWideRemoteReqChannelsPerGroup; c++) begin :
       gen_wide_slave_req_sel
     logic [WideTileSelW-1:0] target_tile;
-    logic [idx_width(NumWideInterGroupReqPortsPerTile)-1:0] logical_port;
+    logic [idx_width(NumWideInterGroupPortsPerTile)-1:0] logical_port;
     assign target_tile = (NumTilesPerGroup > 1) ?
         tcdm_wide_slave_req_i[c].tgt_addr[WideTileSelW-1:0] : '0;
     assign logical_port =
-        idx_width(NumWideInterGroupReqPortsPerTile)'(
+        idx_width(NumWideInterGroupPortsPerTile)'(
             (c < NumWideRoReqChannelsPerGroup) ?
-                c % NumWideInterGroupReqPortsPerTile :
+                c % NumWideInterGroupPortsPerTile :
                 (c - NumWideRoReqChannelsPerGroup) %
-                    NumWideInterGroupReqPortsPerTile);
+                    NumWideInterGroupPortsPerTile);
     assign tcdm_wide_slave_req_sel[c] =
         idx_width(NumWideReqPortsPerGroup)'(
-            target_tile * NumWideInterGroupReqPortsPerTile + logical_port);
+            target_tile * NumWideInterGroupPortsPerTile + logical_port);
   end
 
   stream_xbar #(
@@ -453,9 +453,9 @@ module mempool_group
   );
 
   for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_wide_slave_req_t
-    for (genvar r = 0; r < NumWideInterGroupReqPortsPerTile; r++) begin :
+    for (genvar r = 0; r < NumWideInterGroupPortsPerTile; r++) begin :
         gen_wide_slave_req_r
-      localparam int unsigned ReqIdx = t * NumWideInterGroupReqPortsPerTile + r;
+      localparam int unsigned ReqIdx = t * NumWideInterGroupPortsPerTile + r;
       assign tcdm_wide_slave_req[r+NumWideIntraGroupPortsPerTile][t] =
           tcdm_wide_slave_req_after_xbar[ReqIdx];
       assign tcdm_wide_slave_req_valid[r+NumWideIntraGroupPortsPerTile][t] =
@@ -473,9 +473,9 @@ module mempool_group
   logic [NumWideRespPortsPerGroup-1:0] tcdm_wide_slave_resp_before_mapper_class1;
 
   for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_wide_resp_mapper_t
-    for (genvar r = 0; r < NumWideInterGroupRespPortsPerTile; r++) begin :
+    for (genvar r = 0; r < NumWideInterGroupPortsPerTile; r++) begin :
         gen_wide_resp_mapper_r
-      localparam int unsigned RespIdx = t * NumWideInterGroupRespPortsPerTile + r;
+      localparam int unsigned RespIdx = t * NumWideInterGroupPortsPerTile + r;
       assign tcdm_wide_slave_resp_before_mapper[RespIdx] =
           tcdm_wide_slave_resp[r+NumWideIntraGroupPortsPerTile][t];
       assign tcdm_wide_slave_resp_before_mapper_valid[RespIdx] =
@@ -515,17 +515,17 @@ module mempool_group
 
   for (genvar c = 0; c < NumWideRemoteRespChannelsPerGroup; c++) begin :
       gen_wide_master_resp_sel
-    logic [idx_width(NumWideInterGroupRespPortsPerTile)-1:0] logical_port;
+    logic [idx_width(NumWideInterGroupPortsPerTile)-1:0] logical_port;
     assign logical_port =
-        idx_width(NumWideInterGroupRespPortsPerTile)'(
+        idx_width(NumWideInterGroupPortsPerTile)'(
             (c < NumWideRwRespChannelsPerGroup) ?
-                c % NumWideInterGroupRespPortsPerTile :
+                c % NumWideInterGroupPortsPerTile :
                 (c - NumWideRwRespChannelsPerGroup) %
-                    NumWideInterGroupRespPortsPerTile);
+                    NumWideInterGroupPortsPerTile);
     assign tcdm_wide_master_resp_sel[c] =
         idx_width(NumWideRespPortsPerGroup)'(
             tcdm_wide_master_resp_i[c].tile_id *
-            NumWideInterGroupRespPortsPerTile + logical_port);
+            NumWideInterGroupPortsPerTile + logical_port);
   end
 
   stream_xbar #(
@@ -550,9 +550,9 @@ module mempool_group
   );
 
   for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_wide_master_resp_t
-    for (genvar r = 0; r < NumWideInterGroupRespPortsPerTile; r++) begin :
+    for (genvar r = 0; r < NumWideInterGroupPortsPerTile; r++) begin :
         gen_wide_master_resp_r
-      localparam int unsigned RespIdx = t * NumWideInterGroupRespPortsPerTile + r;
+      localparam int unsigned RespIdx = t * NumWideInterGroupPortsPerTile + r;
       assign tcdm_wide_master_resp[r+NumWideIntraGroupPortsPerTile][t] =
           tcdm_wide_master_resp_after_xbar[RespIdx];
       assign tcdm_wide_master_resp_valid[r+NumWideIntraGroupPortsPerTile][t] =

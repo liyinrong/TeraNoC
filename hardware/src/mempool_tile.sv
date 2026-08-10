@@ -832,7 +832,7 @@ module mempool_tile
   logic                   [NumWideLocalPorts-1:0] remote_wide_req_interco_ready;
   addr_t                  [NumWideLocalPorts-1:0] remote_wide_req_interco_addr_int;
   group_id_t              [NumWideLocalPorts-1:0] remote_wide_req_tgt_group_id;
-  logic [NumWideLocalPorts-1:0][idx_width(NumWideInterGroupReqPortsPerTile)-1:0]
+  logic [NumWideLocalPorts-1:0][idx_width(NumWideInterGroupPortsPerTile)-1:0]
       remote_wide_req_interco_tgt_sel;
 
   tcdm_wide_master_resp_t [NumWideLocalPorts-1:0] remote_wide_resp_interco;
@@ -1730,10 +1730,10 @@ module mempool_tile
         prereg_tcdm_wide_master_req_ready[local_wide_req_interco_tgt_sel[WidePortIdx]];
 
     assign remote_wide_req_interco_tgt_sel[WidePortIdx] =
-        idx_width(NumWideInterGroupReqPortsPerTile)'(
-            remote_wide_req_tgt_group_id[WidePortIdx] % NumWideInterGroupReqPortsPerTile);
+        idx_width(NumWideInterGroupPortsPerTile)'(
+            remote_wide_req_tgt_group_id[WidePortIdx] % NumWideInterGroupPortsPerTile);
 
-    for (genvar p = 0; p < NumWideInterGroupReqPortsPerTile; p++) begin :
+    for (genvar p = 0; p < NumWideInterGroupPortsPerTile; p++) begin :
         gen_remote_wide_req_port
       assign prereg_tcdm_wide_master_req[p+NumWideIntraGroupPortsPerTile] =
           remote_wide_req_interco[WidePortIdx];
@@ -1778,14 +1778,9 @@ module mempool_tile
       .idx_o  (/* unused */                                                )
     );
 
-    // Every request ingress returns its response on the same numbered tile
-    // port. Separate request/response parameters remain visible in the
-    // hierarchy, but the current single-beat integration requires them equal.
-    initial begin : p_wide_inter_group_port_count
-      assert (NumWideInterGroupReqPortsPerTile ==
-              NumWideInterGroupRespPortsPerTile)
-        else $fatal(1, "[mempool_tile] Wide request/response port counts must match.");
-    end
+    // Every request ingress returns its response on the same numbered tile port.
+    // NumWideInterGroupPortsPerTile is a single symmetric count, so that can no
+    // longer be violated by configuration and needs no runtime check.
 
     assign tcdm_wide_rm_resp_in[0] = '{
       data:  tcdm_wide_eng_resp_to_rm[WidePortIdx].rdata.data,

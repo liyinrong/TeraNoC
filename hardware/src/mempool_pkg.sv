@@ -525,22 +525,22 @@ package mempool_pkg;
   // Logical wide ports at each tile. The first ports are dedicated same-group,
   // other-tile paths. The remaining indices are class-neutral inter-group ports;
   // the group maps them onto its physical RO/RW/WO channel classes.
+  //
+  // A tile's wide ports are SYMMETRIC: each kind is one count that sizes both
+  // the request and the response side, so the two totals below are equal by
+  // construction and cannot be configured apart.
   localparam integer unsigned NumWideIntraGroupPortsPerTile =
-      `ifdef NOC_WIDE_INTRA_GROUP_CHANNEL_NUM_PER_TILE
-      `NOC_WIDE_INTRA_GROUP_CHANNEL_NUM_PER_TILE
+      `ifdef NUM_INTRA_GROUP_PORTS_PER_TILE
+      `NUM_INTRA_GROUP_PORTS_PER_TILE
       `else 1 `endif;
-  localparam integer unsigned NumWideInterGroupReqPortsPerTile =
-      `ifdef NOC_WIDE_INTER_GROUP_REQ_CHANNEL_NUM_PER_TILE
-      `NOC_WIDE_INTER_GROUP_REQ_CHANNEL_NUM_PER_TILE
-      `else 1 `endif;
-  localparam integer unsigned NumWideInterGroupRespPortsPerTile =
-      `ifdef NOC_WIDE_INTER_GROUP_RESP_CHANNEL_NUM_PER_TILE
-      `NOC_WIDE_INTER_GROUP_RESP_CHANNEL_NUM_PER_TILE
+  localparam integer unsigned NumWideInterGroupPortsPerTile =
+      `ifdef NUM_INTER_GROUP_PORTS_PER_TILE
+      `NUM_INTER_GROUP_PORTS_PER_TILE
       `else 1 `endif;
   localparam integer unsigned NumWideRemoteReqPortsPerTile =
-      NumWideIntraGroupPortsPerTile + NumWideInterGroupReqPortsPerTile;
+      NumWideIntraGroupPortsPerTile + NumWideInterGroupPortsPerTile;
   localparam integer unsigned NumWideRemoteRespPortsPerTile =
-      NumWideIntraGroupPortsPerTile + NumWideInterGroupRespPortsPerTile;
+      NumWideIntraGroupPortsPerTile + NumWideInterGroupPortsPerTile;
 
   // Totals: the physical wide channels carried by each group-to-group mesh direction.
   localparam integer unsigned NumWideRemoteReqChannelsPerGroup =

@@ -124,11 +124,11 @@ noc_resp_wide_wo_channel_num ?= 0
 # Logical wide ports at each tile. Intra-group ports are dedicated links and do
 # not enter the group mapper. Inter-group ports are class-neutral at the tile;
 # the group maps reads/writes onto its physical RO/RW/WO channel classes.
-# All counts remain parameters even though the current RedMulE integration is
-# validated only for one intra-group plus one inter-group request/response path.
-noc_wide_intra_group_channel_num_per_tile ?= 1
-noc_wide_inter_group_req_channel_num_per_tile ?= 1
-noc_wide_inter_group_resp_channel_num_per_tile ?= 1
+# A tile's wide ports are symmetric, so one count sizes both directions of each
+# kind. Both remain parameters even though the current RedMulE integration is
+# validated only for one intra-group plus one inter-group path.
+num_intra_group_ports_per_tile ?= 1
+num_inter_group_ports_per_tile ?= 1
 
 # Number of RedMulE tensor-core tiles in the cluster
 num_redmule_tiles ?= 0
