@@ -835,7 +835,8 @@ module mempool_tile
   logic                   [NumWideLocalPorts-1:0] remote_wide_req_interco_ready;
   addr_t                  [NumWideLocalPorts-1:0] remote_wide_req_interco_addr_int;
   group_id_t              [NumWideLocalPorts-1:0] remote_wide_req_tgt_group_id;
-  logic [NumWideLocalPorts-1:0][idx_width(NumTilesPerGroup)-1:0]              remote_wide_req_tgt_tile;
+  tcdm_addr_t             [NumWideLocalPorts-1:0]                            remote_wide_req_tgt_addr;
+  logic [NumWideLocalPorts-1:0][idx_width(NumWideRemoteReqPortsPerTile)-1:0]  remote_wide_req_tgt_sel;
   logic [NumWideLocalPorts-1:0][idx_width(NumWideRemoteReqPortsPerTile)-1:0]  remote_wide_req_interco_tgt_sel;
 
   tcdm_wide_master_resp_t [NumWideLocalPorts-1:0] remote_wide_resp_interco;
@@ -1062,6 +1063,11 @@ module mempool_tile
     .NumTilesPerGroup                     (NumTilesPerGroup                    ),
     .NumGroups                            (NumGroups                           ),
     .ByteOffset                           (ByteOffset                          )
+    `ifdef USE_WIDE_TCDM_PLANE
+    ,.NumWideLocalPorts                   (NumWideLocalPorts                   )
+    ,.NumWideIntraGroupPortsPerTile       (NumWideIntraGroupPortsPerTile       )
+    ,.NumWideInterGroupPortsPerTile       (NumWideInterGroupPortsPerTile       )
+    `endif
   ) i_mempool_tile_remote_req_router (
     .group_id_i                           (group_id                            ),
     .remote_req_interco_wen_i             (remote_req_interco_wen              ),
@@ -1070,6 +1076,12 @@ module mempool_tile
     .remote_req_tgt_addr_o                (remote_req_tgt_addr                 ),
     .remote_req_tgt_group_id_o            (remote_req_tgt_group_id             ),
     .remote_req_tgt_sel_o                 (remote_req_tgt_sel                  )
+    `ifdef USE_WIDE_TCDM_PLANE
+    ,.remote_wide_req_interco_addr_int_i  (remote_wide_req_interco_addr_int    )
+    ,.remote_wide_req_tgt_addr_o          (remote_wide_req_tgt_addr            )
+    ,.remote_wide_req_tgt_group_id_o      (remote_wide_req_tgt_group_id        )
+    ,.remote_wide_req_tgt_sel_o           (remote_wide_req_tgt_sel             )
+    `endif
   );
 
   // SoC requests (one per core data port; Spatz vector ports never hit SoC
@@ -1517,28 +1529,10 @@ module mempool_tile
     assign tcdm_wide_rm_resp_ready = tcdm.resp_ready;
 
     // The shim splits own-tile from every other tile; the same-group /
-    // other-group decision is made below on the remote stream.
+    // other-group decision is made by i_mempool_tile_remote_req_router, which
+    // produces tgt_addr / tgt_group_id / tgt_sel for the wide port just as it
+    // does for the narrow cores.
     address_map_t [NumWideShimPorts-1:0] tcdm_wide_mask_map;
-    logic remote_wide_req_group_is_local;
-
-    if (NumGroups > 1) begin : gen_rm_wide_tgt_group
-      assign remote_wide_req_tgt_group_id[WidePortIdx] =
-          remote_wide_req_interco_addr_int[WidePortIdx][ByteOffset + $clog2(NumBanksPerTile) +
-          $clog2(NumTilesPerGroup) +: $clog2(NumGroups)];
-    end else begin : gen_rm_wide_tgt_group
-      assign remote_wide_req_tgt_group_id[WidePortIdx] = '0;
-    end
-    assign remote_wide_req_group_is_local =
-        remote_wide_req_tgt_group_id[WidePortIdx] == group_id;
-
-    // Within-group target tile, used to pick the same-group link.
-    if (NumTilesPerGroup == 1) begin : gen_rm_wide_tgt_tile
-      assign remote_wide_req_tgt_tile[WidePortIdx] = '0;
-    end else begin : gen_rm_wide_tgt_tile
-      assign remote_wide_req_tgt_tile[WidePortIdx] =
-          remote_wide_req_interco_addr_int[WidePortIdx][
-              ByteOffset + $clog2(NumBanksPerTile) +: idx_width(NumTilesPerGroup)];
-    end
 
     // Own-tile request: {row, bank}, group and tile fields consumed -- the same
     // layout the narrow local_req_interco_payload uses.
@@ -1548,23 +1542,7 @@ module mempool_tile
         local_wide_req_interco_addr_int[WidePortIdx][
             ByteOffset +: idx_width(NumBanksPerTile)]});
 
-    // Remote request: the narrow remote_req_tgt_addr layout {row, bank, tile}.
-    if (NumTilesPerGroup == 1) begin : gen_rm_wide_tgt_addr
-      assign remote_wide_req_interco[WidePortIdx].tgt_addr = tcdm_addr_t'({
-          remote_wide_req_interco_addr_int[WidePortIdx][ByteOffset + idx_width(NumBanksPerTile) +
-          $clog2(NumGroups) +: TCDMAddrMemWidth],
-          remote_wide_req_interco_addr_int[WidePortIdx][
-              ByteOffset +: idx_width(NumBanksPerTile)]});
-    end else begin : gen_rm_wide_tgt_addr
-      assign remote_wide_req_interco[WidePortIdx].tgt_addr = tcdm_addr_t'({
-          remote_wide_req_interco_addr_int[WidePortIdx][ByteOffset + idx_width(NumBanksPerTile) +
-          $clog2(NumTilesPerGroup) + $clog2(NumGroups) +: TCDMAddrMemWidth],
-          remote_wide_req_interco_addr_int[WidePortIdx][
-              ByteOffset +: idx_width(NumBanksPerTile)],
-          remote_wide_req_interco_addr_int[WidePortIdx][
-              ByteOffset + idx_width(NumBanksPerTile) +:
-          $clog2(NumTilesPerGroup)]});
-    end
+    assign remote_wide_req_interco[WidePortIdx].tgt_addr = remote_wide_req_tgt_addr[WidePortIdx];
 
     // Same split as the narrow mask_map: LOCAL is THIS TILE (the tile-id field
     // pinned to tile_id_i), EXTERNAL is every other TCDM address. The
@@ -1646,15 +1624,8 @@ module mempool_tile
         remote_wide_req_tgt_group_id[WidePortIdx];
     assign remote_wide_req_interco[WidePortIdx].src_tile_id   = tcdm_wide_tile_id;
 
-    // Port numbering matches mempool_tile_remote_req_router: the same-group
-    // links come first, the inter-group links after them.
     assign remote_wide_req_interco_tgt_sel[WidePortIdx] =
-        idx_width(NumWideRemoteReqPortsPerTile)'(
-            remote_wide_req_group_is_local ?
-                (remote_wide_req_tgt_tile[WidePortIdx] % NumWideIntraGroupPortsPerTile) :
-                (NumWideIntraGroupPortsPerTile +
-                 (remote_wide_req_tgt_group_id[WidePortIdx] %
-                  NumWideInterGroupPortsPerTile)));
+        remote_wide_req_tgt_sel[WidePortIdx];
 
     stream_xbar #(
       .NumInp   (NumWideLocalPorts             ),
@@ -2020,6 +1991,7 @@ module mempool_tile
     `ifdef USE_WIDE_TCDM_PLANE
     assign local_wide_req_interco_payload      = '0;
     assign local_wide_req_interco_valid        = '0;
+    assign remote_wide_req_interco_addr_int    = '0;
     assign local_wide_resp_interco_ready       = '1;
     assign prereg_tcdm_wide_master_req         = '0;
     assign prereg_tcdm_wide_master_req_valid   = '0;
