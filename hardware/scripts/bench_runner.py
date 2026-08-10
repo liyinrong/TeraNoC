@@ -294,6 +294,11 @@ class BenchRunner:
         self.build_prefix = paths.get("build_prefix", "build_")
 
         self.make_steps: List[str] = cfg["make_steps"]
+        # Steps that run AFTER the copy rules, for anything that destroys the
+        # build dir. A `make clean` at the tail of make_steps deletes the copy
+        # sources before they are read, which silently loses every profiling
+        # directory when the rules are optional -- put it here instead.
+        self.cleanup_steps: List[str] = cfg.get("cleanup_steps", []) or []
         self.copy_rules: List[Dict[str, Any]] = cfg.get("copy_rules", []) or []
         self.configs: List[Dict[str, Any]] = cfg["configs"]
 
@@ -542,25 +547,22 @@ class BenchRunner:
     # Execution
     # --------------------
 
-    async def run_one(self, ctx: Dict[str, str], rlog: RunnerLog) -> int:
-        result_dir = Path(ctx["result_dir"])
-        result_dir.mkdir(parents=True, exist_ok=True)
-        app_log_path = result_dir / "app.log"
-
-        steps = [s.format(**ctx) for s in self.make_steps]
+    async def _run_steps(
+        self,
+        steps: List[str],
+        ctx: Dict[str, str],
+        app_log_path: Path,
+        rlog: RunnerLog,
+        label: str,
+        append: bool,
+    ) -> int:
         sched = self._sched_prefix()
         full_cmd = (
             self._shell_prefix()
             + " && "
             + " && ".join(f"{sched}{step}" for step in steps)
         )
-
-        await rlog.write(
-            f"START app_name={ctx['app_name']} app_make={ctx['app']}"
-        )
-        await rlog.write(f"BUILD    {ctx['buildpath']}")
-        await rlog.write(f"RESULT   {ctx['result_dir']}")
-        await rlog.write(f"CMD      {full_cmd}")
+        await rlog.write(f"CMD_{label} {full_cmd}")
 
         proc = await asyncio.create_subprocess_shell(
             full_cmd,
@@ -570,22 +572,59 @@ class BenchRunner:
         )
 
         assert proc.stdout is not None
-        with app_log_path.open("wb") as f:
+        with app_log_path.open("ab" if append else "wb") as f:
             while True:
                 chunk = await proc.stdout.read(4096)
                 if not chunk:
                     break
                 f.write(chunk)
 
-        rc = await proc.wait()
+        return await proc.wait()
+
+    async def run_one(self, ctx: Dict[str, str], rlog: RunnerLog) -> int:
+        result_dir = Path(ctx["result_dir"])
+        result_dir.mkdir(parents=True, exist_ok=True)
+        app_log_path = result_dir / "app.log"
+
+        await rlog.write(
+            f"START app_name={ctx['app_name']} app_make={ctx['app']}"
+        )
+        await rlog.write(f"BUILD    {ctx['buildpath']}")
+        await rlog.write(f"RESULT   {ctx['result_dir']}")
+
+        rc = await self._run_steps(
+            [s.format(**ctx) for s in self.make_steps],
+            ctx, app_log_path, rlog, "MAKE", append=False,
+        )
         await rlog.write(f"END   app_name={ctx['app_name']} rc={rc}")
 
+        # Harvest before any cleanup step can delete the build dir. A required
+        # rule that finds nothing fails the job: a silently missing profiling
+        # directory reads exactly like "this run produced no traffic".
         try:
             self._apply_copy_rules(ctx)
         except Exception as e:
             await rlog.write(
                 f"COPY_RULES_ERROR app_name={ctx['app_name']} err={repr(e)}"
             )
+            if rc == 0:
+                rc = 90
+
+        if self.cleanup_steps:
+            if rc == 0:
+                crc = await self._run_steps(
+                    [s.format(**ctx) for s in self.cleanup_steps],
+                    ctx, app_log_path, rlog, "CLEANUP", append=True,
+                )
+                await rlog.write(
+                    f"CLEANUP app_name={ctx['app_name']} rc={crc}"
+                )
+            else:
+                # Keep a failed run's build dir: it is the only place the
+                # transcript, the dasm and the partial traces still exist.
+                await rlog.write(
+                    f"CLEANUP_SKIPPED app_name={ctx['app_name']} rc={rc}"
+                )
 
         return rc
 

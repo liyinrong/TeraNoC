@@ -26,7 +26,9 @@
   "make_steps": [
     "make clean buildpath={buildpath}",
     "make simcvcs app={app} {config} buildpath={buildpath}",
-    "make trace {config} result_dir={result_dir} buildpath={buildpath}",
+    "make trace {config} result_dir={result_dir} buildpath={buildpath}"
+  ],
+  "cleanup_steps": [
     "make clean buildpath={buildpath}"
   ],
   "copy_rules": [
@@ -72,12 +74,18 @@
       "binary_dir": "apps/baremetal/tensorpool256",
       "extra_info": "_narrow4rw_wideoff",
       "apps": [
-        "rm_gemm_f16_128x128x128",
-        "rm_gemm_f16_128x256x128",
         "rm_gemm_f16_256x256x256",
-        "rm_gemm_f16_wshift_128x128x128",
+        "rm_gemm_f16_wshift_256x256x256",
+        "rm_gemm_f16_shift_256x256x256",
+        "rm_gemm_f16_256x128x256",
+        "rm_gemm_f16_wshift_256x128x256",
+        "rm_gemm_f16_shift_256x128x256",
+        "rm_gemm_f16_128x256x128",
         "rm_gemm_f16_wshift_128x256x128",
-        "rm_gemm_f16_wshift_256x256x256"
+        "rm_gemm_f16_shift_128x256x128",
+        "rm_gemm_f16_128x128x128",
+        "rm_gemm_f16_wshift_128x128x128",
+        "rm_gemm_f16_shift_128x128x128"
       ]
     },
     {
@@ -86,12 +94,18 @@
       "binary_dir": "apps/baremetal/tensorpool256",
       "extra_info": "_narrow4rw_wide512",
       "apps": [
-        "rm_gemm_f16_128x128x128",
-        "rm_gemm_f16_128x256x128",
         "rm_gemm_f16_256x256x256",
-        "rm_gemm_f16_wshift_128x128x128",
+        "rm_gemm_f16_wshift_256x256x256",
+        "rm_gemm_f16_shift_256x256x256",
+        "rm_gemm_f16_256x128x256",
+        "rm_gemm_f16_wshift_256x128x256",
+        "rm_gemm_f16_shift_256x128x256",
+        "rm_gemm_f16_128x256x128",
         "rm_gemm_f16_wshift_128x256x128",
-        "rm_gemm_f16_wshift_256x256x256"
+        "rm_gemm_f16_shift_128x256x128",
+        "rm_gemm_f16_128x128x128",
+        "rm_gemm_f16_wshift_128x128x128",
+        "rm_gemm_f16_shift_128x128x128"
       ]
     }
   ]
