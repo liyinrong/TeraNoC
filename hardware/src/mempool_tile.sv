@@ -1016,24 +1016,24 @@ module mempool_tile
     .NumNarrowReq   (NumLocalPorts + NumNarrowRemoteReqPortsPerTile  ),
     .NumNarrowResp  (NumLocalPorts + NumNarrowRemoteRespPortsPerTile ),
     `ifdef USE_WIDE_TCDM_PLANE
-    .NumWideEngPorts(NumWideEngIngress),
+    .NumWidePorts(NumWideEngIngress),
     `endif
     .NumBanksPerTile(NumBanksPerTile  ),
     .NumSuperbanks  (NumSuperbanks    ),
     .NarrowDataWidth(DataWidth        ),
-    .WideDataWidth  (DmaDataWidth     ),
+    .DmaWideDataWidth(DmaDataWidth    ),
     .ByteOffset     (ByteOffset       ),
     .SpmBankIdRemap (SpmBankIdRemap   ),
     .narrow_req_t   (tcdm_slave_req_t ),
     .narrow_resp_t  (tcdm_slave_resp_t),
-    .wide_req_t     (tcdm_dma_req_t   ),
-    .wide_resp_t    (tcdm_dma_resp_t  ),
+    .dma_wide_req_t (tcdm_dma_req_t   ),
+    .dma_wide_resp_t(tcdm_dma_resp_t  ),
     .group_id_t     (group_id_t       ),
     .resp_idx_t     (local_resp_interco_addr_t)
     `ifdef USE_WIDE_TCDM_PLANE
-    ,.WideEngDataWidth(WideTcdmDataWidth   )
-    ,.wide_eng_req_t  (tcdm_wide_eng_req_t )
-    ,.wide_eng_resp_t (tcdm_wide_eng_resp_t)
+    ,.WideDataWidth(WideTcdmDataWidth   )
+    ,.wide_req_t   (tcdm_wide_eng_req_t )
+    ,.wide_resp_t  (tcdm_wide_eng_resp_t)
     `endif
   ) i_tcdm_bank_interco (
     .clk_i                  (clk_i),
@@ -1048,20 +1048,20 @@ module mempool_tile
     .slv_narrow_resp_o      ({prereg_tcdm_slave_resp,       local_resp_interco_payload}),
     .slv_narrow_resp_valid_o({prereg_tcdm_slave_resp_valid, local_resp_interco_valid  }),
     .slv_narrow_resp_ready_i({prereg_tcdm_slave_resp_ready, local_resp_interco_ready  }),
-    .slv_wide_req_i         (tcdm_dma_req_i      ),
-    .slv_wide_req_valid_i   (tcdm_dma_req_valid_i),
-    .slv_wide_req_ready_o   (tcdm_dma_req_ready_o),
-    .slv_wide_resp_o        (tcdm_dma_resp_o      ),
-    .slv_wide_resp_valid_o  (tcdm_dma_resp_valid_o),
-    .slv_wide_resp_ready_i  (tcdm_dma_resp_ready_i),
+    .slv_dma_req_i          (tcdm_dma_req_i       ),
+    .slv_dma_req_valid_i    (tcdm_dma_req_valid_i ),
+    .slv_dma_req_ready_o    (tcdm_dma_req_ready_o ),
+    .slv_dma_resp_o         (tcdm_dma_resp_o      ),
+    .slv_dma_resp_valid_o   (tcdm_dma_resp_valid_o),
+    .slv_dma_resp_ready_i   (tcdm_dma_resp_ready_i),
     `ifdef USE_WIDE_TCDM_PLANE
-    // B2: engine wide port fed by the raw wide landing path.
-    .slv_wide_eng_req_i        (tcdm_wide_eng_req            ),
-    .slv_wide_eng_req_valid_i  (tcdm_wide_eng_req_valid      ),
-    .slv_wide_eng_req_ready_o  (tcdm_wide_eng_req_ready      ),
-    .slv_wide_eng_resp_o       (tcdm_wide_eng_resp           ),
-    .slv_wide_eng_resp_valid_o (tcdm_wide_eng_resp_valid     ),
-    .slv_wide_eng_resp_ready_i (tcdm_wide_eng_resp_ready     ),
+    // B2: wide TCDM plane port fed by the raw wide landing path.
+    .slv_wide_req_i         (tcdm_wide_eng_req       ),
+    .slv_wide_req_valid_i   (tcdm_wide_eng_req_valid ),
+    .slv_wide_req_ready_o   (tcdm_wide_eng_req_ready ),
+    .slv_wide_resp_o        (tcdm_wide_eng_resp      ),
+    .slv_wide_resp_valid_o  (tcdm_wide_eng_resp_valid),
+    .slv_wide_resp_ready_i  (tcdm_wide_eng_resp_ready),
     `endif
     .mst_req_o              (bank_req_payload    ),
     .mst_req_valid_o        (bank_req_valid      ),
