@@ -17,6 +17,12 @@ built by pairing each request P line with its response P line on the same port
     snitch scalar   the core's own load/store port      (pe_ idx % ppc == 0)
     spatz vector    the Spatz VLSU's memory ports       (pe_ idx % ppc != 0)
     redmule         the RedMulE master ports            (rm_)
+    redmule (wide plane)  the WP2 wide engine port      (rmw_)
+
+A build carries EITHER ``rm_`` or ``rmw_``, never both -- which one it emits
+says which plane carried RedMulE. They are separate classes on purpose: one
+wide request moves a whole WideTcdmDataWidth line, so its request count and
+per-request latency are not comparable with a 32-bit port's.
 
 Because all three are measured the SAME way, they answer the question a model
 calibration actually asks: if scalar and RedMulE round trips match the model
@@ -41,7 +47,15 @@ Log families (S lines are run-length ``start end state``, state
                                 <port> P 1 0 <cyc> <wen> <addr> <mid> <dst>
                                 <port> P 0 0 <cyc> <mid>
     rm_g<g>_t<t>.log            same as pe_, <port> = RedMulE master port
+    rmw_g<g>_t<t>.log           same as rm_, the wide plane's single port
     bank_g<g>_t<t>.log          S <bank> <start> <end> <state>
+
+The WP2 wide plane adds its own fabric families, all optional::
+
+    tile_g<g>_t<t>.log          SW/PW/QW lines = the wide side of the boundary
+    router_g<g>_wide_{req,resp}.log
+                                <chan> S <cls> <dir> <io> <start> <end> <state>
+                                cls: req 0=RO 1=RW, resp 0=RD 1=WR
 
 Usage::
 
@@ -63,6 +77,13 @@ TILE_RE = re.compile(r"tile_g(\d+)_t(\d+)\.log$")
 PE_RE = re.compile(r"pe_g(\d+)_t(\d+)\.log$")
 RM_RE = re.compile(r"rm_g(\d+)_t(\d+)\.log$")
 BANK_RE = re.compile(r"bank_g(\d+)_t(\d+)\.log$")
+# WP2 wide TCDM plane: its own engine-port family and its own routers. A build
+# emits rm_ OR rmw_, never both -- which one says which plane carried RedMulE.
+RMW_RE = re.compile(r"rmw_g(\d+)_t(\d+)\.log$")
+WROUTER_RE = re.compile(r"router_g(\d+)_wide_(req|resp)\.log$")
+# Wide router classes per net: req = RO (meta-only read) / RW (payload),
+# resp = RD (data) / WR (meta-only write ack).
+WCLS = {"req": ("RO", "RW"), "resp": ("RD", "WR")}
 
 DIRS = {0: "N", 1: "E", 2: "S", 3: "W", 4: "local"}
 IO = {0: "in", 1: "out"}
@@ -73,6 +94,10 @@ TILE_SIDE = {(0, 1): "master req out", (0, 0): "slave req in",
 IDLE, STALL, READ, WRITE = range(4)
 
 SCALAR, VECTOR, REDMULE = "snitch scalar", "spatz vector", "redmule"
+# The wide-plane engine port is its OWN class: one of its requests moves a
+# whole WideTcdmDataWidth line, so its counts and latencies are not
+# comparable with a 32-bit port's and must never be summed with them.
+REDMULE_WIDE = "redmule (wide plane)"
 
 
 class Port:
@@ -131,9 +156,12 @@ def load_fabric(noc_dir, spm_dir, lo, hi):
     last = 0
     for path in sorted(glob.glob(os.path.join(noc_dir or "", "*.log"))):
         base = os.path.basename(path)
-        m_router, m_tile = ROUTER_RE.search(base), TILE_RE.search(base)
+        m_wrouter = WROUTER_RE.search(base)
+        m_router = None if m_wrouter else ROUTER_RE.search(base)
+        m_tile = TILE_RE.search(base)
         m_pe, m_rm = PE_RE.search(base), RM_RE.search(base)
-        if not (m_router or m_tile or m_pe or m_rm):
+        m_rmw = RMW_RE.search(base)
+        if not (m_router or m_wrouter or m_tile or m_pe or m_rm or m_rmw):
             continue
         with open(path, "r", errors="replace") as f:
             for line in f:
@@ -150,19 +178,34 @@ def load_fabric(noc_dir, spm_dir, lo, hi):
                     last = _add_run(cls[f"router {net}"],
                                     (g, int(x[0]), int(x[2]), int(x[3])),
                                     x[4:7], lo, hi, last)
+                elif m_wrouter:
+                    # <chan> S <cls> <dir> <io> <start> <end> <state>
+                    if len(x) < 5:      # one column more than the narrow net
+                        continue
+                    g, net = int(m_wrouter.group(1)), m_wrouter.group(2)
+                    key = (g, int(x[0]), int(x[2]), int(x[3]), int(x[4]))
+                    if x[1] != "S" or len(x) != 8:
+                        if x[1] == "P":
+                            cls[f"wide router {net}"][key].pkts += 1
+                        continue
+                    last = _add_run(cls[f"wide router {net}"], key,
+                                    x[5:8], lo, hi, last)
                 elif m_tile:
-                    if x[0] != "S" or len(x) != 7:
+                    # the wide plane shares the file under SW/PW/QW
+                    if x[0] not in ("S", "SW") or len(x) != 7:
                         continue
                     g, t = int(m_tile.group(1)), int(m_tile.group(2))
-                    last = _add_run(cls["tile"],
+                    name = "tile wide" if x[0] == "SW" else "tile"
+                    last = _add_run(cls[name],
                                     (g, t, int(x[1]), int(x[2]), int(x[3])),
                                     x[4:7], lo, hi, last)
                 else:
-                    m = m_pe or m_rm
+                    m = m_pe or m_rm or m_rmw
                     g, t = int(m.group(1)), int(m.group(2))
                     if x[1] != "S" or len(x) != 8:
                         continue
-                    name = "core port" if m_pe else "redmule port"
+                    name = ("core port" if m_pe else
+                            "redmule wide port" if m_rmw else "redmule port")
                     last = _add_run(cls[name],
                                     (g, t, int(x[0]), int(x[2]), int(x[3])),
                                     x[5:8], lo, hi, last)
@@ -183,12 +226,14 @@ def load_fabric(noc_dir, spm_dir, lo, hi):
 
 def load_requesters(noc_dir, ppc, tpg, lo, hi):
     """Pair every port's requests with its responses -> {class: ReqClass}."""
-    out = {k: ReqClass() for k in (SCALAR, VECTOR, REDMULE)}
-    for kind in ("pe", "rm"):
+    out = {k: ReqClass() for k in (SCALAR, VECTOR, REDMULE, REDMULE_WIDE)}
+    for kind in ("pe", "rm", "rmw"):
         for g, t, ports in mt.iter_port_tiles(noc_dir, kind, tpg):
             for idx, pt in ports.items():
                 if kind == "rm":
                     k = REDMULE
+                elif kind == "rmw":
+                    k = REDMULE_WIDE
                 else:
                     k = SCALAR if (ppc <= 1 or idx % ppc == 0) else VECTOR
                 rc = out[k]
@@ -228,18 +273,22 @@ def _req_section(reqs, fabric, span, args, out):
     occ = collections.defaultdict(lambda: [0, 0, 0])   # busy, stall, nports
     ppc = max(1, args.ports_per_core)
     for name, ports in (("core port", fabric.get("core port", {})),
-                        ("redmule port", fabric.get("redmule port", {}))):
+                        ("redmule port", fabric.get("redmule port", {})),
+                        ("redmule wide port",
+                         fabric.get("redmule wide port", {}))):
         for (g, t, idx, net, io), p in ports.items():
             if net != 0:          # request side only
                 continue
             if name == "redmule port":
                 k = REDMULE
+            elif name == "redmule wide port":
+                k = REDMULE_WIDE
             else:
                 k = SCALAR if (ppc <= 1 or idx % ppc == 0) else VECTOR
             occ[k][0] += p.busy
             occ[k][1] += p.stall
             occ[k][2] += 1
-    for k in (SCALAR, VECTOR, REDMULE):
+    for k in (SCALAR, VECTOR, REDMULE, REDMULE_WIDE):
         rc = reqs.get(k)
         if not rc:
             continue
@@ -296,9 +345,18 @@ def _keyname(name, key, ppc):
     if name == "redmule port":
         g, t, idx, net, io = key
         return f"G{g} T{t} RM{idx} {NET[net]} {IO[io]}"
-    if name == "tile":
+    if name == "redmule wide port":
+        g, t, idx, net, io = key
+        return f"G{g} T{t} RMW {NET[net]} {IO[io]}"
+    if name in ("tile", "tile wide"):
         g, t, net, io, port = key
-        return f"G{g} T{t} p{port} {TILE_SIDE.get((net, io), '')}"
+        w = " wide" if name == "tile wide" else ""
+        return f"G{g} T{t} p{port}{w} {TILE_SIDE.get((net, io), '')}"
+    if name.startswith("wide router"):
+        g, chan, wc, d, io = key
+        net = name.split()[-1]
+        nm = WCLS[net][wc] if wc < len(WCLS[net]) else str(wc)
+        return f"G{g} W{nm}{chan} {DIRS.get(d, d)} {IO[io]}"
     if name.startswith("router"):
         g, rid, d, io = key
         return f"G{g} R{rid} {DIRS.get(d, d)} {IO[io]}"
@@ -310,7 +368,7 @@ def _keyname(name, key, ppc):
 
 def _fabric_section(cls, span, args, out):
     ppc = max(1, args.ports_per_core)
-    for name in ("core port", "redmule port"):
+    for name in ("core port", "redmule port", "redmule wide port"):
         if name not in cls:
             continue
         _hdr(f"{name}s (per requester port side)", out)
@@ -324,10 +382,14 @@ def _fabric_section(cls, span, args, out):
         for k in sorted(groups):
             _row(k, groups[k], span, out)
 
-    if "tile" in cls:
-        _hdr("tile ports (tile <-> NoC)", out)
+    for name, title in (("tile", "tile ports (tile <-> NoC)"),
+                        ("tile wide",
+                         "tile ports, WIDE plane (tile <-> NoC)")):
+        if name not in cls:
+            continue
+        _hdr(title, out)
         groups = collections.defaultdict(list)
-        for (g, t, net, io, port), p in cls["tile"].items():
+        for (g, t, net, io, port), p in cls[name].items():
             groups[TILE_SIDE.get((net, io), f"{NET[net]} {IO[io]}")].append(p)
         for k in sorted(groups):
             _row(k, groups[k], span, out)
@@ -341,6 +403,20 @@ def _fabric_section(cls, span, args, out):
         for (g, rid, d, io), p in cls[key].items():
             groups[f"{DIRS.get(d, d)} {IO[io]}"].append(p)
         for k in sorted(groups, key=lambda s: (s.split()[1], s)):
+            _row(k, groups[k], span, out)
+
+    # The wide plane's own routers, split by channel class so an RO/WO
+    # (meta-only) channel is never averaged with a payload-bearing one.
+    for net in ("req", "resp"):
+        key = f"wide router {net}"
+        if key not in cls:
+            continue
+        _hdr(f"WIDE {net} routers (by class and mesh direction)", out)
+        groups = collections.defaultdict(list)
+        for (g, chan, wc, d, io), p in cls[key].items():
+            nm = WCLS[net][wc] if wc < len(WCLS[net]) else str(wc)
+            groups[f"{nm} {DIRS.get(d, d)} {IO[io]}"].append(p)
+        for k in sorted(groups, key=lambda s: (s.split()[0], s.split()[2], s)):
             _row(k, groups[k], span, out)
 
     if "spm bank" in cls:

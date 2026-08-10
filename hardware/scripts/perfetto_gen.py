@@ -662,6 +662,14 @@ TILE_LOG_RE = re.compile(r"tile_g(\d+)_t(\d+)\.log$")
 PE_LOG_RE = re.compile(r"pe_g(\d+)_t(\d+)\.log$")
 # merged: one file per tile (port in line)
 RM_LOG_RE = re.compile(r"rm_g(\d+)_t(\d+)\.log$")
+# WP2 wide plane: its own engine-port and router families. `rm_` (32-bit
+# RedMulE master ports) and `rmw_` (one wide port) are mutually exclusive --
+# which one a run emits says which plane carried the engine's traffic.
+RMW_LOG_RE = re.compile(r"rmw_g(\d+)_t(\d+)\.log$")
+WROUTER_LOG_RE = re.compile(r"router_g(\d+)_wide_(req|resp)\.log$")
+# Wide router class names, by net: request = RO (meta-only read) / RW
+# (payload); response = RD (data) / WR (meta-only write ack).
+WROUTER_CLS = {0: ("RO", "RW"), 1: ("RD", "WR")}
 REDMULE_LOG_RE = re.compile(r"redmule_g(\d+)_t(\d+)\.log$")
 SPM_BANK_LOG_RE = re.compile(r"bank_g(\d+)_t(\d+)\.log$")
 
@@ -690,9 +698,13 @@ def load_spm_bank_logs(spm_dir):
     """Glob per-tile SPM bank logs (bank_g<g>_t<t>.log; one per tile, all its
     banks). Returns {(g,t): (runs, packets)}: S line = bank start end state
     (0=idle 1=stall 2=read 3=write); P line =
-    bank cyc wen addr loc wide port sg it core meta_id (each granted access).
-    loc=1 if a local input port won, wide=1 for a DMA access, port=winning
-    arbiter input-port index, sg/it/core=remote NoC origin."""
+    bank cyc wen addr loc wide port sg it core meta_id wcls (each granted
+    access). loc=1 if the requester sits on this tile, wide=1 for a superbank
+    (multi-bank) grant, port=winning narrow arbiter input-port index (-1 when
+    wide), sg/it/core=the origin, wcls=which ingress won a wide grant
+    (0 narrow / 1 DMA / 2+p wide-plane port p). Logs written before wcls
+    existed are 12 fields; they get wcls=1 (DMA) for every wide grant, which is
+    what they meant."""
     out = {}
     for path in glob.glob(os.path.join(spm_dir, "bank_g*_t*.log")):
         m = SPM_BANK_LOG_RE.search(os.path.basename(path))
@@ -716,8 +728,8 @@ def load_spm_bank_logs(spm_dir):
                     w = _winclip(s, e)
                     if w:
                         runs.setdefault(bank, []).append((w[0], w[1], st))
-                # P bank cyc wen addr loc wide port sg it core meta_id
-                elif len(x) == 12 and x[0] == "P":
+                # P bank cyc wen addr loc wide port sg it core meta_id [wcls]
+                elif len(x) in (12, 13) and x[0] == "P":
                     try:
                         bank = int(x[1])
                         rec = [
@@ -732,6 +744,9 @@ def load_spm_bank_logs(spm_dir):
                                     x[9]), int(
                                         x[10]), int(
                                             x[11])]
+                        # pre-wcls logs: every wide grant was the DMA
+                        rec.append(int(x[12]) if len(x) == 13
+                                   else (1 if rec[4] else 0))
                     except ValueError:
                         continue
                     if not (WIN_CYC_LO <= rec[0] < WIN_CYC_HI):
@@ -900,9 +915,72 @@ def load_noc_router_logs(noc_dir):
     return runs, packets
 
 
+def load_wide_router_logs(noc_dir):
+    """Glob the WP2 wide-plane router logs (router_g<g>_wide_{req,resp}.log).
+    The wide net runs one router per group CHANNEL of each class, so the demux
+    index is a flat channel id over that net's classes and an extra `cls`
+    column names the class (see WROUTER_CLS). Apart from that column the record
+    layout is identical to the narrow routers, so the same emitters apply.
+    Returns runs/packets keyed (g, chan, cls, rr, pi, io)."""
+    runs, packets = {}, {}
+    for path in glob.glob(os.path.join(noc_dir, "router_g*_wide_*.log")):
+        m = WROUTER_LOG_RE.search(os.path.basename(path))
+        if not m:
+            continue
+        g = int(m.group(1))
+        rr = 0 if m.group(2) == "req" else 1
+        with open(path, "r", errors="replace") as f:
+            for line in f:
+                x = line.split()
+                if len(x) < 2:
+                    continue
+                try:
+                    chan = int(x[0])         # leading demux index = channel id
+                except ValueError:
+                    continue
+                x = x[1:]
+                # S cls portidx io start end state
+                if len(x) == 7 and x[0] == "S":
+                    try:
+                        cls, pi, io, s, e, st = (int(z) for z in x[1:])
+                    except ValueError:
+                        continue
+                    w = _winclip(s, e)
+                    if w:
+                        runs.setdefault(
+                            (g, chan, cls, rr, pi, io), []).append(
+                            (w[0], w[1], st))
+                # REQ: cls pi io cyc wen addr dst{x,y} src{x,y} stile core mid
+                elif len(x) == 14 and x[0] == "P":
+                    try:
+                        cls, pi, io, cyc, wen = (int(z) for z in x[1:6])
+                        if not (WIN_CYC_LO <= cyc < WIN_CYC_HI):
+                            continue
+                        rec = [cyc, wen, int(x[6], 16)] + \
+                            [int(z) for z in x[7:14]]
+                    except ValueError:
+                        continue
+                    packets.setdefault(
+                        (g, chan, cls, rr, pi, io), []).append(rec)
+                # RESP: cls pi io cyc dstx dsty srcx srcy rtile rcore mid
+                elif len(x) == 12 and x[0] == "P":
+                    try:
+                        cls, pi, io, cyc = (int(z) for z in x[1:5])
+                        if not (WIN_CYC_LO <= cyc < WIN_CYC_HI):
+                            continue
+                        rec = [cyc] + [int(z) for z in x[5:12]]
+                    except ValueError:
+                        continue
+                    packets.setdefault(
+                        (g, chan, cls, rr, pi, io), []).append(rec)
+    return runs, packets
+
+
 def load_noc_tile_logs(noc_dir):
     """Glob the per-tile full logs (tile_g<g>_t<t>.log). Returns (runs,
-    packets):
+    packets, wruns, wpackets) -- the last two are the WP2 wide plane's side of
+    the SAME boundary, carried in the same file under the SW/PW/QW record
+    letters with a field-for-field identical layout:
       runs[(g,t,rr,io,p)] = [(start,end,state)]   (S lines)
       req  (P): [[cyc,wen,addr,src_grp,dst_grp,req_tile,req_core,meta_id]]
       resp (Q): [[cyc,srcvalid,src_grp,dst_grp,req_tile,req_core,meta_id]]
@@ -910,6 +988,7 @@ def load_noc_tile_logs(noc_dir):
     group unknown so only dst (x,y); srcvalid=1 (slave_resp, out) has both
     src and dst (x,y) (linear groups)."""
     runs, packets = {}, {}
+    wruns, wpackets = {}, {}
     for path in glob.glob(os.path.join(noc_dir, "tile_g*_t*.log")):
         m = TILE_LOG_RE.search(os.path.basename(path))
         if not m:
@@ -918,19 +997,25 @@ def load_noc_tile_logs(noc_dir):
         with open(path, "r", errors="replace") as f:
             for line in f:
                 x = line.split()
+                if len(x) < 2:
+                    continue
+                # SW/PW/QW = the same records for the wide plane
+                wide = x[0] in ("SW", "PW", "QW")
+                rn, pk = (wruns, wpackets) if wide else (runs, packets)
+                kind = x[0][0]
                 # S rr io port start end state
-                if len(x) == 7 and x[0] == "S":
+                if len(x) == 7 and kind == "S":
                     try:
                         rr, io, p, s, e, st = (int(z) for z in x[1:])
                     except ValueError:
                         continue
                     w = _winclip(s, e)
                     if w:
-                        runs.setdefault(
+                        rn.setdefault(
                             (g, t, rr, io, p), []).append(
                             (w[0], w[1], st))
                 # REQ: io port cyc wen addr sgrp dgrp rtile rcore mid
-                elif len(x) == 11 and x[0] == "P":
+                elif len(x) == 11 and kind == "P":
                     try:
                         io, p, cyc, wen = int(
                             x[1]), int(
@@ -949,9 +1034,9 @@ def load_noc_tile_logs(noc_dir):
                                 x[10])]
                     except ValueError:
                         continue
-                    packets.setdefault((g, t, 0, io, p), []).append(rec)
+                    pk.setdefault((g, t, 0, io, p), []).append(rec)
                 # RESP: io port cyc srcvalid sgrp dgrp rtile rcore mid
-                elif len(x) == 10 and x[0] == "Q":
+                elif len(x) == 10 and kind == "Q":
                     try:
                         io, p, cyc = int(x[1]), int(x[2]), int(x[3])
                         if not (WIN_CYC_LO <= cyc < WIN_CYC_HI):
@@ -966,8 +1051,8 @@ def load_noc_tile_logs(noc_dir):
                                 x[9])]
                     except ValueError:
                         continue
-                    packets.setdefault((g, t, 1, io, p), []).append(rec)
-    return runs, packets
+                    pk.setdefault((g, t, 1, io, p), []).append(rec)
+    return runs, packets, wruns, wpackets
 
 
 class Flows:
@@ -1452,43 +1537,55 @@ def _ensure_rm_engine(builder, uu, g, t):
     return uu.get(("rm_engine", g, t))
 
 
-def process_rm_ports(noc_dir, builder, uu, args, flows=None, rm_data=None):
+def process_rm_ports(noc_dir, builder, uu, args, flows=None, rm_data=None,
+                     rmw_data=None):
     """RedMulE master-port traffic, emitted as FLAT req/resp sibling lines (req
     00, resp 00, req 01, ...) directly under each Tile's RedMulE ENGINE node
     (created by process_redmule / _ensure_rm_engine). The rank base (>0) keeps
-    the ports below the FSM/CPI children. Returns #RM ports emitted."""
+    the ports below the FSM/CPI children.
+
+    A build carries EITHER the narrow master ports (rm_) or the WP2 wide
+    plane's single engine port (rmw_), never both. The wide one is labelled
+    'wide' -- one of its requests moves a whole WideTcdmDataWidth line, so its
+    count and latency are not comparable with a narrow port's.
+    Returns #ports emitted."""
     # RedMulE master ports sit after every core DATA PORT on the tile's
     # local-port axis, not after every core (Spatz cores own ppc ports each).
     ncp = args.cores_per_tile * max(1, args.ports_per_core)
     rm = rm_data if rm_data is not None else load_pe_logs(
         noc_dir, "rm_g*_t*.log", RM_LOG_RE)
-    if not rm:
+    rmw = rmw_data if rmw_data is not None else load_pe_logs(
+        noc_dir, "rmw_g*_t*.log", RMW_LOG_RE)
+    if not rm and not rmw:
         return 0
-    nrm = 0
-    for (g, t, p), (runs, pkts) in sorted(rm.items()):
-        eng = _ensure_rm_engine(builder, uu, g, t)
-        _emit_pe_ports(
-            builder,
-            uu,
-            eng,
-            ("rmpe",
-             g,
-             t,
-             p),
-            runs,
-            pkts,
-            args,
-            100 + 2 * p,
-            flows=flows,
-            req_ctx=(
-                g,
-                t,
-                ncp + p),
-            port_label=f"{p:02d}")
-        nrm += 1
+    nrm = nrmw = 0
+    for wide, data in ((False, rm), (True, rmw)):
+        for (g, t, p), (runs, pkts) in sorted(data.items()):
+            eng = _ensure_rm_engine(builder, uu, g, t)
+            _emit_pe_ports(
+                builder,
+                uu,
+                eng,
+                ("rmwpe" if wide else "rmpe",
+                 g,
+                 t,
+                 p),
+                runs,
+                pkts,
+                args,
+                100 + 2 * p,
+                flows=flows,
+                req_ctx=(
+                    g,
+                    t,
+                    ncp + p),
+                port_label="wide" if wide else f"{p:02d}")
+            nrm += 1
+            nrmw += 1 if wide else 0
+    kind = (f"{nrmw} wide-plane" if nrmw else "narrow")
     print(
-        f"RedMulE ports: {nrm} flat req/resp port lines under the RedMulE "
-        f"engine node")
+        f"RedMulE ports: {nrm} flat req/resp port lines ({kind}) under the "
+        f"RedMulE engine node")
     return nrm
 
 
@@ -1717,9 +1814,37 @@ def process_noc_routers(noc_dir, builder, uu, args, flows=None):
             flows=flows,
             flow_rank=(1 if io == 1 else 2))  # out=send(1), in=recv(2)
         nports += 1
+
+    # WP2 wide plane: its own routers, one per group channel of each class.
+    # Same flit meta and so the same emitters; only the node label differs, so
+    # a wide router never gets mistaken for a narrow one at the same index.
+    wruns, wpackets = load_wide_router_logs(noc_dir)
+    nwide = 0
+    if wruns:
+        cpad = len(str(max(k[1] for k in wruns)))
+        for (g, chan, cls, rr, pi, io), rl in sorted(
+                wruns.items(), key=lambda it: (
+                    it[0][0], it[0][3], it[0][2], it[0][1],
+                    0 if it[0][4] == 4 else 1, it[0][4], it[0][5])):
+            _ensure(builder, uu, ("nr",), "3 NoC routers")
+            _ensure(builder, uu, ("nr_g", g), _gname(g), ("nr",))
+            _ensure(
+                builder, uu, ("nrw_p", g, chan, cls, rr),
+                f"WRouter {WROUTER_CLS[rr][cls]} {chan:0{cpad}d} "
+                f"{NOC_NET[rr]}", ("nr_g", g))
+            pk = (wpackets.get((g, chan, cls, rr, pi, io), [])
+                  if packet_mode else None)
+            nsl += _emit_port(
+                builder, uu, ("nrw_l", g, chan, cls, rr, pi, io),
+                f"{NOC_PORTIDX[pi]} {NOC_IO[io]}",
+                ("nrw_p", g, chan, cls, rr),
+                rl, rr, win, args, pkts=pk, is_router=True, is_resp=(rr == 1),
+                flows=flows, flow_rank=(1 if io == 1 else 2))
+            nports += 1
+            nwide += 1
     gran = "packet" if packet_mode else "state"
     print(f"  NoC routers: {len(groups)} groups, "
-          f"{nports} port-side lines, {nsl} slices "
+          f"{nports} port-side lines ({nwide} wide plane), {nsl} slices "
           f"({gran} granularity; util/bw/stall expandable)")
     return nports
 
@@ -1729,7 +1854,7 @@ def process_noc_tiles(noc_dir, builder, uu, args, flows=None):
     ({in|out} {local|remoteN}) carrying its traffic slices, with util/bw/stall
     as expandable counter children. Hierarchy: NoC tiles > Group > Tile >
     {REQ|RESP} > port-side line."""
-    runs, packets = load_noc_tile_logs(
+    runs, packets, wruns, wpackets = load_noc_tile_logs(
         noc_dir)          # runs:(g,t,rr,io,p)  packets:(g,t,io,p)
     if not runs:
         print(
@@ -1740,28 +1865,41 @@ def process_noc_tiles(noc_dir, builder, uu, args, flows=None):
     groups = sorted({k[0] for k in runs})
     # per-request slices on req ports
     packet_mode = args.noc_slices == "packet"
-    nsl = nports = 0
-    for (g, t, rr, io, p), rl in sorted(runs.items()):
-        _ensure(builder, uu, ("nt",), "2 NoC tiles")
-        _ensure(builder, uu, ("nt_g", g), _gname(g), ("nt",))
-        _ensure(builder, uu, ("nt_t", g, t), _tname(t), ("nt_g", g))
-        _ensure(builder, uu, ("nt_n", g, t, rr), NOC_NET[rr], ("nt_t", g, t))
-        leaf_name = f"{NOC_IO[io]} " + ("local" if p == 0 else f"remote{p}")
-        pk = packets.get((g, t, rr, io, p), []) if packet_mode else None
-        nsl += _emit_port(
-            builder, uu, ("nt_l", g, t, rr, io, p), leaf_name,
-            ("nt_n", g, t, rr), rl, rr, win, args, pkts=pk,
-            is_router=False,
-            # tile local port (p==0): in-group, hide src/dst (x,y)
-            show_xy=(p != 0),
-            # resp ports use the Q-line recs (src/dst + requester + op)
-            is_resp=(rr == 1),
-            # out=send(1), in=recv(2)
-            flows=flows, flow_rank=(1 if io == 1 else 2))
-        nports += 1
+    nsl = nports = nwide = 0
+    # The wide plane is a SEPARATE net over the same boundary, so it gets its
+    # own "{REQ|RESP} wide" node per tile rather than extra ports on the narrow
+    # one -- port p means a different link on each plane.
+    for wide, rmap, pmap in ((False, runs, packets), (True, wruns, wpackets)):
+        for (g, t, rr, io, p), rl in sorted(rmap.items()):
+            _ensure(builder, uu, ("nt",), "2 NoC tiles")
+            _ensure(builder, uu, ("nt_g", g), _gname(g), ("nt",))
+            _ensure(builder, uu, ("nt_t", g, t), _tname(t), ("nt_g", g))
+            node = ("ntw_n" if wide else "nt_n", g, t, rr)
+            _ensure(builder, uu, node,
+                    NOC_NET[rr] + (" wide" if wide else ""), ("nt_t", g, t))
+            if wide:
+                # every wide tile port is a mesh link (the own-tile path never
+                # leaves the tile), so there is no "local" port 0 here
+                leaf_name = f"{NOC_IO[io]} wide{p}"
+            else:
+                leaf_name = f"{NOC_IO[io]} " + \
+                    ("local" if p == 0 else f"remote{p}")
+            pk = pmap.get((g, t, rr, io, p), []) if packet_mode else None
+            nsl += _emit_port(
+                builder, uu, ("ntw_l" if wide else "nt_l", g, t, rr, io, p),
+                leaf_name, node, rl, rr, win, args, pkts=pk,
+                is_router=False,
+                # narrow tile local port (p==0): in-group, hide src/dst (x,y)
+                show_xy=(wide or p != 0),
+                # resp ports use the Q-line recs (src/dst + requester + op)
+                is_resp=(rr == 1),
+                # out=send(1), in=recv(2)
+                flows=flows, flow_rank=(1 if io == 1 else 2))
+            nports += 1
+            nwide += 1 if wide else 0
     gran = "packet" if packet_mode else "state"
     print(f"  NoC tiles: {len(groups)} groups, "
-          f"{nports} port-side lines, {nsl} slices "
+          f"{nports} port-side lines ({nwide} wide plane), {nsl} slices "
           f"({gran} granularity; util/bw/stall expandable)")
     return nports
 
@@ -1772,11 +1910,13 @@ def _emit_bank_packets(rl, recs, leaf, bg, bt, builder, args, flows=None):
     stall runs, start-sorted (same anti-nesting reason as
     _emit_req_packet_slices). The requester uses the SAME uniform
     "G<grp> T<tile> {C|RM}<idx>" format as NoC packets (no local/remote/DMA
-    words): a true local input (this tile's own core/RedMulE port) is named by
-    the bank's own (bg,bt) + the winning port index, since local requests zero
-    their payload src fields; remote NoC and wide DMA carry the origin in
-    sg/it/core. DMA/wide accesses have no core/RedMulE flow -> they stay
-    unbound."""
+    words): a NARROW local input (this tile's own core/RedMulE port) is named
+    by the bank's own (bg,bt) + the winning port index, since narrow local
+    requests zero their payload src fields; every other requester -- remote
+    narrow, and both directions of the WP2 wide plane -- carries its origin in
+    sg/it/core, which the tap re-fills for wide-plane grants. Only the DMA
+    (wcls==1) is a separate initiator with no core/RedMulE key, so only it
+    stays unbound."""
     cpt = args.cores_per_tile
     ppc = args.ports_per_core
 
@@ -1787,14 +1927,17 @@ def _emit_bank_packets(rl, recs, leaf, bg, bt, builder, args, flows=None):
         return (sg, it, core), f"G{sg} T{it} {_req_eng(core, cpt, ppc)}"
 
     items = [(s, e, "stall", None, None) for s, e, st in rl if st == 1]
-    for cyc, wen, addr, loc, wide, port, sg, it, core, meta_id in recs:
+    for cyc, wen, addr, loc, wide, port, sg, it, core, meta_id, wcls in recs:
         op = "write" if wen else "read"
+        dma = wcls == 1
         (rg, rt, ridx), who = _req(loc, wide, port, sg, it, core)
-        # wide = a 512-bit DMA burst (separate initiator, no core/RedMulE
-        # flow); don't even probe, to keep the unbound count clean.
+        if dma:
+            who = f"DMA (G{bg} T{bt})"
+        # The DMA has no requester key to follow; don't even probe, to keep the
+        # unbound count clean. A wide-PLANE grant does have one (wcls >= 2).
         fid = flows.fid(
             rg, rt, ridx, meta_id, cyc) if (
-            flows and not wide) else None
+            flows and not dma) else None
         items.append((cyc,
                       cyc + 1,
                       op,
@@ -2403,7 +2546,9 @@ def main():
     pe_data = load_pe_logs(args.noc) if args.noc else {
     }    # per-core PE port traffic
     rm_data = (load_pe_logs(args.noc, "rm_g*_t*.log", RM_LOG_RE)
-               if args.noc else {})  # per-RedMulE-port traffic
+               if args.noc else {})  # per-RedMulE-port traffic (narrow plane)
+    rmw_data = (load_pe_logs(args.noc, "rmw_g*_t*.log", RMW_LOG_RE)
+                if args.noc else {})  # the WP2 wide plane's engine port
     flows = None
     if args.flows:  # flows only in packet mode
         if args.noc_slices != "packet":
@@ -2411,7 +2556,9 @@ def main():
                 "  WARNING: --flows needs --noc-slices packet; flows disabled",
                 file=sys.stderr)
         else:
-            flows = Flows(pe_data, rm_data,
+            # Both RedMulE families live at the same base on the local-port
+            # axis and a build emits only one of them, so they merge cleanly.
+            flows = Flows(pe_data, {**rm_data, **rmw_data},
                           args.cores_per_tile * max(1, args.ports_per_core))
     n = 0
     for path in files:
@@ -2447,7 +2594,8 @@ def main():
             uu,
             args,
             flows=flows,
-            rm_data=rm_data)
+            rm_data=rm_data,
+            rmw_data=rmw_data)
         # Tiles BEFORE routers so the root order is Core / NoC tiles / NoC
         # routers: a memory access enters/exits the mesh at the tile, so
         # keeping tiles adjacent to the cores makes the

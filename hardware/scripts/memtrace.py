@@ -200,7 +200,9 @@ def have_trace(sp_dir):
 # to draw flow arrows for that case only because a NoC hop cannot be tied to a
 # specific request there; a port-local round trip can.)
 # ---------------------------------------------------------------------------
-PORT_LOG_RE = re.compile(r"(?:pe|rm)_g(\d+)_t(\d+)\.log$")
+# rmw_ (the WP2 wide plane engine port) must precede rm_: they share a
+# prefix, and an alternation matches left to right.
+PORT_LOG_RE = re.compile(r"(?:pe|rmw|rm)_g(\d+)_t(\d+)\.log$")
 CLS_UNKNOWN = len(CLASSES)
 
 
@@ -259,9 +261,10 @@ def parse_port_log(path, g, t, tiles_per_group):
 
 
 def iter_port_tiles(noc_dir, kind, tiles_per_group):
-    """Yield (g, t, {port idx: CoreTrace}) for every pe_ (kind='pe') or rm_
-    (kind='rm') log, in (g,t) order. `tiles_per_group` is needed to turn a
-    destination tile into an address class."""
+    """Yield (g, t, {port idx: CoreTrace}) for every pe_ (kind='pe'), rm_
+    (kind='rm') or rmw_ (kind='rmw', the WP2 wide plane's engine port) log, in
+    (g,t) order. `tiles_per_group` is needed to turn a destination tile into an
+    address class."""
     paths = []
     for path in glob.glob(os.path.join(noc_dir, f"{kind}_g*_t*.log")):
         m = PORT_LOG_RE.search(os.path.basename(path))
