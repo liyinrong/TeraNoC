@@ -9,11 +9,23 @@
 // it shows per-bank idle/stall/read/write over time AND which core won each bank
 // cycle (explains tile slave_req-in stalls from bank contention).
 //   S <bank> <start> <end> <state>   state 0=idle 1=stall 2=read 3=write
-//   P <bank> <cycle> <wen> <tgt_addr(hex)> <loc> <wide> <port> <src_grp> <src_tile> <src_core> <meta_id>
+//   P <bank> <cycle> <wen> <tgt_addr(hex)> <loc> <wide> <port> <src_grp> <src_tile> <src_core> <meta_id> <wcls>
 //       winning input port (bank_req_ini_addr): [0,NumCoresPerTile)=local core,
 //       [NumCoresPerTile,NumLocalPorts)=local RedMulE, else remote. loc=1 iff
-//       local; wide=1 = DMA. Local requests zero their src_{grp,tile,core}
-//       fields, so use port for local accesses; remote accesses carry origin.
+//       local. Narrow local requests zero their src_{grp,tile,core} fields, so
+//       use port for them; remote accesses carry origin.
+//   wide=1 marks a multi-bank (superbank) grant, and `wcls` says WHICH ingress
+//       won it, because the DMA and the WP2 wide TCDM plane share that path and
+//       the bank-side payload cannot tell them apart (mempool_tcdm_bank_interco
+//       zeroes mst_req_ini_addr_o for both):
+//         0     = narrow grant (wide=0)
+//         1     = DMA
+//         2 + p = wide-plane ingress port p (mempool_tcdm_wide_superbank)
+//       For a plane grant the src_{grp,tile} fields are re-read from that
+//       ingress port (slv_wide_req_i[p]) -- the per-bank fork hardcodes
+//       ini_addr='0, so the payload alone loses the requester -- src_core is
+//       the wide engine's slot on the local-port axis, and `port` is -1
+//       (a plane grant has no narrow arbiter input).
 //
 // The old per-cycle bank-conflict counters and heavy per-word profiler
 // (dbg_profile_q, mirroring mempool_tile.profile_d) are commented out at the
@@ -75,21 +87,46 @@
                 bank_st[g][t][b] <= rb; bank_s[g][t][b] <= cycle_q;
               end
               if (rb >= 2) begin
-                // Who won the bank: bank_req_ini_addr[b] = winning input-port index
-                // (< NLP = local), bank_req_wide[b]=1 = DMA. Local inputs zero their
-                // src fields, so port identifies them; remote inputs carry origin.
+                // Who won the bank: bank_req_ini_addr[b] = winning NARROW input-port
+                // index (< NLP = local); bank_req_wide[b]=1 = a superbank grant, whose
+                // ingress class comes from the interconnect's own class tag.
                 automatic int unsigned winp = `SPM_TILE(g,t).bank_req_ini_addr[b];
-                $fwrite(f_bank[g][t], "P %0d %0d %0d %0h %0d %0d %0d %0d %0d %0d %0d\n",
+                automatic int wcls  = 0;
+                automatic int wport = int'(winp);
+                automatic int wloc  = (winp < NLP) ? 1 : 0;
+                automatic int wsg   = `SPM_TILE(g,t).bank_req_payload[b].src_group_id;
+                automatic int wit   = `SPM_TILE(g,t).bank_req_payload[b].ini_addr;
+                automatic int wcore = `SPM_TILE(g,t).bank_req_payload[b].wdata.core_id;
+                automatic int wmid  = `SPM_TILE(g,t).bank_req_payload[b].wdata.meta_id;
+                automatic int wp    = 0;
+                if (`SPM_TILE(g,t).bank_req_wide[b]) begin
+                  // 0 = DMA, p+1 = wide-plane ingress p (see gen_bank_mux).
+                  wcls  = 1 + int'(`SPM_TILE(g,t).i_tcdm_bank_interco.wide_grant_tag[b]);
+                  wport = -1;                        // no narrow arbiter input
+                  wp    = wcls - 2;
+                end
+`ifdef USE_WIDE_TCDM_PLANE
+                if (wcls >= 2) begin
+                  // Recover the requester the per-bank fork drops (ini_addr='0).
+                  wloc  = (wp < `SPM_TILE(g,t).NumWideLocalPorts) ? 1 : 0;
+                  wsg   = `SPM_TILE(g,t).i_tcdm_bank_interco.slv_wide_req_i[wp].src_group_id;
+                  wit   = `SPM_TILE(g,t).i_tcdm_bank_interco.slv_wide_req_i[wp].ini_addr;
+                  wcore = NumCoresPerTile * NumDataPortsPerCore;  // wide engine slot
+                  wmid  = `SPM_TILE(g,t).i_tcdm_bank_interco.slv_wide_req_i[wp].wdata.meta_id;
+                end
+`endif
+                $fwrite(f_bank[g][t], "P %0d %0d %0d %0h %0d %0d %0d %0d %0d %0d %0d %0d\n",
                   b, cycle_q,
                   `SPM_TILE(g,t).bank_req_payload[b].wen,
                   `SPM_TILE(g,t).bank_req_payload[b].tgt_addr,
-                  (winp < NLP) ? 1 : 0,                              // loc: local port
-                  `SPM_TILE(g,t).bank_req_wide[b],                   // wide: DMA access
-                  winp,                                              // winning input port
-                  `SPM_TILE(g,t).bank_req_payload[b].src_group_id,   // remote origin grp
-                  `SPM_TILE(g,t).bank_req_payload[b].ini_addr,       // remote origin tile
-                  `SPM_TILE(g,t).bank_req_payload[b].wdata.core_id,  // remote origin core
-                  `SPM_TILE(g,t).bank_req_payload[b].wdata.meta_id); // meta_id
+                  wloc,                                // loc: requester is on this tile
+                  `SPM_TILE(g,t).bank_req_wide[b],     // wide: superbank grant
+                  wport,                               // winning narrow input port, -1 if wide
+                  wsg,                                 // origin group
+                  wit,                                 // origin tile
+                  wcore,                               // origin local-port index
+                  wmid,                                // meta_id
+                  wcls);                               // 0 narrow / 1 DMA / 2+p wide plane
               end
             end
           end
