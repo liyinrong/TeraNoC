@@ -404,58 +404,58 @@ package mempool_pkg;
   // the DMA wide req/resp, landing on NumSuperbankWords banks. Distinct from the
   // DMA wide type because WIDE_W (=RMDataWidth) need not equal DmaDataWidth.
   `ifdef USE_WIDE_TCDM_PLANE
-  typedef logic [WideTcdmDataWidth-1:0]   wide_eng_data_t;
-  typedef logic [WideTcdmDataWidth/8-1:0] wide_eng_strb_t;
+  typedef logic [WideTcdmDataWidth-1:0]   wide_tcdm_data_t;
+  typedef logic [WideTcdmDataWidth/8-1:0] wide_tcdm_strb_t;
 
   typedef struct packed {
     meta_id_t       meta_id;
     tile_core_id_t  core_id;
     amo_t           amo;
-    wide_eng_data_t data;
-  } wide_eng_payload_t;
+    wide_tcdm_data_t data;
+  } wide_tcdm_payload_t;
 
   // Raw wide TCDM interfaces. As for the narrow TCDM interfaces above, FlooNoC
   // headers are added and removed only in mempool_group_floonoc_wrapper.
   typedef struct packed {
-    wide_eng_payload_t wdata;
+    wide_tcdm_payload_t wdata;
     logic              wen;
-    wide_eng_strb_t    be;
+    wide_tcdm_strb_t    be;
     group_id_t         tgt_group_id;
     tcdm_addr_t        tgt_addr;
     tile_group_id_t    src_tile_id;
   } tcdm_wide_master_req_t;
 
   typedef struct packed {
-    wide_eng_payload_t rdata;
+    wide_tcdm_payload_t rdata;
     tile_group_id_t    tile_id;
   } tcdm_wide_master_resp_t;
 
   typedef struct packed {
-    wide_eng_payload_t wdata;
+    wide_tcdm_payload_t wdata;
     logic              wen;
-    wide_eng_strb_t    be;
+    wide_tcdm_strb_t    be;
     tcdm_addr_t        tgt_addr;
     tile_group_id_t    ini_addr;
     group_id_t         src_group_id;
   } tcdm_wide_slave_req_t;
 
   typedef struct packed {
-    wide_eng_payload_t rdata;
+    wide_tcdm_payload_t rdata;
     tile_group_id_t    ini_addr;
     group_id_t         src_group_id;
     logic              is_write;
   } tcdm_wide_slave_resp_t;
 
   typedef struct packed {
-    wide_eng_payload_t wdata;
+    wide_tcdm_payload_t wdata;
     logic              wen;
-    wide_eng_strb_t    be;
+    wide_tcdm_strb_t    be;
     tile_addr_t        tgt_addr;
     tile_group_id_t    ini_addr;      // source tile  — self-routing (mirror tcdm_slave_req_t)
     group_id_t         src_group_id;  // source group — routes the response back
-  } tcdm_wide_eng_req_t;
+  } tcdm_wide_req_t;
 
-  typedef tcdm_wide_slave_resp_t tcdm_wide_eng_resp_t;
+  typedef tcdm_wide_slave_resp_t tcdm_wide_resp_t;
   `endif
 
   /*************************************
@@ -609,9 +609,6 @@ package mempool_pkg;
   //  (whole-struct group-to-group wiring) carries it for free.
   // --------------------------------------------------------------------------
   `ifdef USE_WIDE_TCDM_PLANE
-  typedef logic [WideTcdmDataWidth-1:0]     wide_tcdm_data_t;
-  typedef logic [WideTcdmDataWidth/8-1:0]   wide_tcdm_strb_t;
-
   typedef struct packed {
     amo_t         amo;
     logic         wen;
