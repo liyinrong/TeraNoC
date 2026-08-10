@@ -571,6 +571,27 @@ module mempool_group
       else $fatal(1, "[mempool_group] Wide RW response channels exceed tile ports.");
     assert (NumWideWoRespChannelsPerGroup <= NumWideRespPortsPerGroup)
       else $fatal(1, "[mempool_group] Wide WO response channels exceed tile ports.");
+    // The inter-group ports are batched by port id: port r of every tile shares
+    // one batch of channels, and a request issued on port r must be carried and
+    // answered inside batch r alone. The mapper picks a channel with
+    // `i % NumClass` over the flattened input i = t*ports + r (gen_wide_*_mapper
+    // above), while the endpoint crossbars recover the port with
+    // `channel % ports`. The two agree only if the class count is a multiple of
+    // the port count; otherwise the batches overlap and a response returns on a
+    // port whose requester never issued it -- a silent mis-route, no X and no
+    // hang. Zero is fine: it disables the class.
+    assert (NumWideRoReqChannelsPerGroup % NumWideInterGroupPortsPerTile == 0)
+      else $fatal(1, "[mempool_group] Wide RO request channels must be a multiple of the %0d inter-group ports per tile, so the per-port channel batches partition; got %0d.",
+          NumWideInterGroupPortsPerTile, NumWideRoReqChannelsPerGroup);
+    assert (NumWideRwReqChannelsPerGroup % NumWideInterGroupPortsPerTile == 0)
+      else $fatal(1, "[mempool_group] Wide RW request channels must be a multiple of the %0d inter-group ports per tile, so the per-port channel batches partition; got %0d.",
+          NumWideInterGroupPortsPerTile, NumWideRwReqChannelsPerGroup);
+    assert (NumWideRwRespChannelsPerGroup % NumWideInterGroupPortsPerTile == 0)
+      else $fatal(1, "[mempool_group] Wide RW response channels must be a multiple of the %0d inter-group ports per tile, so the per-port channel batches partition; got %0d.",
+          NumWideInterGroupPortsPerTile, NumWideRwRespChannelsPerGroup);
+    assert (NumWideWoRespChannelsPerGroup % NumWideInterGroupPortsPerTile == 0)
+      else $fatal(1, "[mempool_group] Wide WO response channels must be a multiple of the %0d inter-group ports per tile, so the per-port channel batches partition; got %0d.",
+          NumWideInterGroupPortsPerTile, NumWideWoRespChannelsPerGroup);
   end
   `endif
 

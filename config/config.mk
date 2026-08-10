@@ -90,10 +90,10 @@ spm_bank_id_remap ?= 0
 tile_id_remap ?= 0
 
 # Enable the spm access pattern profiling
-spm_profiling ?= 0
+spm_profiling ?= 1
 
 # Enable the interconnect access pattern profiling
-noc_profiling ?= 0
+noc_profiling ?= 1
 
 # Wide TCDM payload width in bits. A zero default is safe while the plane is
 # disabled; RedMulE-enabled flavors set the width of one engine TCDM beat.
@@ -129,6 +129,49 @@ noc_resp_wide_wo_channel_num ?= 0
 # validated only for one intra-group plus one inter-group path.
 num_intra_group_ports_per_tile ?= 1
 num_inter_group_ports_per_tile ?= 1
+
+# INVARIANT: every wide channel class must be a multiple of the inter-group
+# ports per tile. The inter-group ports are batched by port id -- port r of
+# every tile shares one batch of channels, and a request issued on port r must
+# be carried and answered inside batch r alone. Two pieces of logic have to
+# agree on that partition: the group flattens its mapper inputs as
+# i = tile*ports + port and picks a channel with `i % class_count`
+# (mempool_group_channel_mapper.sv, driven from gen_wide_{req,resp}_mapper_t/r),
+# while the endpoint crossbars recover the port with `channel % ports`
+# (gen_wide_slave_req_sel / gen_wide_master_resp_sel). They agree if and only if
+# the class count divides evenly; otherwise the batches overlap and a response
+# comes back on a port whose requester never sent the request -- a silent
+# mis-route with no X, no hang and no assertion, found late and looking like a
+# data-corruption or ROB bug rather than a config one. 0 is fine: it disables
+# the class. mempool_group.sv (p_wide_group_channel_count) asserts the same
+# thing at elaboration and the GVSoC model in pulp/pulp/teranoc_v2/arch.py
+# (TeranocWideConfig.__post_init__) at model build; checking it here fails a bad
+# flavor at build configuration instead. The magnitude limits on the same four
+# counts live next to the wide vlog_defs in hardware/Makefile.
+# This check is placed after the port counts rather than next to the channel
+# counts above because it needs both.
+ifneq (0,$(strip $(num_inter_group_ports_per_tile)))
+wide_ro_req_channel_batch_remainder := $(shell printf '%s' \
+	$$(( $(noc_req_wide_ro_channel_num) % $(num_inter_group_ports_per_tile) )))
+wide_rw_req_channel_batch_remainder := $(shell printf '%s' \
+	$$(( $(noc_req_wide_rw_channel_num) % $(num_inter_group_ports_per_tile) )))
+wide_rw_resp_channel_batch_remainder := $(shell printf '%s' \
+	$$(( $(noc_resp_wide_rw_channel_num) % $(num_inter_group_ports_per_tile) )))
+wide_wo_resp_channel_batch_remainder := $(shell printf '%s' \
+	$$(( $(noc_resp_wide_wo_channel_num) % $(num_inter_group_ports_per_tile) )))
+ifneq (0,$(strip $(wide_ro_req_channel_batch_remainder)))
+$(error noc_req_wide_ro_channel_num=$(noc_req_wide_ro_channel_num) must be a multiple of the num_inter_group_ports_per_tile=$(num_inter_group_ports_per_tile) inter-group ports per tile, so the per-port wide channel batches partition)
+endif
+ifneq (0,$(strip $(wide_rw_req_channel_batch_remainder)))
+$(error noc_req_wide_rw_channel_num=$(noc_req_wide_rw_channel_num) must be a multiple of the num_inter_group_ports_per_tile=$(num_inter_group_ports_per_tile) inter-group ports per tile, so the per-port wide channel batches partition)
+endif
+ifneq (0,$(strip $(wide_rw_resp_channel_batch_remainder)))
+$(error noc_resp_wide_rw_channel_num=$(noc_resp_wide_rw_channel_num) must be a multiple of the num_inter_group_ports_per_tile=$(num_inter_group_ports_per_tile) inter-group ports per tile, so the per-port wide channel batches partition)
+endif
+ifneq (0,$(strip $(wide_wo_resp_channel_batch_remainder)))
+$(error noc_resp_wide_wo_channel_num=$(noc_resp_wide_wo_channel_num) must be a multiple of the num_inter_group_ports_per_tile=$(num_inter_group_ports_per_tile) inter-group ports per tile, so the per-port wide channel batches partition)
+endif
+endif
 
 # Number of RedMulE tensor-core tiles in the cluster
 num_redmule_tiles ?= 0
