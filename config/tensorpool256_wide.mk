@@ -11,16 +11,20 @@
 # tensorpool256, so running this flavor against tensorpool256 isolates the wide
 # plane and nothing else.
 #
-# Set the knobs BEFORE including the base flavor: it provides its defaults with
-# ?= and config/config.mk evaluates the wide-channel mode after the include.
+# Set the knobs BEFORE including the base flavor: it and config/config.mk both
+# provide their defaults with ?=, so an earlier := wins.
 
 config_build_path ?= tensorpool256_wide
 
 # Wide payload width: one 512-bit RedMulE TCDM beat.
 wide_tcdm_data_width := 512
 
-# 1 RW req + 1 RW resp channel per group (RO req and WO resp disabled).
-wide_channel_config_mode := baseline
+# 1 RW req + 1 RW resp channel per group and mesh direction; the meta-only RO
+# request and WO response classes stay off.
+noc_req_wide_ro_channel_num   := 0
+noc_req_wide_rw_channel_num   := 1
+noc_resp_wide_rw_channel_num  := 1
+noc_resp_wide_wo_channel_num  := 0
 
 # One logical wide port per tile for intra-group traffic and one each for the
 # inter-group request and response paths.

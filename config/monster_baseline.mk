@@ -6,8 +6,8 @@
 # Each tile contains two Snitch-Spatz cores, 32 L1 banks, and one H8xW32
 # RedMulE. Both TCDM planes retain their original baseline channel classes.
 
-# Set geometry and channel modes before including the TensorPool flavor because
-# it provides defaults with ?= and evaluates the narrow-channel mode immediately.
+# Set geometry and channel counts before including the TensorPool flavor: it
+# provides its defaults with ?=, so an earlier := wins.
 config_build_path ?= monster_baseline
 
 num_cores          ?= 128
@@ -18,8 +18,18 @@ banking_factor     ?= 4
 num_x        ?= 4
 noc_topology ?= 0
 
-narrow_channel_config_mode := baseline
-wide_channel_config_mode   := baseline
+# Narrow plane: 2 RW request + 2 RW response channels per group and mesh
+# direction. Wide plane on with 1 RW request + 1 RW response.
+noc_req_narrow_ro_channel_num  := 0
+noc_req_narrow_rw_channel_num  := 2
+noc_req_narrow_wo_channel_num  := 0
+noc_resp_narrow_rw_channel_num := 2
+
+noc_req_wide_ro_channel_num   := 0
+noc_req_wide_rw_channel_num   := 1
+noc_resp_wide_rw_channel_num  := 1
+noc_resp_wide_wo_channel_num  := 0
+
 noc_wide_intra_group_channel_num_per_tile := 1
 noc_wide_inter_group_req_channel_num_per_tile := 1
 noc_wide_inter_group_resp_channel_num_per_tile := 1

@@ -53,35 +53,14 @@ noc_router_remapping ?= 3
 # Virtual channel number
 noc_virtual_channel_num ?= 1
 
-# Channel configuration mode (internal control only)
-# Options: baseline, split, enhanced
-narrow_channel_config_mode := baseline  # Change this value to switch modes
-
-# Channel configuration based on selected mode
-ifeq ($(strip $(narrow_channel_config_mode)), baseline)
-# Baseline config, do NOT define USE_RO_NARROW_REQ_CHANNEL
+# Narrow (32-bit) TCDM plane: physical channels per group and mesh
+# direction, by class. RO = meta-only read request, RW = payload
+# request/response, WO = write-only request. At least one write-capable
+# request channel (RW or WO) and one RW response channel are required.
 noc_req_narrow_ro_channel_num ?= 0
 noc_req_narrow_rw_channel_num ?= 2
 noc_req_narrow_wo_channel_num ?= 0
 noc_resp_narrow_rw_channel_num ?= 2
-
-else ifeq ($(strip $(narrow_channel_config_mode)), split)
-# Reduced req link count, define USE_RO_NARROW_REQ_CHANNEL
-noc_req_narrow_ro_channel_num ?= 1
-noc_req_narrow_rw_channel_num ?= 1
-noc_req_narrow_wo_channel_num ?= 0
-noc_resp_narrow_rw_channel_num ?= 2
-
-else ifeq ($(strip $(narrow_channel_config_mode)), enhanced)
-# Enhanced resp link, define USE_RO_NARROW_REQ_CHANNEL
-noc_req_narrow_ro_channel_num ?= 1
-noc_req_narrow_rw_channel_num ?= 1
-noc_req_narrow_wo_channel_num ?= 0
-noc_resp_narrow_rw_channel_num ?= 3
-
-else
-$(error Unsupported narrow_channel_config_mode: $(narrow_channel_config_mode))
-endif
 
 # Print configuration info for debugging
 $(info [DEBUG:][noc_req_narrow_ro_channel_num]----$(noc_req_narrow_ro_channel_num))
@@ -97,7 +76,7 @@ noc_router_output_fifo_dep ?= 2
 noc_router_remap_group_size ?= 4
 
 # Wide TCDM plane (WP2): this flavor has no RedMulE wide endpoint, so the current
-# direct one-beat implementation requires wide_channel_config_mode=off.
+# direct one-beat implementation requires noc_req_wide_rw_channel_num=0.
 
 ###########################
 ## 3. AXI and DMA Config

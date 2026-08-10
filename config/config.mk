@@ -109,46 +109,17 @@ wide_tcdm_data_width ?= 0
 # RW req and RW resp are MANDATORY when the plane is on (only they can carry
 # write data / read data). RO req and WO resp are optional; 0 disables the class.
 #
-# Selected by wide_channel_config_mode, mirroring narrow_channel_config_mode:
-#   off      - plane absent (default), with every class count set to zero.
-#   baseline - the original one-class plane: every request on RW, every
-#              response on RW. Kept so earlier WP2 results stay reproducible.
-#   split    - all four classes present, one channel each. The cheapest config
-#              that exercises the meta-only RO request and WO response paths.
-#   readopt  - the DSE plan's §6.6 recommended mix: many cheap read requests, few
-#              expensive write requests, wide read responses, cheap write acks.
-#              2048 b/cyc read + 1024 b/cyc write, balanced 6 req/cyc <-> 6
-#              resp/cyc, at 76% of terapool's narrow-plane wire budget. Requires
-#              at least six tile request/response ports per group.
 # Counts are physical channels per group and mesh direction, shared by all tile
-# logical wide ports through the group concentrator/dispatcher. RedMulE-enabled
-# flavors may pin or sweep these presets without editing the shared config.
-# Flavors without a RedMulE wide endpoint must keep the plane off.
-wide_channel_config_mode ?= off
-
-ifeq ($(strip $(wide_channel_config_mode)), off)
+# logical wide ports through the group concentrator/dispatcher. The defaults
+# below leave the plane absent, which is bit-identical to a build without it;
+# a flavor turns it on by setting the counts directly before including its base
+# flavor (see config/tensorpool256_wide.mk). noc_req_wide_rw_channel_num >= 1 is
+# what enables the plane. Flavors without a RedMulE wide endpoint must keep it
+# off.
 noc_req_wide_ro_channel_num ?= 0
 noc_req_wide_rw_channel_num ?= 0
 noc_resp_wide_rw_channel_num ?= 0
 noc_resp_wide_wo_channel_num ?= 0
-else ifeq ($(strip $(wide_channel_config_mode)), baseline)
-noc_req_wide_ro_channel_num ?= 0
-noc_req_wide_rw_channel_num ?= 1
-noc_resp_wide_rw_channel_num ?= 1
-noc_resp_wide_wo_channel_num ?= 0
-else ifeq ($(strip $(wide_channel_config_mode)), split)
-noc_req_wide_ro_channel_num ?= 1
-noc_req_wide_rw_channel_num ?= 1
-noc_resp_wide_rw_channel_num ?= 1
-noc_resp_wide_wo_channel_num ?= 1
-else ifeq ($(strip $(wide_channel_config_mode)), readopt)
-noc_req_wide_ro_channel_num ?= 4
-noc_req_wide_rw_channel_num ?= 2
-noc_resp_wide_rw_channel_num ?= 4
-noc_resp_wide_wo_channel_num ?= 2
-else
-$(error Unsupported wide_channel_config_mode: $(wide_channel_config_mode))
-endif
 
 # Logical wide ports at each tile. Intra-group ports are dedicated links and do
 # not enter the group mapper. Inter-group ports are class-neutral at the tile;

@@ -54,35 +54,16 @@ noc_router_remapping ?= 3
 # Virtual channel number
 noc_virtual_channel_num ?= 1
 
-# Channel configuration mode (internal control only)
-# Options: baseline, rw4, split, enhanced
-narrow_channel_config_mode := rw4
-
-ifeq ($(strip $(narrow_channel_config_mode)), baseline)
-noc_req_narrow_ro_channel_num ?= 0
-noc_req_narrow_rw_channel_num ?= 2
-noc_req_narrow_wo_channel_num ?= 0
-noc_resp_narrow_rw_channel_num ?= 2
-else ifeq ($(strip $(narrow_channel_config_mode)), rw4)
-# Four payload request channels and four response channels per tile. Request and
-# response port counts stay equal, so the response crossbar keeps its identity map.
+# Narrow (32-bit) TCDM plane: physical channels per group and mesh
+# direction, by class. RO = meta-only read request, RW = payload
+# request/response, WO = write-only request. At least one write-capable
+# request channel (RW or WO) and one RW response channel are required. Request
+# and response counts stay equal here, so the response crossbar keeps its
+# identity map.
 noc_req_narrow_ro_channel_num ?= 0
 noc_req_narrow_rw_channel_num ?= 4
 noc_req_narrow_wo_channel_num ?= 0
 noc_resp_narrow_rw_channel_num ?= 4
-else ifeq ($(strip $(narrow_channel_config_mode)), split)
-noc_req_narrow_ro_channel_num ?= 1
-noc_req_narrow_rw_channel_num ?= 1
-noc_req_narrow_wo_channel_num ?= 0
-noc_resp_narrow_rw_channel_num ?= 2
-else ifeq ($(strip $(narrow_channel_config_mode)), enhanced)
-noc_req_narrow_ro_channel_num ?= 1
-noc_req_narrow_rw_channel_num ?= 1
-noc_req_narrow_wo_channel_num ?= 0
-noc_resp_narrow_rw_channel_num ?= 3
-else
-$(error Unsupported narrow_channel_config_mode: $(narrow_channel_config_mode))
-endif
 
 $(info [DEBUG:][noc_req_narrow_ro_channel_num]----$(noc_req_narrow_ro_channel_num))
 $(info [DEBUG:][noc_req_narrow_rw_channel_num]--$(noc_req_narrow_rw_channel_num))
@@ -98,7 +79,7 @@ noc_router_remap_group_size ?= 4
 
 # Wide TCDM plane (WP2): a separate single-beat wide FlooNoC net carrying RedMulE
 # line traffic. One wide payload is one 512-bit RedMulE TCDM beat in this flavor.
-# Sized by wide_channel_config_mode, defined for every flavor in config/config.mk.
+# Sized by the noc_*_wide_*_channel_num counts, defaulted in config/config.mk.
 wide_tcdm_data_width ?= 512
 
 ###########################
