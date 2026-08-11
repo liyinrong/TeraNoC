@@ -28,33 +28,39 @@
   // To stay under VCS's open-file limit, files are MERGED and lines PREFIXED with a demux idx:
   //   routers -> router_g<g>_{req,resp}.log  (one per group; <idx> = in-group router id
   //              <rid>, a flat slot t*ports+p -- routers are remapped so NOT tile/port)
-  //   cores   -> pe_g<g>_t<t>.log            (one per tile; <idx> = core)
-  //   RedMulE -> rm_g<g>_t<t>.log            (one per tile; <idx> = master port)
+  //   cores   -> core_g<g>_t<t>.log          (one per tile; <idx> = FLAT local-port
+  //              index ports_per_core*c + p: the Snitch scalar data port at p=0
+  //              and every Spatz vector port at p>=1)
+  //   RedMulE -> rm_g<g>_t<t>.log            (one per tile; <idx> = master port,
+  //              always 0 on the wide plane, which has one client per tile)
   //   tiles   -> tile_g<g>_t<t>.log          (already one per tile; NO prefix)
+  // core_ and rm_ open with `D <data_width_bits>`: the width of ONE record, so a
+  // consumer can normalise request counts to bytes across the two planes.
+  // This directory holds the whole LIFE OF EACH MEMORY REQUEST and nothing else;
+  // requester-internal state belongs in tb_<engine>_profiling.svh.
   string  app, log_path;
   integer retval;
   // MERGED file handles: routers -> ONE req + ONE resp file per group (line tagged with
-  // router id); Snitch cores / RedMulE master ports -> ONE file per tile (line tagged with
-  // core / port idx). PE = the Snitch core's data memory port.
+  // router id); core ports / RedMulE master ports -> ONE file per tile (line tagged with
+  // core-port / port idx). core_ covers the Snitch scalar data port AND every
+  // Spatz vector port, on the flat local-port axis.
   int f_rreq  [NumGroups];
   int f_rresp [NumGroups];
   int f_tile  [NumGroups][NumTilesPerGroup];
-  int f_pe    [NumGroups][NumTilesPerGroup];
+  int f_core    [NumGroups][NumTilesPerGroup];
   // RMPorts>=1 keeps the state-register array legal when RedMulE is disabled.
   localparam int unsigned RMPorts = (RMMasterPorts > 0) ? RMMasterPorts : 1;
   int f_rm    [NumGroups][NumTilesPerGroup];
-  // Spatz VLSU per-request memory trace (Spatz builds only), one file per tile.
-  int f_spmem [NumGroups][NumTilesPerGroup];
 `ifdef USE_WIDE_TCDM_PLANE
-  // WP2 wide plane. The engine port gets its OWN family (rmw_, not rm_): a wide
-  // request moves WideTcdmDataWidth bits where a narrow rm_ request moves 32, so
-  // folding them into one family would silently make request counts and
-  // per-request latencies incomparable between a plane-on and a plane-off run.
-  //   rmw_g<g>_t<t>.log            one wide engine port per RedMulE tile
-  //   router_g<g>_wide_{req,resp}  the wide net's own routers (one file per group)
+  // WP2 wide plane. The engine port keeps the rm_ family: same grammar, same
+  // fields, one client instead of several. What differs is the width of one
+  // record -- WideTcdmDataWidth bits instead of 32 -- and that is carried by
+  // the file's own `D <data_width_bits>` header rather than by the file name,
+  // so a consumer normalises to bytes from the data instead of from a naming
+  // convention.
+  //   router_wide_g<g>_{req,resp}  the wide net's own routers (one file per group)
   // The wide tile boundary rides the EXISTING tile_g<g>_t<t>.log under its own
   // record letters (SW/PW/QW), so a tile's two planes stay in one file.
-  int f_rmw    [NumGroups][NumTilesPerGroup];
   int f_wrreq  [NumGroups];
   int f_wrresp [NumGroups];
 `endif
@@ -90,28 +96,24 @@
       f_rreq[g]  = $fopen($sformatf("%s/router_g%0d_req.log",  log_path, g), "w");
       f_rresp[g] = $fopen($sformatf("%s/router_g%0d_resp.log", log_path, g), "w");
 `ifdef USE_WIDE_TCDM_PLANE
-      f_wrreq[g]  = $fopen($sformatf("%s/router_g%0d_wide_req.log",  log_path, g), "w");
-      f_wrresp[g] = $fopen($sformatf("%s/router_g%0d_wide_resp.log", log_path, g), "w");
+      f_wrreq[g]  = $fopen($sformatf("%s/router_wide_g%0d_req.log",  log_path, g), "w");
+      f_wrresp[g] = $fopen($sformatf("%s/router_wide_g%0d_resp.log", log_path, g), "w");
 `endif
       for (int t = 0; t < NumTilesPerGroup; t++) begin
         f_tile[g][t] = $fopen($sformatf("%s/tile_g%0d_t%0d.log", log_path, g, t), "w");
-        f_pe[g][t]   = $fopen($sformatf("%s/pe_g%0d_t%0d.log",   log_path, g, t), "w");
-        // The narrow RedMulE ports do not exist with the plane on, so do NOT
-        // create rm_ files there: the tap below is compiled out, and an
-        // untouched file still flushed at end of sim reads as "RedMulE was
-        // idle" instead of "no such port".
-        if (t < NumRMTilesPerGroup)
+        f_core[g][t]   = $fopen($sformatf("%s/core_g%0d_t%0d.log",   log_path, g, t), "w");
+        // `D <data_width_bits>`: one record of this file moves that many bits.
+        // Core ports are always the 32-bit narrow plane; the RedMulE port is
+        // 32 or WideTcdmDataWidth depending on which plane carries it, which is
+        // why the width is data and not part of the file name.
+        $fwrite(f_core[g][t], "D 32\n");
+        if (t < NumRMTilesPerGroup) begin
+          f_rm[g][t] = $fopen($sformatf("%s/rm_g%0d_t%0d.log", log_path, g, t), "w");
 `ifndef USE_WIDE_TCDM_PLANE
-          f_rm[g][t] = $fopen($sformatf("%s/rm_g%0d_t%0d.log",   log_path, g, t), "w");
+          $fwrite(f_rm[g][t], "D 32\n");
 `else
-          f_rmw[g][t] = $fopen($sformatf("%s/rmw_g%0d_t%0d.log", log_path, g, t), "w");
+          $fwrite(f_rm[g][t], "D %0d\n", mempool_pkg::WideTcdmDataWidth);
 `endif
-        if (mempool_pkg::RVV) begin
-          f_spmem[g][t] = $fopen($sformatf("%s/spmem_g%0d_t%0d.log", log_path, g, t), "w");
-          $fwrite(f_spmem[g][t], "D %0d %0d %0d %0d %0d\n",
-                  mempool_pkg::NumMemPortsPerSpatz, NumCoresPerTile,
-                  NumTilesPerGroup, NumTiles,
-                  $clog2(snitch_pkg::NumIntOutstandingLoads));
         end
       end
     end
@@ -134,9 +136,9 @@
   // (mempool_tile.sv:122). Scalar builds have NumDataPortsPerCore == 1, so the
   // index stays the core id; Spatz builds add the NumMemPortsPerSpatz vector
   // ports after each core's scalar port.
-  localparam int unsigned NumPeCorePorts = NumCoresPerTile * NumDataPortsPerCore;
-  logic [1:0]  pe_req_st [NumGroups][NumTilesPerGroup][NumPeCorePorts]; logic [63:0] pe_req_s [NumGroups][NumTilesPerGroup][NumPeCorePorts];
-  logic [1:0]  pe_rsp_st [NumGroups][NumTilesPerGroup][NumPeCorePorts]; logic [63:0] pe_rsp_s [NumGroups][NumTilesPerGroup][NumPeCorePorts];
+  localparam int unsigned NumCorePorts = NumCoresPerTile * NumDataPortsPerCore;
+  logic [1:0]  core_req_st [NumGroups][NumTilesPerGroup][NumCorePorts]; logic [63:0] core_req_s [NumGroups][NumTilesPerGroup][NumCorePorts];
+  logic [1:0]  core_rsp_st [NumGroups][NumTilesPerGroup][NumCorePorts]; logic [63:0] core_rsp_s [NumGroups][NumTilesPerGroup][NumCorePorts];
   // RedMulE master-port state (RedMulE tiles only); same S/P format as PE cores.
   logic [1:0]  rm_req_st [NumGroups][NumTilesPerGroup][RMPorts]; logic [63:0] rm_req_s [NumGroups][NumTilesPerGroup][RMPorts];
   logic [1:0]  rm_rsp_st [NumGroups][NumTilesPerGroup][RMPorts]; logic [63:0] rm_rsp_s [NumGroups][NumTilesPerGroup][RMPorts];
@@ -146,10 +148,10 @@
   // The wide engine port is ONE port per RedMulE tile (mempool_tile.sv's
   // WidePortIdx), so it needs no port dimension. On the shared local-port axis
   // (see the PE note above) it sits where the narrow RedMulE ports would start,
-  // i.e. at index NumPeCorePorts -- the tap emits that index as the `core` field
+  // i.e. at index NumCorePorts -- the tap emits that index as the `core` field
   // of every wide packet so a wide NoC/bank record keys the same way a narrow
   // RedMulE one does, and _req_eng renders it as RM0.
-  localparam int unsigned WideEngCoreId = NumPeCorePorts;
+  localparam int unsigned WideEngCoreId = NumCorePorts;
   logic [1:0]  wrm_req_st [NumGroups][NumTilesPerGroup]; logic [63:0] wrm_req_s [NumGroups][NumTilesPerGroup];
   logic [1:0]  wrm_rsp_st [NumGroups][NumTilesPerGroup]; logic [63:0] wrm_rsp_s [NumGroups][NumTilesPerGroup];
   // wide tile boundary: [group][tile][port], same four sides as the narrow one
@@ -531,38 +533,38 @@
   // ports of core 0.
   // ------------------------------------------------------------
   generate
-    for (genvar g = 0; g < NumGroups; g++) begin : gen_pe_g
-      for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_pe_t
+    for (genvar g = 0; g < NumGroups; g++) begin : gen_core_g
+      for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_core_t
         always_ff @(posedge clk or negedge rst_n) begin
           if (!rst_n) begin
-            pe_req_st[g][t] <= '{default: '0}; pe_req_s[g][t] <= '{default: '0};
-            pe_rsp_st[g][t] <= '{default: '0}; pe_rsp_s[g][t] <= '{default: '0};
+            core_req_st[g][t] <= '{default: '0}; core_req_s[g][t] <= '{default: '0};
+            core_rsp_st[g][t] <= '{default: '0}; core_rsp_s[g][t] <= '{default: '0};
           end else begin
-            for (int c = 0; c < NumPeCorePorts; c++) begin
+            for (int c = 0; c < NumCorePorts; c++) begin
               automatic logic [1:0] rq = `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qvalid[c]
                 ? (`NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qready[c]
                    ? (`NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qwrite[c] ? 2'd3 : 2'd2) : 2'd1) : 2'd0;
               automatic logic [1:0] rp = `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_pvalid[c]
                 ? (`NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_pready[c] ? 2'd2 : 2'd1) : 2'd0;
-              if (rq != pe_req_st[g][t][c]) begin
-                $fwrite(f_pe[g][t], "%0d S 0 1 0 %0d %0d %0d\n", c, pe_req_s[g][t][c], cycle_q, pe_req_st[g][t][c]);
-                pe_req_st[g][t][c] <= rq; pe_req_s[g][t][c] <= cycle_q;
+              if (rq != core_req_st[g][t][c]) begin
+                $fwrite(f_core[g][t], "%0d S 0 1 0 %0d %0d %0d\n", c, core_req_s[g][t][c], cycle_q, core_req_st[g][t][c]);
+                core_req_st[g][t][c] <= rq; core_req_s[g][t][c] <= cycle_q;
               end
-              if (rp != pe_rsp_st[g][t][c]) begin
-                $fwrite(f_pe[g][t], "%0d S 1 0 0 %0d %0d %0d\n", c, pe_rsp_s[g][t][c], cycle_q, pe_rsp_st[g][t][c]);
-                pe_rsp_st[g][t][c] <= rp; pe_rsp_s[g][t][c] <= cycle_q;
+              if (rp != core_rsp_st[g][t][c]) begin
+                $fwrite(f_core[g][t], "%0d S 1 0 0 %0d %0d %0d\n", c, core_rsp_s[g][t][c], cycle_q, core_rsp_st[g][t][c]);
+                core_rsp_st[g][t][c] <= rp; core_rsp_s[g][t][c] <= cycle_q;
               end
               if (rq >= 2)  // req handshake -> one core load/store accepted (qid = meta_id)
                 // mask qid to the low snitch_pkg::MetaIdWidth bits (upper bits are X) so the
                 // printed id matches the NoC's zero-extended meta_id for this request.
                 // dst = destination tile (from the scrambled address), -1 = SoC/L2.
-                $fwrite(f_pe[g][t], "%0d P 1 0 %0d %0d %0h %0d %0d\n", c, cycle_q,
+                $fwrite(f_core[g][t], "%0d P 1 0 %0d %0d %0h %0d %0d\n", c, cycle_q,
                   `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qwrite[c],
                   `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qaddr[c],
                   `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qid[c][snitch_pkg::MetaIdWidth-1:0],
                   mem_dst_tile(`NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qaddr_scrambled[c]));
               if (rp >= 2)  // resp handshake -> a response returns to this core (pid = meta_id)
-                $fwrite(f_pe[g][t], "%0d P 0 0 %0d %0d\n", c, cycle_q,
+                $fwrite(f_core[g][t], "%0d P 0 0 %0d %0d\n", c, cycle_q,
                   `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_pid[c]);
             end
           end
@@ -634,11 +636,11 @@
   // RedMulE tile). Tapped at the wide tcdm_shim INPUT -- the single HCI
   // translation point in mempool_tile.sv -- so it sees every access, own-tile
   // and remote alike, exactly as the narrow rm_ tap does one plane over.
-  // Same S/P grammar as pe_/rm_, demux index 0 (a tile has ONE wide client):
+  // Same S/P grammar as core_/rm_, demux index 0 (a tile has ONE wide client):
   //   S <rr> <io> 0 <start> <end> <state>
   //   req  P 1 0 <cyc> <wen> <addr> <meta_id> <dst_tile>
   //   resp P 0 0 <cyc> <meta_id>
-  // `addr` is the RAW HCI address (pre-scrambler), matching pe_/rm_; the wide
+  // `addr` is the RAW HCI address (pre-scrambler), matching core_/rm_; the wide
   // shim consumes the SCRAMBLED one (i_rm_wide_scrambler drives
   // tcdm_wide_rm_req.addr directly), which is what mem_dst_tile decodes.
   // ------------------------------------------------------------
@@ -658,21 +660,21 @@
               automatic logic [1:0] rp = `RMW_ENG(g,t).tcdm_wide_rm_resp_valid
                 ? (`RMW_ENG(g,t).tcdm_wide_rm_resp_ready ? 2'd2 : 2'd1) : 2'd0;
               if (rq != wrm_req_st[g][t]) begin
-                $fwrite(f_rmw[g][t], "0 S 0 1 0 %0d %0d %0d\n", wrm_req_s[g][t], cycle_q, wrm_req_st[g][t]);
+                $fwrite(f_rm[g][t], "0 S 0 1 0 %0d %0d %0d\n", wrm_req_s[g][t], cycle_q, wrm_req_st[g][t]);
                 wrm_req_st[g][t] <= rq; wrm_req_s[g][t] <= cycle_q;
               end
               if (rp != wrm_rsp_st[g][t]) begin
-                $fwrite(f_rmw[g][t], "0 S 1 0 0 %0d %0d %0d\n", wrm_rsp_s[g][t], cycle_q, wrm_rsp_st[g][t]);
+                $fwrite(f_rm[g][t], "0 S 1 0 0 %0d %0d %0d\n", wrm_rsp_s[g][t], cycle_q, wrm_rsp_st[g][t]);
                 wrm_rsp_st[g][t] <= rp; wrm_rsp_s[g][t] <= cycle_q;
               end
               if (rq >= 2)  // req handshake -> one wide engine access accepted
-                $fwrite(f_rmw[g][t], "0 P 1 0 %0d %0d %0h %0d %0d\n", cycle_q,
+                $fwrite(f_rm[g][t], "0 P 1 0 %0d %0d %0h %0d %0d\n", cycle_q,
                   `RMW_ENG(g,t).tcdm_wide_rm_req.write,
                   `RMW_ENG(g,t).tcdm.req_add,
                   `RMW_ENG(g,t).tcdm_wide_rm_req.id,
                   mem_dst_tile(`RMW_ENG(g,t).tcdm_wide_rm_req.addr));
               if (rp >= 2)  // resp handshake -> a wide response returns to the engine
-                $fwrite(f_rmw[g][t], "0 P 0 0 %0d %0d\n", cycle_q,
+                $fwrite(f_rm[g][t], "0 P 0 0 %0d %0d\n", cycle_q,
                   `RMW_ENG(g,t).tcdm_wide_rm_resp.id);
             end
           end
@@ -873,71 +875,6 @@
 `endif
 
   // ------------------------------------------------------------
-  // Spatz VLSU per-REQUEST memory trace -> per-tile file (Spatz builds only).
-  // The pe_ capture above already shows these ports as state runs + packets; this
-  // adds the one thing the state runs cannot give: the ROUND TRIP of each word
-  // request, i.e. the two instants that bracket it --
-  //   Q = the request-ACCEPTED handshake (valid & ready; bare valid is already
-  //       covered by the Spatz engine trace's `memact`)
-  //   P = the response arriving back at the Spatz boundary (no ready there)
-  // Pairing key = the per-port ROB id the VLSU already puts on the request
-  // (spatz_vlsu.sv: mem_req_id[port] = rob_id[port]) and gets back on the
-  // response, so no new RTL signal is needed. Stores are logged too: their ROB
-  // entry frees at send rather than at response, so `wr` keeps a store-ack
-  // distinguishable from a load reply that reuses the same id. Only the low
-  // IdBits of `id` round-trip (mempool_cc.sv packs {write, id[IdBits-1:0]} into
-  // meta_id), so a matcher must mask to IdBits -- hence IdBits in the D header.
-  //
-  // One file per TILE (merged like pe_/rm_, line PREFIXED with the core index):
-  //   spmem_g<g>_t<t>.log
-  //     D <NrMemPorts> <NumCoresPerTile> <NumTilesPerGroup> <NumTiles> <IdBits>
-  //     <c> Q <cyc> <port> <id> <addr_hex> <wr> <dst_tile>
-  //     <c> P <cyc> <port> <id> <wr>
-  //     E <last_cyc>
-  // `addr` is the RAW core address (pre-scrambler) so it can be matched back to
-  // the kernel's data structures. `dst_tile` is the GLOBAL destination tile id
-  // taken from the tile's SCRAMBLED address of the SAME request -- i.e. after the
-  // seq/interleave swap and the tile-id remap -- or -1 for a non-TCDM (SoC/L2)
-  // access; the Spatz port feeds the tile's core data port combinationally
-  // (mempool_cc.sv:451), so both are valid in the handshake cycle. Destination
-  // group = dst_tile / NumTilesPerGroup (mempool_tile.sv:91), so an offline pass
-  // classifies every request as local-tile / intra-group / inter-group / SoC
-  // without re-implementing the address scrambler.
-  // ------------------------------------------------------------
-  // Core c's Spatz vector unit (mempool_cc.riscv_core.gen_spatz.i_spatz).
-  `define SPMEM_SPATZ(gg,tt,cc) `NOC_GRP(gg).i_mempool_group.gen_tiles[tt].i_tile.gen_cores[cc].gen_mempool_cc.riscv_core.gen_spatz.i_spatz
-  generate
-    if (mempool_pkg::RVV) begin : gen_spmem
-      for (genvar g = 0; g < NumGroups; g++) begin : gen_spmem_g
-        for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_spmem_t
-          for (genvar c = 0; c < NumCoresPerTile; c++) begin : gen_spmem_c
-            always_ff @(posedge clk or negedge rst_n) begin
-              if (rst_n) begin
-                for (int p = 0; p < mempool_pkg::NumMemPortsPerSpatz; p++) begin
-                  if (`SPMEM_SPATZ(g,t,c).spatz_mem_req_valid_o[p] &&
-                      `SPMEM_SPATZ(g,t,c).spatz_mem_req_ready_i[p])
-                    $fwrite(f_spmem[g][t], "%0d Q %0d %0d %0d %0h %0d %0d\n",
-                      c, cycle_q, p,
-                      `SPMEM_SPATZ(g,t,c).spatz_mem_req_o[p].id,
-                      `SPMEM_SPATZ(g,t,c).spatz_mem_req_o[p].addr,
-                      `SPMEM_SPATZ(g,t,c).spatz_mem_req_o[p].write,
-                      mem_dst_tile(`NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.snitch_data_qaddr_scrambled[
-                                     mempool_pkg::NumDataPortsPerCore*c + 1 + p]));
-                  if (`SPMEM_SPATZ(g,t,c).spatz_mem_rsp_valid_i[p])
-                    $fwrite(f_spmem[g][t], "%0d P %0d %0d %0d %0d\n",
-                      c, cycle_q, p,
-                      `SPMEM_SPATZ(g,t,c).spatz_mem_rsp_i[p].id,
-                      `SPMEM_SPATZ(g,t,c).spatz_mem_rsp_i[p].write);
-                end
-              end
-            end
-          end
-        end
-      end
-    end
-  endgenerate
-
-  // ------------------------------------------------------------
   // End-of-sim flush: write every port's still-open S run, then close every file.
   // P lines are written as they happen, so they need no flush.
   // ------------------------------------------------------------
@@ -981,15 +918,11 @@
         end
 `endif
         $fclose(f_tile[g][t]);
-        for (int c = 0; c < NumPeCorePorts; c++) begin
-          $fwrite(f_pe[g][t], "%0d S 0 1 0 %0d %0d %0d\n", c, pe_req_s[g][t][c], cycle_q, pe_req_st[g][t][c]);
-          $fwrite(f_pe[g][t], "%0d S 1 0 0 %0d %0d %0d\n", c, pe_rsp_s[g][t][c], cycle_q, pe_rsp_st[g][t][c]);
+        for (int c = 0; c < NumCorePorts; c++) begin
+          $fwrite(f_core[g][t], "%0d S 0 1 0 %0d %0d %0d\n", c, core_req_s[g][t][c], cycle_q, core_req_st[g][t][c]);
+          $fwrite(f_core[g][t], "%0d S 1 0 0 %0d %0d %0d\n", c, core_rsp_s[g][t][c], cycle_q, core_rsp_st[g][t][c]);
         end
-        $fclose(f_pe[g][t]);
-        if (mempool_pkg::RVV) begin
-          $fwrite(f_spmem[g][t], "E %0d\n", cycle_q);
-          $fclose(f_spmem[g][t]);
-        end
+        $fclose(f_core[g][t]);
         if (t < NumRMTilesPerGroup) begin
 `ifndef USE_WIDE_TCDM_PLANE
           for (int p = 0; p < RMMasterPorts; p++) begin
@@ -998,9 +931,9 @@
           end
           $fclose(f_rm[g][t]);
 `else
-          $fwrite(f_rmw[g][t], "0 S 0 1 0 %0d %0d %0d\n", wrm_req_s[g][t], cycle_q, wrm_req_st[g][t]);
-          $fwrite(f_rmw[g][t], "0 S 1 0 0 %0d %0d %0d\n", wrm_rsp_s[g][t], cycle_q, wrm_rsp_st[g][t]);
-          $fclose(f_rmw[g][t]);
+          $fwrite(f_rm[g][t], "0 S 0 1 0 %0d %0d %0d\n", wrm_req_s[g][t], cycle_q, wrm_req_st[g][t]);
+          $fwrite(f_rm[g][t], "0 S 1 0 0 %0d %0d %0d\n", wrm_rsp_s[g][t], cycle_q, wrm_rsp_st[g][t]);
+          $fclose(f_rm[g][t]);
 `endif
         end
       end

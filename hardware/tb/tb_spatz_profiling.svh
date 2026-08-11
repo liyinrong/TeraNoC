@@ -19,7 +19,7 @@
   //   D <VLEN> <N_FU> <NrMemPorts> <VRFWordBytes>                   (header, once)
   //   C <cyc> <occ> <stall> <issue> <vfu_busy> <vfu_st> <vlsu_busy> <vlsu_st>
   //       <vsldu_busy> <vfu_rsp> <vlsu_rsp> <vsldu_rsp> <memact>
-  //       <istall> <vstall> <lin> <lout>
+  //       <istall> <vstall> <lin> <lout> <vlsu_out> <rob_full> <rob_empty>
   //   I <cyc> <id> <unit> <vl> <vsew> <vlmul>              (vector insn issued)
   //   R <cyc> <unit> <id>                                  (vector insn retired)
   //   E <last_cyc>                                                  (footer, once)
@@ -36,6 +36,14 @@
   //   vsldu_busy = |i_vsldu.running_q
   //   *_rsp      = per-unit retire-valid (vfu/vlsu/vsldu_rsp_valid)
   //   memact     = $countones(spatz_mem_req_valid_o) -- TCDM ports requesting
+  //   vlsu_out   = sum of i_vlsu.mem_pending_q -- requests ISSUED and not yet
+  //                answered, summed over the NrMemPorts reorder buffers. This
+  //                is the engine's own view of its outstanding memory work; the
+  //                per-request round trip itself is in noc_profiling/core_.
+  //   rob_full   = i_vlsu.rob_full  (bitmap, one bit per mem port) -- the port
+  //                cannot accept another request: NrOutstandingLoads reached.
+  //   rob_empty  = i_vlsu.rob_empty (bitmap) -- the port has fully drained.
+  //                &rob_empty is what the VLSU FSM waits on to change state.
   //
   // WHY an instruction did not issue -- `stall` is one bit, so it cannot tell a
   // busy target unit from a full scoreboard. `istall` is the bitmap behind it
@@ -141,14 +149,26 @@
               automatic int unsigned lin        = `SPATZ_TOP(g,t,c).i_vfu.word_issued
                                                 ? $countones(`SPATZ_TOP(g,t,c).i_vfu.valid_operations) : 0;
               automatic int unsigned lout       = $countones(`SPATZ_TOP(g,t,c).i_vfu.result_valid);
+              // VLSU reorder-buffer state. The per-request memory trace lives
+              // in core_ (noc_profiling) -- what belongs HERE is the engine's
+              // own view of it: how many requests it has outstanding and
+              // whether a port is saturated or drained.
+              automatic int unsigned vlsu_out   = 0;
+              automatic logic [mempool_pkg::NumMemPortsPerSpatz-1:0] rob_full =
+                  `SPATZ_TOP(g,t,c).i_vlsu.rob_full;
+              automatic logic [mempool_pkg::NumMemPortsPerSpatz-1:0] rob_empty =
+                  `SPATZ_TOP(g,t,c).i_vlsu.rob_empty;
+              for (int mp = 0; mp < mempool_pkg::NumMemPortsPerSpatz; mp++)
+                vlsu_out += `SPATZ_TOP(g,t,c).i_vlsu.mem_pending_q[mp];
               if (occ != 0 || vfu_busy || vlsu_busy || vsldu_busy || issue ||
-                  memact != 0 || istall[3:0] != 4'd0)
+                  memact != 0 || istall[3:0] != 4'd0 || vlsu_out != 0)
                 $fwrite(f_speng[g][t][c],
-                        "C %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d\n",
+                        "C %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d\n",
                         cycle_q, occ, stall, issue, vfu_busy, vfu_st,
                         vlsu_busy, vlsu_st, vsldu_busy,
                         vfu_rsp, vlsu_rsp, vsldu_rsp, memact,
-                        istall, vstall, lin, lout);
+                        istall, vstall, lin, lout,
+                        vlsu_out, rob_full, rob_empty);
               // One line per vector instruction issued / retired, so a metric
               // can be per instruction (and length-aware) instead of a mean
               // over whatever mix the kernel happened to run.
