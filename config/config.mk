@@ -95,6 +95,27 @@ spm_profiling ?= 1
 # Enable the interconnect access pattern profiling
 noc_profiling ?= 1
 
+# FlooNoC router buffering. The two globals below are the fallback for every
+# router in both planes; flavors have always set them to 2. The stage-1 DSE
+# sweeps the four classes independently and its S1 winner wants a deeper wide
+# RESPONSE buffer alone -- a response flit carries the payload (~1053 b at a
+# 1024-bit plane) against a request's metadata (~46 b), so a response slot costs
+# roughly 23x a request slot and `rq2` was optimal at every one of the 1224 grid
+# cells. Raising the globals instead would over-provision the other three
+# classes. Each per-class knob defaults to the matching global, so a flavor that
+# sets only the globals is bit-identical to before this split existed.
+noc_router_input_fifo_dep  ?= 2
+noc_router_output_fifo_dep ?= 2
+
+noc_router_narrow_req_input_fifo_dep   ?= $(noc_router_input_fifo_dep)
+noc_router_narrow_req_output_fifo_dep  ?= $(noc_router_output_fifo_dep)
+noc_router_narrow_resp_input_fifo_dep  ?= $(noc_router_input_fifo_dep)
+noc_router_narrow_resp_output_fifo_dep ?= $(noc_router_output_fifo_dep)
+noc_router_wide_req_input_fifo_dep     ?= $(noc_router_input_fifo_dep)
+noc_router_wide_req_output_fifo_dep    ?= $(noc_router_output_fifo_dep)
+noc_router_wide_resp_input_fifo_dep    ?= $(noc_router_input_fifo_dep)
+noc_router_wide_resp_output_fifo_dep   ?= $(noc_router_output_fifo_dep)
+
 # Wide TCDM payload width in bits. A zero default is safe while the plane is
 # disabled; RedMulE-enabled flavors set the width of one engine TCDM beat.
 wide_tcdm_data_width ?= 0
@@ -172,6 +193,31 @@ ifneq (0,$(strip $(wide_wo_resp_channel_batch_remainder)))
 $(error noc_resp_wide_wo_channel_num=$(noc_resp_wide_wo_channel_num) must be a multiple of the num_inter_group_ports_per_tile=$(num_inter_group_ports_per_tile) inter-group ports per tile, so the per-port wide channel batches partition)
 endif
 endif
+
+# Wide TCDM channel remapping (stage-1 DSE). The group concentrator binds a tile
+# to a channel with `i % class_count` over the flattened input index i, so the
+# binding is static: a tile always injects on the same channel, and a class wider
+# than the aggregate tile-port count can never reach its upper channels at all.
+# A floo_remapper on the OUTGOING edge -- between the concentrator and the group
+# boundary -- rotates that permutation once per cycle, which decorrelates the
+# per-tile choice and makes an over-wide class fully reachable. This is the
+# largest single utilization lever the stage-1 DSE measured (+33-41 % per MGE).
+# Only the RO request and RW response classes are remapped: RW request and WO
+# response do not alias the same way and rotating them buys nothing.
+#   0: none, 1: RO request, 2: RW response, 3: both
+# Nothing on the return path depends on which physical channel a request used --
+# responses route on the src_tile_id / src_id carried in the flit header and the
+# responder's group picks its response channel with its own `i % N` -- which is
+# what makes rotating the request channel safe. See the ports-per-tile caveat in
+# hardware/Makefile next to the wide remap validation.
+noc_wide_router_remapping ?= 0
+
+# floo_remapper GroupSize for each remapped class: the number of channels one
+# rotation spans. Must be a power of two >= 2 that divides the class count.
+# Defaulting to the class count gives a single batch, i.e. one rotation across
+# the whole class, which is what both stage-1 DSE designs use.
+noc_wide_ro_req_remap_group_size  ?= $(noc_req_wide_ro_channel_num)
+noc_wide_rw_resp_remap_group_size ?= $(noc_resp_wide_rw_channel_num)
 
 # Number of RedMulE tensor-core tiles in the cluster
 num_redmule_tiles ?= 0

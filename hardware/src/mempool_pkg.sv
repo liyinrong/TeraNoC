@@ -561,9 +561,60 @@ package mempool_pkg;
   // router buffer configuration
   localparam integer unsigned NumRouterInFifoDepth  = `ifdef NOC_ROUTER_INPUT_FIFO_DEP   `NOC_ROUTER_INPUT_FIFO_DEP   `else 2 `endif;
   localparam integer unsigned NumRouterOutFifoDepth = `ifdef NOC_ROUTER_OUTPUT_FIFO_DEP  `NOC_ROUTER_OUTPUT_FIFO_DEP  `else 2 `endif;
+  // Per-class router buffering. A request flit is metadata only; a response flit
+  // carries the payload, so on the wide plane a response slot costs roughly 23x
+  // a request slot and the two want different depths. Each defaults to the
+  // global above, so a flavor that sets only the globals is unchanged.
+  localparam integer unsigned NumNarrowReqRouterInFifoDepth =
+      `ifdef NOC_ROUTER_NARROW_REQ_INPUT_FIFO_DEP
+      `NOC_ROUTER_NARROW_REQ_INPUT_FIFO_DEP
+      `else NumRouterInFifoDepth `endif;
+  localparam integer unsigned NumNarrowReqRouterOutFifoDepth =
+      `ifdef NOC_ROUTER_NARROW_REQ_OUTPUT_FIFO_DEP
+      `NOC_ROUTER_NARROW_REQ_OUTPUT_FIFO_DEP
+      `else NumRouterOutFifoDepth `endif;
+  localparam integer unsigned NumNarrowRespRouterInFifoDepth =
+      `ifdef NOC_ROUTER_NARROW_RESP_INPUT_FIFO_DEP
+      `NOC_ROUTER_NARROW_RESP_INPUT_FIFO_DEP
+      `else NumRouterInFifoDepth `endif;
+  localparam integer unsigned NumNarrowRespRouterOutFifoDepth =
+      `ifdef NOC_ROUTER_NARROW_RESP_OUTPUT_FIFO_DEP
+      `NOC_ROUTER_NARROW_RESP_OUTPUT_FIFO_DEP
+      `else NumRouterOutFifoDepth `endif;
+  localparam integer unsigned NumWideReqRouterInFifoDepth =
+      `ifdef NOC_ROUTER_WIDE_REQ_INPUT_FIFO_DEP
+      `NOC_ROUTER_WIDE_REQ_INPUT_FIFO_DEP
+      `else NumRouterInFifoDepth `endif;
+  localparam integer unsigned NumWideReqRouterOutFifoDepth =
+      `ifdef NOC_ROUTER_WIDE_REQ_OUTPUT_FIFO_DEP
+      `NOC_ROUTER_WIDE_REQ_OUTPUT_FIFO_DEP
+      `else NumRouterOutFifoDepth `endif;
+  localparam integer unsigned NumWideRespRouterInFifoDepth =
+      `ifdef NOC_ROUTER_WIDE_RESP_INPUT_FIFO_DEP
+      `NOC_ROUTER_WIDE_RESP_INPUT_FIFO_DEP
+      `else NumRouterInFifoDepth `endif;
+  localparam integer unsigned NumWideRespRouterOutFifoDepth =
+      `ifdef NOC_ROUTER_WIDE_RESP_OUTPUT_FIFO_DEP
+      `NOC_ROUTER_WIDE_RESP_OUTPUT_FIFO_DEP
+      `else NumRouterOutFifoDepth `endif;
   localparam integer unsigned SpmBankIdRemap = `ifdef SPM_BANK_ID_REMAP `SPM_BANK_ID_REMAP `else 0 `endif;
   localparam integer unsigned TileIdRemap = `ifdef TILE_ID_REMAP `TILE_ID_REMAP `else 0 `endif;
   localparam integer unsigned RouterRemapGroupSize = `ifdef NOC_ROUTER_REMAP_GROUP_SIZE `NOC_ROUTER_REMAP_GROUP_SIZE `else 2 `endif;
+  // Wide-plane channel remapping, independent of the narrow plane's
+  // NocRouterRemapping. Bit 0 rotates the RO request class, bit 1 the RW
+  // response class; the other two classes do not alias and are never remapped.
+  // config/config.mk documents the lever, hardware/Makefile validates the group
+  // sizes against the class counts and the inter-group ports per tile.
+  localparam integer unsigned WideRouterRemapping =
+      `ifdef NOC_WIDE_ROUTER_REMAPPING `NOC_WIDE_ROUTER_REMAPPING `else 0 `endif;
+  localparam integer unsigned WideRoReqRemapGroupSize =
+      `ifdef NOC_WIDE_RO_REQ_REMAP_GROUP_SIZE
+      `NOC_WIDE_RO_REQ_REMAP_GROUP_SIZE
+      `else 2 `endif;
+  localparam integer unsigned WideRwRespRemapGroupSize =
+      `ifdef NOC_WIDE_RW_RESP_REMAP_GROUP_SIZE
+      `NOC_WIDE_RW_RESP_REMAP_GROUP_SIZE
+      `else 2 `endif;
 
   // FlooNoC group id types for XY routing
   typedef logic [idx_width(NumX)-1:0] group_x_id_t;

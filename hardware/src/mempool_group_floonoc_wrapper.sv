@@ -838,8 +838,8 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .NumRoutes        (mempool_pkg::NumDirections                         ),
         .NumVirtChannels  (1                                                  ),
         .flit_t           (floo_tcdm_narrow_ro_req_t                                 ),
-        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .InFifoDepth      (mempool_pkg::NumNarrowReqRouterInFifoDepth                  ), // Input buffer depth
+        .OutFifoDepth     (mempool_pkg::NumNarrowReqRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (IdTable                                            ),
         .VcImpl           (VcPreemptValid                                     ), // suppress StableValid warning
         .id_t             (routing_table_pkg::routing_rule_addr_t             ),
@@ -867,8 +867,8 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .NumRoutes        (mempool_pkg::NumDirections                         ),
         .NumVirtChannels  (1                                                  ),
         .flit_t           (floo_tcdm_narrow_ro_req_t                                 ),
-        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .InFifoDepth      (mempool_pkg::NumNarrowReqRouterInFifoDepth                  ), // Input buffer depth
+        .OutFifoDepth     (mempool_pkg::NumNarrowReqRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (XYRouting                                          ),
         .VcImpl           (VcPreemptValid                                     ), // suppress StableValid warning
         .id_t             (group_xy_id_t                                      ),
@@ -904,8 +904,8 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .NumRoutes        (mempool_pkg::NumDirections                         ),
         .NumVirtChannels  (1                                                  ),
         .flit_t           (floo_tcdm_narrow_rw_req_t                               ),
-        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .InFifoDepth      (mempool_pkg::NumNarrowReqRouterInFifoDepth                  ), // Input buffer depth
+        .OutFifoDepth     (mempool_pkg::NumNarrowReqRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (IdTable                                            ),
         .VcImpl           (VcPreemptValid                                     ), // suppress StableValid warning
         .id_t             (routing_table_pkg::routing_rule_addr_t             ),
@@ -933,8 +933,8 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .NumRoutes        (mempool_pkg::NumDirections                         ),
         .NumVirtChannels  (1                                                  ),
         .flit_t           (floo_tcdm_narrow_rw_req_t                               ),
-        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .InFifoDepth      (mempool_pkg::NumNarrowReqRouterInFifoDepth                  ), // Input buffer depth
+        .OutFifoDepth     (mempool_pkg::NumNarrowReqRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (XYRouting                                          ),
         .VcImpl           (VcPreemptValid                                     ), // suppress StableValid warning
         .id_t             (group_xy_id_t                                      ),
@@ -969,8 +969,8 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .NumRoutes        (mempool_pkg::NumDirections                         ),
         .NumVirtChannels  (1                                                  ),
         .flit_t           (floo_tcdm_narrow_rw_resp_t                                   ),
-        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .InFifoDepth      (mempool_pkg::NumNarrowRespRouterInFifoDepth                  ), // Input buffer depth
+        .OutFifoDepth     (mempool_pkg::NumNarrowRespRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (IdTable                                            ),
         .VcImpl           (VcPreemptValid                                     ), // suppress StableValid warning
         .id_t             (routing_table_pkg::routing_rule_addr_t             ),
@@ -998,8 +998,8 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .NumRoutes        (mempool_pkg::NumDirections                         ),
         .NumVirtChannels  (1                                                  ),
         .flit_t           (floo_tcdm_narrow_rw_resp_t                                   ),
-        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .InFifoDepth      (mempool_pkg::NumNarrowRespRouterInFifoDepth                  ), // Input buffer depth
+        .OutFifoDepth     (mempool_pkg::NumNarrowRespRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (XYRouting                                          ),
         .VcImpl           (VcPreemptValid                                     ), // suppress StableValid warning
         .id_t             (group_xy_id_t                                      ),
@@ -1046,6 +1046,36 @@ end : gen_router_router_i
   // The group concentrates and dispatches raw tile streams. This wrapper maps
   // those streams to FlooNoC flits and instantiates one router per group channel.
 
+  // floo_remapper with Interleaved=1 puts channel c in remap group c % NumGroup,
+  // so a rotation preserves `channel % NumGroup`. The endpoint crossbars in
+  // mempool_group.sv recover a tile's logical inter-group port with
+  // `channel % ports` (gen_wide_slave_req_sel / gen_wide_master_resp_sel), which
+  // the rotation therefore preserves only when ports divides NumGroup. Violate
+  // it and a response returns on a port whose requester never issued the
+  // request: no X, no hang, no assertion downstream. hardware/Makefile checks
+  // the same thing at build configuration. Both checks live in generate blocks
+  // so the divisions are only elaborated when the class is actually remapped.
+  if (WideRouterRemapping[0]) begin : gen_wide_ro_req_remap_assert
+    // pragma translate_off
+    initial
+      assert ((NumWideRoReqChannelsPerGroup / WideRoReqRemapGroupSize)
+              % NumWideInterGroupPortsPerTile == 0)
+        else $fatal(1, "[mempool_group_floonoc_wrapper] Wide RO request remap groups (%0d) must be a multiple of the %0d inter-group ports per tile, so the rotation stays inside a per-port channel batch.",
+            NumWideRoReqChannelsPerGroup / WideRoReqRemapGroupSize,
+            NumWideInterGroupPortsPerTile);
+    // pragma translate_on
+  end
+  if (WideRouterRemapping[1]) begin : gen_wide_rw_resp_remap_assert
+    // pragma translate_off
+    initial
+      assert ((NumWideRwRespChannelsPerGroup / WideRwRespRemapGroupSize)
+              % NumWideInterGroupPortsPerTile == 0)
+        else $fatal(1, "[mempool_group_floonoc_wrapper] Wide RW response remap groups (%0d) must be a multiple of the %0d inter-group ports per tile, so the rotation stays inside a per-port channel batch.",
+            NumWideRwRespChannelsPerGroup / WideRwRespRemapGroupSize,
+            NumWideInterGroupPortsPerTile);
+    // pragma translate_on
+  end
+
   // ======================= RO request class =======================
   `ifdef USE_RO_WIDE_REQ_CHANNEL
   floo_tcdm_wide_ro_req_t [NumWideRoReqChannelsPerGroup-1:0]
@@ -1061,9 +1091,19 @@ end : gen_router_router_i
   logic [NumWideRoReqChannelsPerGroup-1:0][West:North]
       floo_tcdm_wide_ro_req_valid_in_trans, floo_tcdm_wide_ro_req_ready_out_trans;
 
+  // Optional rotation between the group concentrator and the boundary. The
+  // concentrator binds a tile to a channel with `i % N`, which is static and, at
+  // N above the tile-port count, leaves the upper channels unreachable; rotating
+  // the binding once per cycle fixes both. Safe because responses route on the
+  // header's src_tile_id / src_id, never on the channel the request took.
+  floo_tcdm_wide_ro_req_t [NumWideRoReqChannelsPerGroup-1:0]
+      floo_tcdm_wide_ro_req_to_remapper;
+  logic [NumWideRoReqChannelsPerGroup-1:0]
+      floo_tcdm_wide_ro_req_to_remapper_valid, floo_tcdm_wide_ro_req_to_remapper_ready;
+
   for (genvar k = 0; k < NumWideRoReqChannelsPerGroup; k++) begin : gen_wro_packet_k
     localparam int unsigned ReqIdx = k;
-    assign floo_tcdm_wide_ro_req_to_router[k] = '{
+    assign floo_tcdm_wide_ro_req_to_remapper[k] = '{
       hdr: '{
         meta_id:       tcdm_wide_master_req[ReqIdx].wdata.meta_id,
         core_id:       tcdm_wide_master_req[ReqIdx].wdata.core_id,
@@ -1075,8 +1115,8 @@ end : gen_router_router_i
         collective_op: 1'b0
       }
     };
-    assign floo_tcdm_wide_ro_req_to_router_valid[k]       = tcdm_wide_master_req_valid[ReqIdx];
-    assign tcdm_wide_master_req_ready[ReqIdx] = floo_tcdm_wide_ro_req_to_router_ready[k];
+    assign floo_tcdm_wide_ro_req_to_remapper_valid[k] = tcdm_wide_master_req_valid[ReqIdx];
+    assign tcdm_wide_master_req_ready[ReqIdx] = floo_tcdm_wide_ro_req_to_remapper_ready[k];
 
     assign tcdm_wide_slave_req[ReqIdx] = '{
       wdata: '{
@@ -1095,6 +1135,31 @@ end : gen_router_router_i
     assign tcdm_wide_slave_req_valid[ReqIdx] = floo_tcdm_wide_ro_req_from_router_valid[k];
     assign floo_tcdm_wide_ro_req_from_router_ready[k]           = tcdm_wide_slave_req_ready[ReqIdx];
   end : gen_wro_packet_k
+
+  if (WideRouterRemapping[0]) begin : gen_wide_ro_req_remapping
+    floo_remapper #(
+      .NumInp     (NumWideRoReqChannelsPerGroup),
+      .NumOut     (NumWideRoReqChannelsPerGroup),
+      .payload_t  (floo_tcdm_wide_ro_req_t     ),
+      .GroupSize  (WideRoReqRemapGroupSize     ),
+      .Interleaved(1'b1                        )
+    ) i_floo_tcdm_wide_ro_req_remapper (
+      .clk_i      (clk_i                                  ),
+      .rst_ni     (rst_ni                                 ),
+      .inp_data_i (floo_tcdm_wide_ro_req_to_remapper      ),
+      .inp_valid_i(floo_tcdm_wide_ro_req_to_remapper_valid),
+      .inp_ready_o(floo_tcdm_wide_ro_req_to_remapper_ready),
+      .oup_data_o (floo_tcdm_wide_ro_req_to_router        ),
+      .oup_valid_o(floo_tcdm_wide_ro_req_to_router_valid  ),
+      .oup_ready_i(floo_tcdm_wide_ro_req_to_router_ready  )
+    );
+  end else begin : gen_wide_ro_req_remapping_bypass
+    assign floo_tcdm_wide_ro_req_to_router = floo_tcdm_wide_ro_req_to_remapper;
+    assign floo_tcdm_wide_ro_req_to_router_valid =
+        floo_tcdm_wide_ro_req_to_remapper_valid;
+    assign floo_tcdm_wide_ro_req_to_remapper_ready =
+        floo_tcdm_wide_ro_req_to_router_ready;
+  end
 
   for (genvar i = North; i <= West; i++) begin : gen_wro_bundle_i
     for (genvar k = 0; k < NumWideRoReqChannelsPerGroup; k++) begin : gen_wro_bundle_k
@@ -1119,8 +1184,8 @@ end : gen_router_router_i
         .NumRoutes       (mempool_pkg::NumDirections                         ),
         .NumVirtChannels (1                                                  ),
         .flit_t          (floo_tcdm_wide_ro_req_t                            ),
-        .InFifoDepth     (mempool_pkg::NumRouterInFifoDepth                  ),
-        .OutFifoDepth    (mempool_pkg::NumRouterOutFifoDepth                 ),
+        .InFifoDepth     (mempool_pkg::NumWideReqRouterInFifoDepth                  ),
+        .OutFifoDepth    (mempool_pkg::NumWideReqRouterOutFifoDepth                 ),
         .RouteAlgo       (IdTable                                            ),
         .VcImpl          (VcPreemptValid                                     ),
         .id_t            (routing_table_pkg::routing_rule_addr_t             ),
@@ -1148,8 +1213,8 @@ end : gen_router_router_i
         .NumRoutes       (mempool_pkg::NumDirections        ),
         .NumVirtChannels (1                                 ),
         .flit_t          (floo_tcdm_wide_ro_req_t           ),
-        .InFifoDepth     (mempool_pkg::NumRouterInFifoDepth ),
-        .OutFifoDepth    (mempool_pkg::NumRouterOutFifoDepth),
+        .InFifoDepth     (mempool_pkg::NumWideReqRouterInFifoDepth ),
+        .OutFifoDepth    (mempool_pkg::NumWideReqRouterOutFifoDepth),
         .RouteAlgo       (XYRouting                         ),
         .VcImpl          (VcPreemptValid                    ),
         .id_t            (group_xy_id_t                     ),
@@ -1254,8 +1319,8 @@ end : gen_router_router_i
         .NumRoutes       (mempool_pkg::NumDirections                         ),
         .NumVirtChannels (1                                                  ),
         .flit_t          (floo_tcdm_wide_rw_req_t                            ),
-        .InFifoDepth     (mempool_pkg::NumRouterInFifoDepth                  ),
-        .OutFifoDepth    (mempool_pkg::NumRouterOutFifoDepth                 ),
+        .InFifoDepth     (mempool_pkg::NumWideReqRouterInFifoDepth                  ),
+        .OutFifoDepth    (mempool_pkg::NumWideReqRouterOutFifoDepth                 ),
         .RouteAlgo       (IdTable                                            ),
         .VcImpl          (VcPreemptValid                                     ),
         .id_t            (routing_table_pkg::routing_rule_addr_t             ),
@@ -1283,8 +1348,8 @@ end : gen_router_router_i
         .NumRoutes       (mempool_pkg::NumDirections        ),
         .NumVirtChannels (1                                 ),
         .flit_t          (floo_tcdm_wide_rw_req_t           ),
-        .InFifoDepth     (mempool_pkg::NumRouterInFifoDepth ),
-        .OutFifoDepth    (mempool_pkg::NumRouterOutFifoDepth),
+        .InFifoDepth     (mempool_pkg::NumWideReqRouterInFifoDepth ),
+        .OutFifoDepth    (mempool_pkg::NumWideReqRouterOutFifoDepth),
         .RouteAlgo       (XYRouting                         ),
         .VcImpl          (VcPreemptValid                    ),
         .id_t            (group_xy_id_t                     ),
@@ -1324,9 +1389,17 @@ end : gen_router_router_i
   logic [NumWideRwRespChannelsPerGroup-1:0][West:North]
       floo_tcdm_wide_rd_resp_valid_in_trans, floo_tcdm_wide_rd_resp_ready_out_trans;
 
+  // Same rotation as the RO request class, on the response's outgoing edge. The
+  // read payload comes back on this class, so remapping only the request moves
+  // the limit instead of removing it.
+  floo_tcdm_wide_rd_resp_t [NumWideRwRespChannelsPerGroup-1:0]
+      floo_tcdm_wide_rd_resp_to_remapper;
+  logic [NumWideRwRespChannelsPerGroup-1:0]
+      floo_tcdm_wide_rd_resp_to_remapper_valid, floo_tcdm_wide_rd_resp_to_remapper_ready;
+
   for (genvar k = 0; k < NumWideRwRespChannelsPerGroup; k++) begin : gen_wrw_resp_packet_k
     localparam int unsigned RespIdx = k;
-    assign floo_tcdm_wide_rd_resp_to_router[k] = '{
+    assign floo_tcdm_wide_rd_resp_to_remapper[k] = '{
       payload: '{data: tcdm_wide_slave_resp[RespIdx].rdata.data},
       hdr: '{
         meta_id:       tcdm_wide_slave_resp[RespIdx].rdata.meta_id,
@@ -1338,8 +1411,8 @@ end : gen_router_router_i
         collective_op: 1'b0
       }
     };
-    assign floo_tcdm_wide_rd_resp_to_router_valid[k] = tcdm_wide_slave_resp_valid[RespIdx];
-    assign tcdm_wide_slave_resp_ready[RespIdx] = floo_tcdm_wide_rd_resp_to_router_ready[k];
+    assign floo_tcdm_wide_rd_resp_to_remapper_valid[k] = tcdm_wide_slave_resp_valid[RespIdx];
+    assign tcdm_wide_slave_resp_ready[RespIdx] = floo_tcdm_wide_rd_resp_to_remapper_ready[k];
 
     assign tcdm_wide_master_resp[RespIdx] = '{
       rdata: '{
@@ -1353,6 +1426,31 @@ end : gen_router_router_i
     assign tcdm_wide_master_resp_valid[RespIdx] = floo_tcdm_wide_rd_resp_from_router_valid[k];
     assign floo_tcdm_wide_rd_resp_from_router_ready[k] = tcdm_wide_master_resp_ready[RespIdx];
   end : gen_wrw_resp_packet_k
+
+  if (WideRouterRemapping[1]) begin : gen_wide_rw_resp_remapping
+    floo_remapper #(
+      .NumInp     (NumWideRwRespChannelsPerGroup),
+      .NumOut     (NumWideRwRespChannelsPerGroup),
+      .payload_t  (floo_tcdm_wide_rd_resp_t     ),
+      .GroupSize  (WideRwRespRemapGroupSize     ),
+      .Interleaved(1'b1                         )
+    ) i_floo_tcdm_wide_rw_resp_remapper (
+      .clk_i      (clk_i                                   ),
+      .rst_ni     (rst_ni                                  ),
+      .inp_data_i (floo_tcdm_wide_rd_resp_to_remapper      ),
+      .inp_valid_i(floo_tcdm_wide_rd_resp_to_remapper_valid),
+      .inp_ready_o(floo_tcdm_wide_rd_resp_to_remapper_ready),
+      .oup_data_o (floo_tcdm_wide_rd_resp_to_router        ),
+      .oup_valid_o(floo_tcdm_wide_rd_resp_to_router_valid  ),
+      .oup_ready_i(floo_tcdm_wide_rd_resp_to_router_ready  )
+    );
+  end else begin : gen_wide_rw_resp_remapping_bypass
+    assign floo_tcdm_wide_rd_resp_to_router = floo_tcdm_wide_rd_resp_to_remapper;
+    assign floo_tcdm_wide_rd_resp_to_router_valid =
+        floo_tcdm_wide_rd_resp_to_remapper_valid;
+    assign floo_tcdm_wide_rd_resp_to_remapper_ready =
+        floo_tcdm_wide_rd_resp_to_router_ready;
+  end
 
   for (genvar i = North; i <= West; i++) begin : gen_wrw_resp_bundle_i
     for (genvar k = 0; k < NumWideRwRespChannelsPerGroup; k++) begin : gen_wrw_resp_bundle_k
@@ -1377,8 +1475,8 @@ end : gen_router_router_i
         .NumRoutes       (mempool_pkg::NumDirections                         ),
         .NumVirtChannels (1                                                  ),
         .flit_t          (floo_tcdm_wide_rd_resp_t                           ),
-        .InFifoDepth     (mempool_pkg::NumRouterInFifoDepth                  ),
-        .OutFifoDepth    (mempool_pkg::NumRouterOutFifoDepth                 ),
+        .InFifoDepth     (mempool_pkg::NumWideRespRouterInFifoDepth                  ),
+        .OutFifoDepth    (mempool_pkg::NumWideRespRouterOutFifoDepth                 ),
         .RouteAlgo       (IdTable                                            ),
         .VcImpl          (VcPreemptValid                                     ),
         .id_t            (routing_table_pkg::routing_rule_addr_t             ),
@@ -1406,8 +1504,8 @@ end : gen_router_router_i
         .NumRoutes       (mempool_pkg::NumDirections        ),
         .NumVirtChannels (1                                 ),
         .flit_t          (floo_tcdm_wide_rd_resp_t          ),
-        .InFifoDepth     (mempool_pkg::NumRouterInFifoDepth ),
-        .OutFifoDepth    (mempool_pkg::NumRouterOutFifoDepth),
+        .InFifoDepth     (mempool_pkg::NumWideRespRouterInFifoDepth ),
+        .OutFifoDepth    (mempool_pkg::NumWideRespRouterOutFifoDepth),
         .RouteAlgo       (XYRouting                         ),
         .VcImpl          (VcPreemptValid                    ),
         .id_t            (group_xy_id_t                     ),
@@ -1500,8 +1598,8 @@ end : gen_router_router_i
         .NumRoutes       (mempool_pkg::NumDirections                         ),
         .NumVirtChannels (1                                                  ),
         .flit_t          (floo_tcdm_wide_wr_resp_t                           ),
-        .InFifoDepth     (mempool_pkg::NumRouterInFifoDepth                  ),
-        .OutFifoDepth    (mempool_pkg::NumRouterOutFifoDepth                 ),
+        .InFifoDepth     (mempool_pkg::NumWideRespRouterInFifoDepth                  ),
+        .OutFifoDepth    (mempool_pkg::NumWideRespRouterOutFifoDepth                 ),
         .RouteAlgo       (IdTable                                            ),
         .VcImpl          (VcPreemptValid                                     ),
         .id_t            (routing_table_pkg::routing_rule_addr_t             ),
@@ -1529,8 +1627,8 @@ end : gen_router_router_i
         .NumRoutes       (mempool_pkg::NumDirections        ),
         .NumVirtChannels (1                                 ),
         .flit_t          (floo_tcdm_wide_wr_resp_t          ),
-        .InFifoDepth     (mempool_pkg::NumRouterInFifoDepth ),
-        .OutFifoDepth    (mempool_pkg::NumRouterOutFifoDepth),
+        .InFifoDepth     (mempool_pkg::NumWideRespRouterInFifoDepth ),
+        .OutFifoDepth    (mempool_pkg::NumWideRespRouterOutFifoDepth),
         .RouteAlgo       (XYRouting                         ),
         .VcImpl          (VcPreemptValid                    ),
         .id_t            (group_xy_id_t                     ),

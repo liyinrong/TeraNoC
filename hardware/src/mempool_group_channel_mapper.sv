@@ -69,10 +69,14 @@ module mempool_group_channel_mapper
       else $fatal(1, "[mempool_group_channel_mapper] At least one input is required.");
     assert (NumOut > 0)
       else $fatal(1, "[mempool_group_channel_mapper] At least one output is required.");
-    assert (NumClass0 <= NumInp)
-      else $fatal(1, "[mempool_group_channel_mapper] Class 0 outputs exceed inputs.");
-    assert (NumClass1 <= NumInp)
-      else $fatal(1, "[mempool_group_channel_mapper] Class 1 outputs exceed inputs.");
+    // A class WIDER than the input count is legal and deliberate. The select
+    // below is `i % NumClass`, so with NumClass > NumInp the upper channels are
+    // never picked here -- they become reachable only once a downstream
+    // floo_remapper rotates the binding (noc_wide_router_remapping). At most
+    // NumInp channels can still be busy in any one cycle; the extra channels buy
+    // independent meshes, not injection bandwidth. The caller owns that pairing:
+    // hardware/Makefile rejects an over-wide class whose remapper is off, since
+    // without rotation those channels are provably dead silicon.
   end
   // pragma translate_on
 

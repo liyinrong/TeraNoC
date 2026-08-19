@@ -563,12 +563,23 @@ module mempool_group
   end
 
   initial begin : p_wide_group_channel_count
-    assert (NumWideRoReqChannelsPerGroup <= NumWideReqPortsPerGroup)
-      else $fatal(1, "[mempool_group] Wide RO request channels exceed tile ports.");
+    // A class may be WIDER than the aggregate tile port count, but only when its
+    // remapper rotates the channel binding: the mapper picks with `i % class`
+    // over i < ports, so without rotation the channels at and above `ports` are
+    // never selected and are dead silicon. Only the RO request and RW response
+    // classes have a remapper, so the other two stay hard-capped.
+    if (!WideRouterRemapping[0])
+      assert (NumWideRoReqChannelsPerGroup <= NumWideReqPortsPerGroup)
+        else $fatal(1, "[mempool_group] Wide RO request channels (%0d) exceed the %0d tile ports with no remapper: channels %0d and above are unreachable. Set noc_wide_router_remapping bit 0.",
+            NumWideRoReqChannelsPerGroup, NumWideReqPortsPerGroup,
+            NumWideReqPortsPerGroup);
     assert (NumWideRwReqChannelsPerGroup <= NumWideReqPortsPerGroup)
       else $fatal(1, "[mempool_group] Wide RW request channels exceed tile ports.");
-    assert (NumWideRwRespChannelsPerGroup <= NumWideRespPortsPerGroup)
-      else $fatal(1, "[mempool_group] Wide RW response channels exceed tile ports.");
+    if (!WideRouterRemapping[1])
+      assert (NumWideRwRespChannelsPerGroup <= NumWideRespPortsPerGroup)
+        else $fatal(1, "[mempool_group] Wide RW response channels (%0d) exceed the %0d tile ports with no remapper: channels %0d and above are unreachable. Set noc_wide_router_remapping bit 1.",
+            NumWideRwRespChannelsPerGroup, NumWideRespPortsPerGroup,
+            NumWideRespPortsPerGroup);
     assert (NumWideWoRespChannelsPerGroup <= NumWideRespPortsPerGroup)
       else $fatal(1, "[mempool_group] Wide WO response channels exceed tile ports.");
     // The inter-group ports are batched by port id: port r of every tile shares

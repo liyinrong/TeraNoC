@@ -265,6 +265,9 @@ vlog_defs += -DNOC_RESP_WIDE_RW_CHANNEL_NUM=$(noc_resp_wide_rw_channel_num)
 vlog_defs += -DNOC_RESP_WIDE_WO_CHANNEL_NUM=$(noc_resp_wide_wo_channel_num)
 vlog_defs += -DNUM_INTRA_GROUP_PORTS_PER_TILE=$(num_intra_group_ports_per_tile)
 vlog_defs += -DNUM_INTER_GROUP_PORTS_PER_TILE=$(num_inter_group_ports_per_tile)
+vlog_defs += -DNOC_WIDE_ROUTER_REMAPPING=$(noc_wide_router_remapping)
+vlog_defs += -DNOC_WIDE_RO_REQ_REMAP_GROUP_SIZE=$(noc_wide_ro_req_remap_group_size)
+vlog_defs += -DNOC_WIDE_RW_RESP_REMAP_GROUP_SIZE=$(noc_wide_rw_resp_remap_group_size)
 ifneq (0, $(noc_req_wide_ro_channel_num))
 	vlog_defs += -DUSE_RO_WIDE_REQ_CHANNEL
 endif
@@ -280,6 +283,9 @@ $(error noc_resp_wide_rw_channel_num is set but the wide plane is off: set noc_r
 endif
 ifneq (0, $(noc_resp_wide_wo_channel_num))
 $(error noc_resp_wide_wo_channel_num is set but the wide plane is off: set noc_req_wide_rw_channel_num >= 1)
+endif
+ifneq (0, $(strip $(noc_wide_router_remapping)))
+$(error noc_wide_router_remapping is set but the wide plane is off: set noc_req_wide_rw_channel_num >= 1)
 endif
 else
 	vlog_defs += -DUSE_WIDE_TCDM_PLANE
@@ -316,25 +322,85 @@ wide_tcdm_ports_per_group := $(shell printf '%s' \
 # RO/RW/WO classes are mutually exclusive for each logical port. Each physical
 # class may use up to the aggregate generic tile-port count; their sum may be
 # larger (for example, four RO plus two RW channels fed by four tile ports).
+#
+# A class may go BEYOND that count, but only if its remapper is on. The group
+# concentrator selects with `i % class_count` over i < ports, so an unrotated
+# class never selects the channels at or above `ports`: the model measured an
+# 8-RO mix bit-identical to a 4-RO one with remapping off. Rotating the binding
+# makes them reachable (never more than `ports` busy at once -- the extra
+# channels buy independent meshes, not injection bandwidth). RW request and WO
+# response have no remapper, so they stay hard-capped.
 wide_tcdm_ro_req_channels_over_limit := $(shell printf '%s' \
-	$$(( $(noc_req_wide_ro_channel_num) > $(wide_tcdm_ports_per_group) )))
+	$$(( $(noc_req_wide_ro_channel_num) > $(wide_tcdm_ports_per_group) && \
+	     ($(noc_wide_router_remapping) & 1) == 0 )))
 wide_tcdm_rw_req_channels_over_limit := $(shell printf '%s' \
 	$$(( $(noc_req_wide_rw_channel_num) > $(wide_tcdm_ports_per_group) )))
 wide_tcdm_rw_resp_channels_over_limit := $(shell printf '%s' \
-	$$(( $(noc_resp_wide_rw_channel_num) > $(wide_tcdm_ports_per_group) )))
+	$$(( $(noc_resp_wide_rw_channel_num) > $(wide_tcdm_ports_per_group) && \
+	     ($(noc_wide_router_remapping) & 2) == 0 )))
 wide_tcdm_wo_resp_channels_over_limit := $(shell printf '%s' \
 	$$(( $(noc_resp_wide_wo_channel_num) > $(wide_tcdm_ports_per_group) )))
 ifeq (1,$(strip $(wide_tcdm_ro_req_channels_over_limit)))
-$(error Wide TCDM RO request channels exceed aggregate inter-group request ports)
+$(error noc_req_wide_ro_channel_num=$(noc_req_wide_ro_channel_num) exceeds the $(wide_tcdm_ports_per_group) aggregate inter-group request ports with no remapper: channels $(wide_tcdm_ports_per_group) and above are unreachable. Set bit 0 of noc_wide_router_remapping, or lower the count)
 endif
 ifeq (1,$(strip $(wide_tcdm_rw_req_channels_over_limit)))
 $(error Wide TCDM RW request channels exceed aggregate inter-group request ports)
 endif
 ifeq (1,$(strip $(wide_tcdm_rw_resp_channels_over_limit)))
-$(error Wide TCDM RW response channels exceed aggregate inter-group response ports)
+$(error noc_resp_wide_rw_channel_num=$(noc_resp_wide_rw_channel_num) exceeds the $(wide_tcdm_ports_per_group) aggregate inter-group response ports with no remapper: channels $(wide_tcdm_ports_per_group) and above are unreachable. Set bit 1 of noc_wide_router_remapping, or lower the count)
 endif
 ifeq (1,$(strip $(wide_tcdm_wo_resp_channels_over_limit)))
 $(error Wide TCDM WO response channels exceed aggregate inter-group response ports)
+endif
+# --- Wide channel remapping (config/config.mk noc_wide_router_remapping) ---
+# floo_remapper is a perfect-shuffle permutation over GroupSize channels rotated
+# once per cycle. Two constraints on GroupSize, both hard:
+#   * a power of two >= 2. GroupSize=1 makes $clog2(GroupSize)=0 and the select
+#     type `logic [SelWidth-1:0]` degenerates to [-1:0].
+#   * it must divide the class count, which floo_remapper itself asserts.
+# And one constraint the remapper cannot see. With Interleaved=1 the remap group
+# g holds the channels congruent to g modulo NumGroup=class/GroupSize, so a
+# rotation preserves `channel % NumGroup`. The endpoint crossbars in
+# mempool_group.sv recover a tile's logical inter-group port with
+# `channel % ports` (gen_wide_slave_req_sel / gen_wide_master_resp_sel), so the
+# permutation is only port-preserving when ports divides NumGroup. Violate it
+# and a response returns on a port whose requester never issued the request --
+# the same silent mis-route p_wide_group_channel_count guards, with no X, no
+# hang and no assertion.
+wide_ro_req_remapped := $(shell printf '%s' \
+	$$(( ($(noc_wide_router_remapping) & 1) != 0 )))
+wide_rw_resp_remapped := $(shell printf '%s' \
+	$$(( ($(noc_wide_router_remapping) & 2) != 0 )))
+ifeq (1,$(strip $(wide_ro_req_remapped)))
+ifeq (0,$(strip $(noc_req_wide_ro_channel_num)))
+$(error noc_wide_router_remapping=$(noc_wide_router_remapping) remaps the wide RO request class, but noc_req_wide_ro_channel_num=0 disables it)
+endif
+wide_ro_req_remap_bad := $(shell printf '%s' \
+	$$(( $(noc_wide_ro_req_remap_group_size) < 2 || \
+	     ($(noc_wide_ro_req_remap_group_size) & \
+	      ($(noc_wide_ro_req_remap_group_size) - 1)) != 0 || \
+	     $(noc_req_wide_ro_channel_num) % \
+	      $(noc_wide_ro_req_remap_group_size) != 0 || \
+	     ($(noc_req_wide_ro_channel_num) / \
+	      $(noc_wide_ro_req_remap_group_size)) % \
+	      $(num_inter_group_ports_per_tile) != 0 )))
+ifeq (1,$(strip $(wide_ro_req_remap_bad)))
+$(error noc_wide_ro_req_remap_group_size=$(noc_wide_ro_req_remap_group_size) is invalid for noc_req_wide_ro_channel_num=$(noc_req_wide_ro_channel_num) at num_inter_group_ports_per_tile=$(num_inter_group_ports_per_tile): it must be a power of two >= 2 that divides the class count, and the resulting remap-group count must be a multiple of the ports per tile)
+endif
+endif
+ifeq (1,$(strip $(wide_rw_resp_remapped)))
+wide_rw_resp_remap_bad := $(shell printf '%s' \
+	$$(( $(noc_wide_rw_resp_remap_group_size) < 2 || \
+	     ($(noc_wide_rw_resp_remap_group_size) & \
+	      ($(noc_wide_rw_resp_remap_group_size) - 1)) != 0 || \
+	     $(noc_resp_wide_rw_channel_num) % \
+	      $(noc_wide_rw_resp_remap_group_size) != 0 || \
+	     ($(noc_resp_wide_rw_channel_num) / \
+	      $(noc_wide_rw_resp_remap_group_size)) % \
+	      $(num_inter_group_ports_per_tile) != 0 )))
+ifeq (1,$(strip $(wide_rw_resp_remap_bad)))
+$(error noc_wide_rw_resp_remap_group_size=$(noc_wide_rw_resp_remap_group_size) is invalid for noc_resp_wide_rw_channel_num=$(noc_resp_wide_rw_channel_num) at num_inter_group_ports_per_tile=$(num_inter_group_ports_per_tile): it must be a power of two >= 2 that divides the class count, and the resulting remap-group count must be a multiple of the ports per tile)
+endif
 endif
 endif
 # --------------------------
@@ -343,6 +409,17 @@ endif
 vlog_defs += -DNOC_ROUTER_INPUT_FIFO_DEP=$(noc_router_input_fifo_dep)
 vlog_defs += -DNOC_ROUTER_OUTPUT_FIFO_DEP=$(noc_router_output_fifo_dep)
 vlog_defs += -DNOC_ROUTER_REMAP_GROUP_SIZE=$(noc_router_remap_group_size)
+# Per-class overrides of the two globals above, each defaulting to its global in
+# config/config.mk. The four classes match the stage-1 DSE model's four
+# independent depths (l1_noc_{narrow,wide}_{req,resp}_fifo_depth).
+vlog_defs += -DNOC_ROUTER_NARROW_REQ_INPUT_FIFO_DEP=$(noc_router_narrow_req_input_fifo_dep)
+vlog_defs += -DNOC_ROUTER_NARROW_REQ_OUTPUT_FIFO_DEP=$(noc_router_narrow_req_output_fifo_dep)
+vlog_defs += -DNOC_ROUTER_NARROW_RESP_INPUT_FIFO_DEP=$(noc_router_narrow_resp_input_fifo_dep)
+vlog_defs += -DNOC_ROUTER_NARROW_RESP_OUTPUT_FIFO_DEP=$(noc_router_narrow_resp_output_fifo_dep)
+vlog_defs += -DNOC_ROUTER_WIDE_REQ_INPUT_FIFO_DEP=$(noc_router_wide_req_input_fifo_dep)
+vlog_defs += -DNOC_ROUTER_WIDE_REQ_OUTPUT_FIFO_DEP=$(noc_router_wide_req_output_fifo_dep)
+vlog_defs += -DNOC_ROUTER_WIDE_RESP_INPUT_FIFO_DEP=$(noc_router_wide_resp_input_fifo_dep)
+vlog_defs += -DNOC_ROUTER_WIDE_RESP_OUTPUT_FIFO_DEP=$(noc_router_wide_resp_output_fifo_dep)
 
 # ============================================================================
 # Verilator: C++ Preprocessor Defines ##
