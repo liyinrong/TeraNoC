@@ -18,7 +18,10 @@ module terapool_cluster_floonoc_wrapper
   parameter logic [31:0]  BootAddr       = 32'h0000_0000,
   // Dependant parameters. DO NOT CHANGE!
   parameter int unsigned  NumDMAReq      = NumGroups * NumDmasPerGroup,
-  parameter int unsigned  NumAXIMasters  = NumGroups * NumAXIMastersPerGroup
+  // One AXI channel per L2/HBM bank, attached to the mesh perimeter. This is
+  // NOT the per-group master count: a NxN mesh offers 4N perimeter ports for
+  // N^2 groups, and the two only coincide at N=4.
+  parameter int unsigned  NumAXIMasters  = l2_bank_map_pkg::NumL2BankPorts
 ) (
   // Clock and reset
   input  logic                          clk_i,
@@ -133,13 +136,7 @@ module terapool_cluster_floonoc_wrapper
         assign floo_axi_req_in[x][y][East]  = floo_axi_req_out[x+1][y][West];
         assign floo_axi_rsp_in[x][y][East]  = floo_axi_rsp_out[x+1][y][West];
         assign floo_axi_wide_in[x][y][East] = floo_axi_wide_out[x+1][y][West];
-        // AXI West
-        assign floo_axi_req_in[x][y][West]  = floo_axi_req_i[y];
-        assign floo_axi_rsp_in[x][y][West]  = floo_axi_rsp_i[y];
-        assign floo_axi_wide_in[x][y][West] = floo_axi_wide_i[y];
-        assign floo_axi_wide_o[y]           = floo_axi_wide_out[x][y][West];
-        assign floo_axi_req_o[y]            = floo_axi_req_out[x][y][West];
-        assign floo_axi_rsp_o[y]            = floo_axi_rsp_out[x][y][West];
+        // AXI West is a perimeter chimney: driven by gen_hbm_chimney below.
 
       end else if (x == NumX-1) begin : gen_hbm_chimney_east
         // East
@@ -160,13 +157,7 @@ module terapool_cluster_floonoc_wrapper
         assign floo_axi_rsp_in[x][y][West]  = floo_axi_rsp_out[x-1][y][East];
         assign floo_axi_wide_in[x][y][West] = floo_axi_wide_out[x-1][y][East];
 
-        // AXI East
-        assign floo_axi_req_in[x][y][East]  = floo_axi_req_i[y+12];
-        assign floo_axi_rsp_in[x][y][East]  = floo_axi_rsp_i[y+12];
-        assign floo_axi_wide_in[x][y][East] = floo_axi_wide_i[y+12];
-        assign floo_axi_wide_o[y+12]        = floo_axi_wide_out[x][y][East];
-        assign floo_axi_req_o[y+12]         = floo_axi_req_out[x][y][East];
-        assign floo_axi_rsp_o[y+12]         = floo_axi_rsp_out[x][y][East];
+        // AXI East is a perimeter chimney: driven by gen_hbm_chimney below.
 
       end else begin : gen_hor_connections
         // East
@@ -203,24 +194,7 @@ module terapool_cluster_floonoc_wrapper
         assign floo_axi_rsp_in  [x][y][North] = floo_axi_rsp_out  [x][y+1][South];
         assign floo_axi_wide_in [x][y][North] = floo_axi_wide_out [x][y+1][South];
 
-        if (x < NumX/2) begin : gen_normal_chimneys
-          // AXI South
-          assign floo_axi_req_in[x][y][South]  = floo_axi_req_i[5-x];
-          assign floo_axi_rsp_in[x][y][South]  = floo_axi_rsp_i[5-x];
-          assign floo_axi_wide_in[x][y][South] = floo_axi_wide_i[5-x];
-          assign floo_axi_wide_o[5-x]          = floo_axi_wide_out[x][y][South];
-          assign floo_axi_req_o[5-x]           = floo_axi_req_out[x][y][South];
-          assign floo_axi_rsp_o[5-x]           = floo_axi_rsp_out[x][y][South];
-
-        end else begin : gen_normal_chimneys_2
-          // AXI South
-          assign floo_axi_req_in[x][y][South]  = floo_axi_req_i[x+6];
-          assign floo_axi_rsp_in[x][y][South]  = floo_axi_rsp_i[x+6];
-          assign floo_axi_wide_in[x][y][South] = floo_axi_wide_i[x+6];
-          assign floo_axi_wide_o[x+6]          = floo_axi_wide_out[x][y][South];
-          assign floo_axi_req_o[x+6]           = floo_axi_req_out[x][y][South];
-          assign floo_axi_rsp_o[x+6]           = floo_axi_rsp_out[x][y][South];
-        end
+        // AXI South is a perimeter chimney: driven by gen_hbm_chimney below.
 
       end else if (y == NumY-1) begin
         // TCDM North
@@ -241,23 +215,7 @@ module terapool_cluster_floonoc_wrapper
         assign floo_axi_rsp_in [x][y][South] = floo_axi_rsp_out [x][y-1][North];
         assign floo_axi_wide_in[x][y][South] = floo_axi_wide_out[x][y-1][North];
 
-        if (x < NumX/2) begin
-          // AXI North
-          assign floo_axi_req_in [x][y][North] = floo_axi_req_i [x+6];
-          assign floo_axi_rsp_in [x][y][North] = floo_axi_rsp_i [x+6];
-          assign floo_axi_wide_in[x][y][North] = floo_axi_wide_i[x+6];
-          assign floo_axi_wide_o [x+6]         = floo_axi_wide_out[x][y][North];
-          assign floo_axi_req_o  [x+6]         = floo_axi_req_out [x][y][North];
-          assign floo_axi_rsp_o  [x+6]         = floo_axi_rsp_out [x][y][North];
-        end else begin
-          // AXI North
-          assign floo_axi_req_in [x][y][North] = floo_axi_req_i [13-x];
-          assign floo_axi_rsp_in [x][y][North] = floo_axi_rsp_i [13-x];
-          assign floo_axi_wide_in[x][y][North] = floo_axi_wide_i[13-x];
-          assign floo_axi_wide_o [13-x]        = floo_axi_wide_out[x][y][North];
-          assign floo_axi_req_o  [13-x]        = floo_axi_req_out [x][y][North];
-          assign floo_axi_rsp_o  [13-x]        = floo_axi_rsp_out [x][y][North];
-        end
+        // AXI North is a perimeter chimney: driven by gen_hbm_chimney below.
 
       end else begin
         // North
@@ -348,9 +306,38 @@ module terapool_cluster_floonoc_wrapper
     end : gen_groups_y
   end : gen_groups_x
 
+  /************************
+   *  L2 / HBM chimneys   *
+   ************************/
+  // Every perimeter router port carries one L2/HBM channel. The bank -> port
+  // map is generated by hardware/scripts/gen_l2_bank_map.py, which minimises
+  // the mesh distance from each group to the bank holding its DMA stripe, and
+  // is checked against the connections in the floogen YAML. Driving it from a
+  // table rather than per-edge index arithmetic keeps this correct for any
+  // mesh size: iterating over banks makes it structurally impossible for two
+  // edges to claim the same channel.
+  for (genvar b = 0; b < l2_bank_map_pkg::NumL2BankPorts; b++) begin : gen_hbm_chimney
+    localparam int unsigned Bx = l2_bank_map_pkg::L2BankPortX[b];
+    localparam int unsigned By = l2_bank_map_pkg::L2BankPortY[b];
+    localparam int unsigned Bd = l2_bank_map_pkg::L2BankPortDir[b];
+
+    assign floo_axi_req_in [Bx][By][Bd] = floo_axi_req_i[b];
+    assign floo_axi_rsp_in [Bx][By][Bd] = floo_axi_rsp_i[b];
+    assign floo_axi_wide_in[Bx][By][Bd] = floo_axi_wide_i[b];
+    assign floo_axi_req_o[b]            = floo_axi_req_out [Bx][By][Bd];
+    assign floo_axi_rsp_o[b]            = floo_axi_rsp_out [Bx][By][Bd];
+    assign floo_axi_wide_o[b]           = floo_axi_wide_out[Bx][By][Bd];
+  end : gen_hbm_chimney
+
   /****************
    *  Assertions  *
    ****************/
+
+  if (l2_bank_map_pkg::NumL2BankPorts > 2*(NumX + NumY))
+    $fatal(1, "[terapool] More L2 banks than mesh perimeter ports.");
+
+  if (l2_bank_map_pkg::NumL2BankPorts != NumL2Banks)
+    $fatal(1, "[terapool] The generated L2 bank map is stale: regenerate it.");
 
   if (NumCores > 1024)
     $fatal(1, "[mempool] MemPool is currently limited to 1024 cores.");

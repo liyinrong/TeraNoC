@@ -46,7 +46,10 @@ module mempool_system
   localparam addr_t BootromBaseAddr       = 32'hA000_0000;
   localparam addr_t BootromEndAddr        = 32'hA000_FFFF;
 
-  localparam NumAXIMasters = NumGroups;
+  // One AXI channel per L2/HBM bank on the mesh perimeter -- these arrays are
+  // indexed by bank, not by group. The two counts coincide only on the 4x4
+  // mesh, where 4N perimeter ports happen to equal N^2 groups.
+  localparam NumAXIMasters = NumL2Banks;
   localparam NumAXISlaves  = 3; // control regs, bootrom and the external mst ports
   localparam NumSoCRules   = NumAXISlaves - 1;
 
@@ -113,7 +116,11 @@ module mempool_system
     floo_rsp_t  [NumAXIMasters-1:0] floo_axi_rsp_out;
     floo_wide_t [NumAXIMasters-1:0] floo_axi_wide_out;
 
-    localparam addr_t Hbm5BaseAddr = L2MemoryBaseAddr + 5*L2BankSize;
+    // The host/peripheral chimney shares a mesh port with one L2 bank -- the
+    // one on South of router [0][0]. Its bank id follows the placement (5 on
+    // the 4x4 mesh, 4 on the 8x8), so take it from the generated map.
+    localparam int unsigned HostHbmBank = l2_bank_map_pkg::HostL2Bank;
+    localparam addr_t Hbm5BaseAddr = L2MemoryBaseAddr + HostHbmBank*L2BankSize;
     localparam addr_t Hbm5EndAddr  = Hbm5BaseAddr + L2BankSize;
 
     localparam xbar_cfg_t HostFlooXbarCfg = '{
@@ -146,7 +153,7 @@ module mempool_system
     };
 
       for (genvar x = 0; x < NumAXIMasters; x++) begin : gen_cluster_axi_chimney
-        if (x == 5) begin
+        if (x == HostHbmBank) begin
           axi_tile_req_t  hbm5_periph_req_in;
           axi_tile_resp_t hbm5_periph_resp_out;
           axi_tile_req_t  remotehbm_req_out;
@@ -197,8 +204,8 @@ module mempool_system
             .axi_wide_in_rsp_o    ( remotehbm_resp_in             ),
             .axi_wide_out_req_o   ( hbm5_periph_req_in            ),
             .axi_wide_out_rsp_i   ( hbm5_periph_resp_out          ),
-            .id_i                 ( id_t'(HostHbm5Peri)           ),
-            .route_table_i        ( RoutingTables[HostHbm5Peri]   ),
+            .id_i                 ( id_t'(Hbm0 + HostHbmBank)     ),
+            .route_table_i        ( RoutingTables[Hbm0 + HostHbmBank] ),
             .floo_req_o           ( floo_axi_req_in[x]            ),
             .floo_rsp_o           ( floo_axi_rsp_in[x]            ),
             .floo_wide_o          ( floo_axi_wide_in[x]           ),
@@ -256,8 +263,8 @@ module mempool_system
             .rst_ni,
             .slv_req_i                 ( hbm5_req        ),
             .slv_resp_o                ( hbm5_resp       ),
-            .mst_req_o                 ( axi_mst_req[5]  ),
-            .mst_resp_i                ( axi_mst_resp[5] )
+            .mst_req_o                 ( axi_mst_req[HostHbmBank]  ),
+            .mst_resp_i                ( axi_mst_resp[HostHbmBank] )
           );
 
           axi_iw_converter #(

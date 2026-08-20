@@ -517,8 +517,20 @@ $(buildpath)/$(library):
 # another config's (identical) FlooNoC yml instead of duplicating the file.
 floo_noc_cfg ?= floo_noc_$(config).yml
 .PHONY: update-floogen
-update-floogen:
+update-floogen: update-l2map
 	$(MAKE) -C .. FLOO_CFG=./config/$(floo_noc_cfg) update-floonoc config=$(config)
+
+# L2/HBM bank -> mesh perimeter port map.
+# The wrapper indexes the generated package; the floogen yml decides where the
+# endpoint actually sits in the network. --check-yml fails the build if the two
+# ever disagree, because a silent disagreement misroutes every L2 access.
+.PHONY: update-l2map
+update-l2map:
+	mkdir -p $(MEMPOOL_DIR)/hardware/generated
+	$(python) $(MEMPOOL_DIR)/hardware/scripts/gen_l2_bank_map.py \
+		--n $(num_x) --banks $(l2_banks) \
+		--check-yml $(MEMPOOL_DIR)/config/$(floo_noc_cfg) \
+		-o $(MEMPOOL_DIR)/hardware/generated/l2_bank_map_pkg.sv
 
 # Compilation
 .PHONY: gen_selector
