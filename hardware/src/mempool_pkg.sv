@@ -19,7 +19,7 @@ package mempool_pkg;
   localparam integer unsigned NumGroups               = `ifdef NUM_GROUPS `NUM_GROUPS `else 0 `endif;
   localparam integer unsigned NumRMTiles              = `ifdef NUM_REDMULE_TILES `NUM_REDMULE_TILES `else 0 `endif;
   localparam integer unsigned NumRMTilesPerGroup      = NumGroups == 0 ? 0 : NumRMTiles / NumGroups;
-  localparam integer unsigned MAX_NumGroups           = 16;
+  localparam integer unsigned MAX_NumGroups           = 64;
   localparam integer unsigned RemoteGroupLatencyCycle = `ifdef REMOTE_GROUP_LATENCY_CYCLES `REMOTE_GROUP_LATENCY_CYCLES `else 7 `endif;
   localparam integer unsigned NumTiles                = NumCores / NumCoresPerTile;
   localparam integer unsigned NumTilesPerGroup        = NumTiles / NumGroups;

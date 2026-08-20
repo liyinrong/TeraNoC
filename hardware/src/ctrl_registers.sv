@@ -108,6 +108,10 @@ module ctrl_registers
 
   logic [NumCores-1:0] wake_up_mask_d, wake_up_mask_q;
 
+  // The group wake-up register holds one bit per group, so past DataWidth
+  // groups only the low ones are individually addressable.
+  localparam integer unsigned NumGroupMaskBits = NumGroups < DataWidth ? NumGroups : DataWidth;
+
   // Delay the write-enable signal by one cycle so it arrives
   // simultaneously with the registered values
   logic wake_up_pulse;
@@ -153,14 +157,16 @@ module ctrl_registers
         end
       end
     end
-    // converts 32-bit group wake-up mask into a 'NumCores'-bit mask
+    // converts 32-bit group wake-up mask into a 'NumCores'-bit mask. The
+    // all-ones escape is tested first so the mask path never indexes past the
+    // register when there are more groups than register bits.
     if (wake_up_group_pulse) begin
-      if (ctrl_reg2hw.wake_up_group.q <= {NumGroups{1'b1}}) begin
-        for(int i = 0; i < NumGroups; i = i + 1) begin
+      if (ctrl_reg2hw.wake_up_group.q == {DataWidth{1'b1}}) begin
+        wake_up_o = {NumCores{1'b1}};
+      end else if (ctrl_reg2hw.wake_up_group.q <= {NumGroupMaskBits{1'b1}}) begin
+        for(int i = 0; i < NumGroupMaskBits; i = i + 1) begin
           wake_up_o[NumCoresPerGroup * i +: NumCoresPerGroup] = {NumCoresPerGroup{ctrl_reg2hw.wake_up_group.q[i]}};
         end
-      end else if (ctrl_reg2hw.wake_up_group.q == {DataWidth{1'b1}}) begin
-        wake_up_o = {NumCores{1'b1}};
       end
     end
     wake_up_o = wake_up_o & wake_up_mask_q;
