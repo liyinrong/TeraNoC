@@ -552,10 +552,28 @@ sim: clean-dasm compile
 	$(questa_cmd) vsim $(questa_sim_args) $(questa_args) $(library).$(top_level) -do "set config ${config}" -do ../scripts/questa/run.tcl
 	./scripts/return_status.sh $(buildpath)/transcript
 
-.PHONY: simc
-simc: clean-dasm compile
+# Elaboration -- the Questa counterpart of compile_vcs_simvopt. Handing vsim the
+# unoptimised `mempool_tb` makes it elaborate implicitly on first use and cache
+# the result back into the work library; elaborating here instead keeps that
+# library read-only at run time, so any number of benchmarks can share one build
+# of a config. It also makes the cost an attributable build step rather than a
+# surcharge on whichever app happens to run first.
+.PHONY: compile_questa_opt
+compile_questa_opt: compile $(buildpath)/.questa_opt_stamp
+# Keyed on compile.tcl, which is regenerated whenever a source changes, so vopt
+# re-runs exactly when the design does. A .PHONY recipe here would re-elaborate
+# on every single app and defeat the purpose.
+$(buildpath)/.questa_opt_stamp: $(buildpath)/compile.tcl
 	cd $(buildpath) && \
-	$(questa_cmd) vsim $(questa_simc_args) $(questa_args) $(library).$(top_level) -do "run -a"
+	$(questa_cmd) vopt -work $(library) $(top_level) -o $(top_level)_opt
+	touch $@
+
+# Run the pre-elaborated design. The GUI `sim` target above deliberately keeps
+# the unoptimised top: it needs -voptargs=+acc for `log -r *` in run.tcl.
+.PHONY: simc
+simc: clean-dasm compile_questa_opt
+	cd $(buildpath) && \
+	$(questa_cmd) vsim $(questa_simc_args) $(questa_args) $(library).$(top_level)_opt -do "run -a"
 	./scripts/return_status.sh $(buildpath)/transcript
 
 # DPIs
