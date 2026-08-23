@@ -296,3 +296,46 @@ ifeq ($(shell [ $(num_scalar_cores_per_tile) -lt $(num_cores_per_tile) ] && echo
 $(error num_scalar_cores_per_tile must be below num_cores_per_tile)
 endif
 endif
+
+# ---------------------------------------------------------------------------
+# WP3 virtual-cluster address windows -- DERIVED, emitted to BOTH the RTL
+# (vlog_defs) and the runtime (DEFINES) so hardware and software cannot drift.
+#
+# A level's window is the FULL L1 of its 2^k x 2^k group rectangle, so its
+# aperture is 4^k x the per-group L1 (memory [[max-size-vc-windows-and-delete-
+# chunk-base]]; chunk_base is deleted, which is what makes the window maximal).
+# Windows are packed DESCENDING by size immediately above the global region:
+# every aperture is a power of two, so descending order lands each window on
+# its natural alignment with zero padding, and the whole map costs 1.33x L1 at
+# every scale.
+#
+#     vc_window_size(k) = vc_group_bytes * 4^k
+#     vc_window_base(k) = l1_total + sum_{j>k} vc_window_size(j)
+#
+# The TOP level k = log2(min(num_x,num_y)) deliberately has NO window: on a
+# square mesh its permuter is the identity, so the global region already IS
+# that window. Levels therefore run k = 0 .. vc_levels-1.
+#
+# Sizing worked example, terapool: 4 MiB L1 / 16 groups = 256 KiB per group,
+# vc_levels = 2, so window 1 = 1 MiB at 0x40_0000 and window 0 = 256 KiB at
+# 0x50_0000; the region ends at 0x54_0000, i.e. 5.25 MiB = 1.33 x 4 MiB.
+# Enable the virtual-cluster remap at the three COMPUTE scrambler sites.
+# Default OFF so every existing flavor stays bit-identical; the WP3 gate
+# builds with vc_remap=1. The standalone replay testbench
+# (hardware/tb/tb_vc_scrambler.sv) exercises the permuter either way.
+vc_remap          ?= 0
+
+num_y             := $(shell echo $$(( $(num_groups) / $(num_x) )))
+vc_group_bytes    := $(shell echo $$(( $(num_banks_per_group) * $(l1_bank_size) )))
+l1_total_bytes    := $(shell echo $$(( $(vc_group_bytes) * $(num_groups) )))
+vc_levels         := $(shell awk 'BEGIN{n=($(num_x)<$(num_y))?$(num_x):$(num_y); k=0; while (n>1) {n/=2; k++}; print k}')
+vc_level_list     := $(shell seq 0 $$(( $(vc_levels) - 1 )) 2>/dev/null)
+
+# Per-level base/size, as `vc_window_base_<k>` / `vc_window_size_<k>`.
+$(foreach k,$(vc_level_list),\
+  $(eval vc_window_size_$(k) := $(shell awk 'BEGIN{printf "%d", $(vc_group_bytes) * (4 ^ $(k))}'))\
+  $(eval vc_window_base_$(k) := $(shell awk 'BEGIN{acc=$(l1_total_bytes); for (j=$(vc_levels)-1; j>$(k); j--) acc += $(vc_group_bytes) * (4 ^ j); printf "%d", acc}')))
+
+# End of the whole VC region. The RTL derives the same map independently and
+# fails elaboration if the two disagree, so this one number pins the agreement.
+vc_region_end     := $(shell awk 'BEGIN{acc=$(l1_total_bytes); for (j=0; j<$(vc_levels); j++) acc += $(vc_group_bytes) * (4 ^ j); printf "%d", acc}')

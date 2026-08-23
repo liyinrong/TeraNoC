@@ -759,10 +759,18 @@ module mempool_group
       .TCDMBaseAddr            (TCDMBaseAddr     ),
       .TCDMMask                (TCDMMask         ),
       .EnableSeqInterleaveSwap (1'b0             ),
-      .EnableTileIdRemap       (TileIdRemap      )
+      .EnableTileIdRemap       (TileIdRemap      ),
+      // Deliberately VC-BLIND (roadmap §T2.1): the DMA must never remap, so a
+      // descriptor cannot carry a virtual-cluster address. DmaRegionStart/End
+      // stays the global window only, which makes that a hardware property
+      // rather than a convention.
+      .EnableVcRemap           (1'b0             )
     ) i_dma_addr_scrambler (
-      .address_i (dma_reqrsp_req.q.addr ),
-      .address_o (dma_scrambled_addr    )
+      .address_i  (dma_reqrsp_req.q.addr ),
+      .group_id_i ('0                    ), // unused, VC remap is off
+      .vc_hit_o   (/* always 0 here */   ),
+      .vc_level_o (/* always 0 here */   ),
+      .address_o  (dma_scrambled_addr    )
     );
 
     // Extract the (post-remap) tile-id slice for the reqrsp_demux select.

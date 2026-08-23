@@ -117,6 +117,14 @@ DEFINES += -DPERIPH_BASE=$(periph_base)
 DEFINES += -DL1_BANK_SIZE=$(l1_bank_size)
 DEFINES += -DL2_BASE=$(l2_base)
 DEFINES += -DL2_SIZE=$(l2_size)
+# WP3 virtual-cluster windows, derived in config/config.mk and shared with
+# the RTL through hardware/Makefile's vlog_defs.
+DEFINES += -DVC_REMAP=$(vc_remap)
+DEFINES += -DVC_LEVELS=$(vc_levels)
+DEFINES += -DVC_REGION_END=$(vc_region_end)
+DEFINES += -DVC_GROUP_BYTES=$(vc_group_bytes)
+DEFINES += -DNUM_X=$(num_x) -DNUM_Y=$(num_y)
+DEFINES += $(foreach k,$(vc_level_list),-DVC_WINDOW_BASE_$(k)=$(vc_window_base_$(k)) -DVC_WINDOW_SIZE_$(k)=$(vc_window_size_$(k)))
 DEFINES += -DSEQ_MEM_SIZE=$(seq_mem_size)
 DEFINES += -DLOG2_SEQ_MEM_SIZE=$(shell awk 'BEGIN{print log($(seq_mem_size))/log(2)}')
 DEFINES += -DSTACK_SIZE=$(stack_size)
@@ -203,6 +211,7 @@ RUNTIME += $(ROOT_DIR)/printf.c.o
 RUNTIME += $(ROOT_DIR)/serial.c.o
 RUNTIME += $(ROOT_DIR)/string.c.o
 RUNTIME += $(ROOT_DIR)/synchronization.c.o
+RUNTIME += $(ROOT_DIR)/vc.c.o
 
 OMP_RUNTIME := $(addsuffix .o,$(shell find $(OMP_DIR) -name "*.c"))
 

@@ -882,6 +882,14 @@ package mempool_pkg;
   localparam addr_t TCDMSize = NumBanks * TCDMSizePerBank;
   localparam addr_t TCDMMask = ~(TCDMSize - 1);
 
+  // ---- WP3 virtual-cluster address windows -----------------------------
+  // Computed once in config/config.mk and emitted to both vlog_defs and the
+  // runtime DEFINES, so software's pointers and the hardware decode cannot
+  // drift. mempool_addr_scrambler re-derives the same map and fails
+  // elaboration if VcRegionEnd disagrees.
+  localparam bit    VcRemap     = `ifdef VC_REMAP `VC_REMAP `else 1'b0 `endif;
+  localparam addr_t VcRegionEnd = `ifdef VC_REGION_END `VC_REGION_END `else '0 `endif;
+
   // Size in bytes of memory that is sequentially addressable per tile
   localparam int unsigned SeqMemSizePerCore = `ifdef SEQ_MEM_SIZE `SEQ_MEM_SIZE `else 0 `endif;
   localparam int unsigned SeqMemSizePerTile = NumCoresPerTile*SeqMemSizePerCore;

@@ -122,6 +122,22 @@ module mempool_tile
   `FF(wake_up_q, wake_up_i, '0, clk_i, rst_ni);
 
   // Group ID
+  // ---- WP3 virtual-cluster remap enables --------------------------------
+  // Deliberately THREE named constants, one per COMPUTE scrambler, with an
+  // elaboration check that they agree. Enabling VC at only some of the three
+  // is exactly the regression this guards: forgetting the wide RedMulE site
+  // (i_rm_wide_scrambler) gives an accelerator that bypasses the map only
+  // when the wide plane is on, which is invisible on every narrow build.
+  // The DMA scrambler in mempool_group.sv is deliberately NOT in this set --
+  // it stays virtual-cluster blind so a descriptor can never carry a VC
+  // address (roadmap §T2.1, and DmaRegionStart/End is the global window only).
+  localparam bit VcRemapCore     = VcRemap;
+  localparam bit VcRemapRmWide   = VcRemap;
+  localparam bit VcRemapRmNarrow = VcRemap;
+  if (!((VcRemapCore == VcRemapRmWide) && (VcRemapRmWide == VcRemapRmNarrow)))
+    $fatal(1, "The three compute scramblers disagree on EnableVcRemap (core=%0d wide=%0d narrow=%0d); all three must see the same map.",
+           VcRemapCore, VcRemapRmWide, VcRemapRmNarrow);
+
   group_id_t group_id;
   if (NumGroups != 1) begin: gen_group_id
     assign group_id = tile_id_i[$clog2(NumTiles)-1 -: $clog2(NumGroups)];
@@ -827,6 +843,14 @@ module mempool_tile
   logic                [NumLocalPorts-1:0] remote_req_interco_wen;
   logic                [NumLocalPorts-1:0] remote_req_interco_amoen;
   tcdm_addr_t          [NumLocalPorts-1:0] remote_req_tgt_addr;
+  // Set by the compute scramblers when a request was VC-remapped; used only
+  // by the confinement assertion below, which needs to tell VC traffic from
+  // ordinary global traffic (stacks, barriers, the sequential region).
+  logic [NumLocalPorts-1:0]      vc_hit_port;
+  logic [NumLocalPorts-1:0][2:0] vc_level_port;
+  logic                          vc_hit_wide_port;
+  logic [2:0]                    vc_level_wide_port;
+
   group_id_t           [NumLocalPorts-1:0] remote_req_tgt_group_id;
   remote_ports_index_t [NumLocalPorts-1:0] remote_req_interco_tgt_sel;
   remote_ports_index_t [NumLocalPorts-1:0] remote_req_tgt_sel;
@@ -1218,6 +1242,41 @@ module mempool_tile
     ,.remote_wide_req_tgt_sel_o           (remote_wide_req_tgt_sel             )
     `endif
   );
+
+`ifndef SYNTHESIS
+  // GATE item 3 (roadmap §T2.3), network-side half. The scrambler already
+  // asserts confinement where the address is produced; this repeats it on the
+  // ROUTER's decoded target group, so anything that rewrites the address
+  // between the two is caught as well. Gated on vc_hit so ordinary global
+  // traffic -- stacks, barriers, the sequential region -- is not flagged, and
+  // parameterized by the level the request matched so the rectangle is exact.
+  function automatic bit vc_in_rect(input int unsigned own,
+                                    input int unsigned tgt,
+                                    input int unsigned k);
+    // Flat group id is {gx, gy} with gy in the low half.
+    automatic int unsigned own_gx = own / NumY, own_gy = own % NumY;
+    automatic int unsigned tgt_gx = tgt / NumY, tgt_gy = tgt % NumY;
+    vc_in_rect = ((own_gx >> k) == (tgt_gx >> k)) &&
+                 ((own_gy >> k) == (tgt_gy >> k));
+  endfunction
+
+  if (VcRemap && (NumGroups > 1)) begin : gen_vc_router_confinement
+    // CLOCKED, not combinational: an immediate assertion in always_comb fires
+    // on delta-cycle transients while the address decode settles, which
+    // reports escapes that never exist at any clock edge.
+    for (genvar i = 0; i < NumLocalPorts; i++) begin : gen_vc_conf_narrow
+      always_ff @(posedge clk_i) begin
+        if (rst_ni && vc_hit_port[i] && remote_req_interco_valid[i]) begin
+          assert (vc_in_rect(group_id, remote_req_tgt_group_id[i],
+                             vc_level_port[i]))
+            else $fatal(1,
+                "VC confinement escape, narrow port %0d level %0d: group %0d reached %0d",
+                i, vc_level_port[i], group_id, remote_req_tgt_group_id[i]);
+        end
+      end
+    end
+  end
+`endif
 
   // SoC requests (one per core data port; Spatz vector ports never hit SoC
   // addresses, so their slots are inert). NumDataPortsPerCore==1 for non-Spatz.
@@ -1626,10 +1685,19 @@ module mempool_tile
       .TCDMBaseAddr            (TCDMBaseAddr     ),
       .TCDMMask                (TCDMMask         ),
       .EnableSeqInterleaveSwap (1'b1             ),
-      .EnableTileIdRemap       (TileIdRemap      )
+      .EnableTileIdRemap       (TileIdRemap      ),
+      .TCDMSize                (TCDMSize         ),
+      .NumTilesPerGroup        (NumTilesPerGroup ),
+      .NumX                    (NumX             ),
+      .NumY                    (NumY             ),
+      .EnableVcRemap           (VcRemapCore      ),
+      .VcRegionEndChk          (VcRegionEnd      )
     ) i_addr_scrambler (
-      .address_i (snitch_data_qaddr[i]          ),
-      .address_o (snitch_data_qaddr_scrambled[i])
+      .address_i  (snitch_data_qaddr[i]          ),
+      .group_id_i (group_id                      ),
+      .vc_hit_o   (vc_hit_port[i]                ),
+      .vc_level_o (vc_level_port[i]              ),
+      .address_o  (snitch_data_qaddr_scrambled[i])
     );
 
     if (!TrafficGeneration) begin: gen_tcdm_shim
@@ -1946,10 +2014,19 @@ module mempool_tile
       .TCDMBaseAddr            (TCDMBaseAddr     ),
       .TCDMMask                (TCDMMask         ),
       .EnableSeqInterleaveSwap (1'b1             ),
-      .EnableTileIdRemap       (TileIdRemap      )
+      .EnableTileIdRemap       (TileIdRemap      ),
+      .TCDMSize                (TCDMSize         ),
+      .NumTilesPerGroup        (NumTilesPerGroup ),
+      .NumX                    (NumX             ),
+      .NumY                    (NumY             ),
+      .EnableVcRemap           (VcRemapRmWide      ),
+      .VcRegionEndChk          (VcRegionEnd      )
     ) i_rm_wide_scrambler (
-      .address_i (tcdm.add            ),
-      .address_o (tcdm_wide_rm_req.addr)
+      .address_i  (tcdm.add             ),
+      .group_id_i (group_id             ),
+      .vc_hit_o   (vc_hit_wide_port     ),
+      .vc_level_o (vc_level_wide_port   ),
+      .address_o  (tcdm_wide_rm_req.addr)
     );
 
     // ----- RedMulE HCI <-> wide demux, the ONLY translation point -----
@@ -1986,6 +2063,27 @@ module mempool_tile
             ByteOffset +: idx_width(NumBanksPerTile)]});
 
     assign remote_wide_req_interco[WidePortIdx].tgt_addr = remote_wide_req_tgt_addr[WidePortIdx];
+
+`ifndef SYNTHESIS
+    // GATE item 3 (roadmap §T2.3), wide half. Same clocked check as the
+    // narrow ports; it lives here because WidePortIdx is scoped to this
+    // block. Without it a RedMulE using the wide plane could leave its
+    // rectangle on exactly the configs where the wide plane is enabled.
+    if (VcRemap && (NumGroups > 1)) begin : gen_vc_conf_wide
+      always_ff @(posedge clk_i) begin
+        if (rst_ni && vc_hit_wide_port &&
+            remote_wide_req_interco_valid[WidePortIdx]) begin
+          assert (vc_in_rect(group_id,
+                             remote_wide_req_tgt_group_id[WidePortIdx],
+                             vc_level_wide_port))
+            else $fatal(1,
+                "VC confinement escape, WIDE port level %0d: group %0d reached %0d",
+                vc_level_wide_port, group_id,
+                remote_wide_req_tgt_group_id[WidePortIdx]);
+        end
+      end
+    end
+`endif
 
     // Same split as the narrow mask_map: LOCAL is THIS TILE (the tile-id field
     // pinned to tile_id_i), EXTERNAL is every other TCDM address. The
@@ -2200,10 +2298,19 @@ module mempool_tile
         .TCDMBaseAddr            (TCDMBaseAddr     ),
         .TCDMMask                (TCDMMask         ),
         .EnableSeqInterleaveSwap (1'b1             ),
-        .EnableTileIdRemap       (TileIdRemap      )
+        .EnableTileIdRemap       (TileIdRemap      ),
+        .TCDMSize                (TCDMSize         ),
+        .NumTilesPerGroup        (NumTilesPerGroup ),
+        .NumX                    (NumX             ),
+        .NumY                    (NumY             ),
+        .EnableVcRemap           (VcRemapRmNarrow      ),
+        .VcRegionEndChk          (VcRegionEnd      )
       ) i_addr_scrambler (
-        .address_i (redmule_tcdm_req[p].addr  ),
-        .address_o (redmule_addr_scrambled[p] )
+        .address_i  (redmule_tcdm_req[p].addr  ),
+        .group_id_i (group_id                  ),
+        .vc_hit_o   (vc_hit_port[c]            ),
+        .vc_level_o (vc_level_port[c]          ),
+        .address_o  (redmule_addr_scrambled[p] )
       );
 
       // Same shim as the snitch path; req_t/resp_t carry redmule's cluster-width meta_id.
