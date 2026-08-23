@@ -887,7 +887,7 @@ package mempool_pkg;
   // runtime DEFINES, so software's pointers and the hardware decode cannot
   // drift. mempool_addr_scrambler re-derives the same map and fails
   // elaboration if VcRegionEnd disagrees.
-  localparam bit    VcRemap     = `ifdef VC_REMAP `VC_REMAP `else 1'b0 `endif;
+  localparam bit    VirtualCluster = `ifdef VIRTUAL_CLUSTER `VIRTUAL_CLUSTER `else 1'b0 `endif;
   localparam addr_t VcRegionEnd = `ifdef VC_REGION_END `VC_REGION_END `else '0 `endif;
 
   // Size in bytes of memory that is sequentially addressable per tile

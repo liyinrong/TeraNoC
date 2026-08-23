@@ -155,7 +155,7 @@ vlog_defs += -DL2_BASE=32\'d$(l2_base)
 # WP3 virtual-cluster windows; the same numbers reach the runtime through
 # software/runtime/runtime.mk, and the RTL re-derives them and fails
 # elaboration on a mismatch (VC_REGION_END).
-vlog_defs += -DVC_REMAP=$(vc_remap)
+vlog_defs += -DVIRTUAL_CLUSTER=$(virtual_cluster)
 vlog_defs += -DVC_LEVELS=$(vc_levels)
 vlog_defs += -DVC_REGION_END=32\'d$(vc_region_end)
 vlog_defs += $(foreach k,$(vc_level_list),-DVC_WINDOW_BASE_$(k)=32\'d$(vc_window_base_$(k)) -DVC_WINDOW_SIZE_$(k)=32\'d$(vc_window_size_$(k)))

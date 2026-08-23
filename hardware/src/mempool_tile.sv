@@ -131,12 +131,12 @@ module mempool_tile
   // The DMA scrambler in mempool_group.sv is deliberately NOT in this set --
   // it stays virtual-cluster blind so a descriptor can never carry a VC
   // address (roadmap §T2.1, and DmaRegionStart/End is the global window only).
-  localparam bit VcRemapCore     = VcRemap;
-  localparam bit VcRemapRmWide   = VcRemap;
-  localparam bit VcRemapRmNarrow = VcRemap;
-  if (!((VcRemapCore == VcRemapRmWide) && (VcRemapRmWide == VcRemapRmNarrow)))
-    $fatal(1, "The three compute scramblers disagree on EnableVcRemap (core=%0d wide=%0d narrow=%0d); all three must see the same map.",
-           VcRemapCore, VcRemapRmWide, VcRemapRmNarrow);
+  localparam bit VirtualClusterCore     = VirtualCluster;
+  localparam bit VirtualClusterRmWide   = VirtualCluster;
+  localparam bit VirtualClusterRmNarrow = VirtualCluster;
+  if (!((VirtualClusterCore == VirtualClusterRmWide) && (VirtualClusterRmWide == VirtualClusterRmNarrow)))
+    $fatal(1, "The three compute scramblers disagree on EnableVirtualCluster (core=%0d wide=%0d narrow=%0d); all three must see the same map.",
+           VirtualClusterCore, VirtualClusterRmWide, VirtualClusterRmNarrow);
 
   group_id_t group_id;
   if (NumGroups != 1) begin: gen_group_id
@@ -1260,7 +1260,7 @@ module mempool_tile
                  ((own_gy >> k) == (tgt_gy >> k));
   endfunction
 
-  if (VcRemap && (NumGroups > 1)) begin : gen_vc_router_confinement
+  if (VirtualCluster && (NumGroups > 1)) begin : gen_vc_router_confinement
     // CLOCKED, not combinational: an immediate assertion in always_comb fires
     // on delta-cycle transients while the address decode settles, which
     // reports escapes that never exist at any clock edge.
@@ -1690,7 +1690,7 @@ module mempool_tile
       .NumTilesPerGroup        (NumTilesPerGroup ),
       .NumX                    (NumX             ),
       .NumY                    (NumY             ),
-      .EnableVcRemap           (VcRemapCore      ),
+      .EnableVirtualCluster           (VirtualClusterCore      ),
       .VcRegionEndChk          (VcRegionEnd      )
     ) i_addr_scrambler (
       .address_i  (snitch_data_qaddr[i]          ),
@@ -2019,7 +2019,7 @@ module mempool_tile
       .NumTilesPerGroup        (NumTilesPerGroup ),
       .NumX                    (NumX             ),
       .NumY                    (NumY             ),
-      .EnableVcRemap           (VcRemapRmWide      ),
+      .EnableVirtualCluster           (VirtualClusterRmWide      ),
       .VcRegionEndChk          (VcRegionEnd      )
     ) i_rm_wide_scrambler (
       .address_i  (tcdm.add             ),
@@ -2069,7 +2069,7 @@ module mempool_tile
     // narrow ports; it lives here because WidePortIdx is scoped to this
     // block. Without it a RedMulE using the wide plane could leave its
     // rectangle on exactly the configs where the wide plane is enabled.
-    if (VcRemap && (NumGroups > 1)) begin : gen_vc_conf_wide
+    if (VirtualCluster && (NumGroups > 1)) begin : gen_vc_conf_wide
       always_ff @(posedge clk_i) begin
         if (rst_ni && vc_hit_wide_port &&
             remote_wide_req_interco_valid[WidePortIdx]) begin
@@ -2303,7 +2303,7 @@ module mempool_tile
         .NumTilesPerGroup        (NumTilesPerGroup ),
         .NumX                    (NumX             ),
         .NumY                    (NumY             ),
-        .EnableVcRemap           (VcRemapRmNarrow      ),
+        .EnableVirtualCluster           (VirtualClusterRmNarrow      ),
         .VcRegionEndChk          (VcRegionEnd      )
       ) i_addr_scrambler (
         .address_i  (redmule_tcdm_req[p].addr  ),

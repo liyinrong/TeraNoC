@@ -119,7 +119,7 @@ DEFINES += -DL2_BASE=$(l2_base)
 DEFINES += -DL2_SIZE=$(l2_size)
 # WP3 virtual-cluster windows, derived in config/config.mk and shared with
 # the RTL through hardware/Makefile's vlog_defs.
-DEFINES += -DVC_REMAP=$(vc_remap)
+DEFINES += -DVIRTUAL_CLUSTER=$(virtual_cluster)
 DEFINES += -DVC_LEVELS=$(vc_levels)
 DEFINES += -DVC_REGION_END=$(vc_region_end)
 DEFINES += -DVC_GROUP_BYTES=$(vc_group_bytes)

@@ -321,9 +321,9 @@ endif
 # 0x50_0000; the region ends at 0x54_0000, i.e. 5.25 MiB = 1.33 x 4 MiB.
 # Enable the virtual-cluster remap at the three COMPUTE scrambler sites.
 # Default OFF so every existing flavor stays bit-identical; the WP3 gate
-# builds with vc_remap=1. The standalone replay testbench
+# builds with virtual_cluster=1. The standalone replay testbench
 # (hardware/tb/tb_vc_scrambler.sv) exercises the permuter either way.
-vc_remap          ?= 0
+virtual_cluster   ?= 0
 
 num_y             := $(shell echo $$(( $(num_groups) / $(num_x) )))
 vc_group_bytes    := $(shell echo $$(( $(num_banks_per_group) * $(l1_bank_size) )))

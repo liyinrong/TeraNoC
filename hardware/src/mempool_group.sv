@@ -764,7 +764,7 @@ module mempool_group
       // descriptor cannot carry a virtual-cluster address. DmaRegionStart/End
       // stays the global window only, which makes that a hardware property
       // rather than a convention.
-      .EnableVcRemap           (1'b0             )
+      .EnableVirtualCluster           (1'b0             )
     ) i_dma_addr_scrambler (
       .address_i  (dma_reqrsp_req.q.addr ),
       .group_id_i ('0                    ), // unused, VC remap is off

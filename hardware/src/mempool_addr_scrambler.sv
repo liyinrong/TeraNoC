@@ -6,7 +6,7 @@
 // independently-gated address transforms, in this order:
 //   Stage 1 (EnableSeqInterleaveSwap, sequential region): swap the
 //     {tile_id, scramble} fields so HW sees an interleaved-bank layout.
-//   Stage 2 (EnableVcRemap, virtual-cluster windows): the WP3 level rule —
+//   Stage 2 (EnableVirtualCluster, virtual-cluster windows): the WP3 level rule —
 //     re-place a window-relative offset inside the requester's 2^k x 2^k
 //     group rectangle. See docs/plan/wp2-wp4-implementation-roadmap.md
 //     §T2.1 (revised 2026-08-23).
@@ -54,7 +54,7 @@ module mempool_addr_scrambler
   parameter int unsigned          NumTilesPerGroup         = 1,
   parameter int unsigned          NumX                     = 1,
   parameter int unsigned          NumY                     = 1,
-  parameter bit                   EnableVcRemap            = 1'b0,
+  parameter bit                   EnableVirtualCluster            = 1'b0,
   // End of the whole VC region as computed by config/config.mk. The module
   // derives the window map independently below; a mismatch means the Make
   // arithmetic and the RTL arithmetic have drifted, which would put software's
@@ -68,7 +68,7 @@ module mempool_addr_scrambler
   input  logic [AddrWidth-1:0]    address_i,
   // Requesting group's flat mesh id, {gx, gy} with gy in the LOW half
   // (hardware/src/mempool_cluster_floonoc_wrapper.sv:249). Unused unless
-  // EnableVcRemap.
+  // EnableVirtualCluster.
   input  logic [GroupIdWidth-1:0] group_id_i,
   // Asserted when this request was remapped by the VC branch, with the level
   // it matched. Carried to the request routers so the confinement assertion
@@ -111,7 +111,7 @@ module mempool_addr_scrambler
   // (Track A finding S11).
   localparam int unsigned VcMeshLog2 =
       $clog2(NumX < NumY ? NumX : NumY);
-  localparam int unsigned VcLevels   = EnableVcRemap ? VcMeshLog2 : 0;
+  localparam int unsigned VcLevels   = EnableVirtualCluster ? VcMeshLog2 : 0;
   // Per-group L1 in bytes, and a level's aperture 4^k x that.
   localparam longint unsigned VcGroupBytes =
       (NumX*NumY) > 0 ? TCDMSize / (NumX*NumY) : 0;
@@ -205,7 +205,7 @@ module mempool_addr_scrambler
   logic not_io_address;
   assign not_io_address = global_hit || vc_any;
 
-  assign vc_hit_o = EnableVcRemap && vc_any;
+  assign vc_hit_o = EnableVirtualCluster && vc_any;
   always_comb begin
     vc_level_o = '0;
     for (int unsigned k = 0; k < VcLevels; k++) begin
@@ -243,7 +243,7 @@ module mempool_addr_scrambler
       // Stage 2: virtual-cluster level rule. MUST precede the tile-id branch
       // (finding S9) — a VC address is not_io_address and above the
       // sequential region, so stage 3 would otherwise swallow it.
-      else if (EnableVcRemap && vc_any) begin
+      else if (EnableVirtualCluster && vc_any) begin
         address_o = vc_addr;
       end
       // Stage 3: tile-id remap, interleaved region only — never rewrite the
@@ -266,11 +266,11 @@ module mempool_addr_scrambler
     $fatal(1, "SeqMemSizePerTile must be a multiple of BankWidth*NumBanksPerTile!");
 
   // ---- WP3 virtual-cluster checks ---------------------------------------
-  if (EnableVcRemap) begin : gen_vc_checks
+  if (EnableVirtualCluster) begin : gen_vc_checks
     // The range compares must decode exactly the region the old mask did,
     // so switching to them cannot move an existing config's global window.
     if (TCDMSize == 0)
-      $fatal(1, "EnableVcRemap needs TCDMSize; the region decode is a range compare, not a mask.");
+      $fatal(1, "EnableVirtualCluster needs TCDMSize; the region decode is a range compare, not a mask.");
     if (TCDMMask !== ~(TCDMSize - 1))
       $fatal(1, "TCDMMask (%h) and TCDMSize (%h) disagree; the VC region decode would move the global window.",
              TCDMMask, TCDMSize);
@@ -300,7 +300,7 @@ module mempool_addr_scrambler
   // invariant #10 expressed on the permuter, and it is the arithmetic reason
   // the top-level window is dropped from the address map (finding S7/S11).
   // Checked at time 0 over every field corner rather than a token sample.
-  if (EnableVcRemap && (NumX == NumY)) begin : gen_vc_identity_check
+  if (EnableVirtualCluster && (NumX == NumY)) begin : gen_vc_identity_check
     initial begin : p_top_level_identity
       automatic int unsigned kt = VcMeshLog2;
       automatic logic [AddrWidth-1:0] off, got;

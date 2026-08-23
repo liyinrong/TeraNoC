@@ -64,7 +64,7 @@ module vc_replay #(
     .NumTilesPerGroup        (NumTilesPerGroup  ),
     .NumX                    (NumX              ),
     .NumY                    (NumY              ),
-    .EnableVcRemap           (1'b1              )
+    .EnableVirtualCluster           (1'b1              )
   ) i_dut (
     .address_i  (address_i ),
     .group_id_i (group_id_i),
