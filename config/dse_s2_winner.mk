@@ -63,7 +63,7 @@ noc_router_output_fifo_dep := 2
 #   See hardware/deps/redmule/sw/archi_redmule.h for the current offset; the
 #   GVSoC model must match it.
 #
-# See gvsoc/docs/plans/teranoc-s1-s2-rtl-handoff.md for the full mapping.
+# See gvsoc/docs/manual/stage1-dse-winner-rtl-handoff.md for the full mapping.
 # =========================================================================
 
 include $(MEMPOOL_DIR)/config/dse_s2_common.mk

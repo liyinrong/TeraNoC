@@ -1,0 +1,7 @@
+# Stage-1 DSE S1 / M5 read-optimized: (RO, RWreq, RWresp, WO) = (4, 2, 4, 2).
+config_build_path := dse_s1_m5
+noc_req_wide_ro_channel_num  := 4
+noc_req_wide_rw_channel_num  := 2
+noc_resp_wide_rw_channel_num := 4
+noc_resp_wide_wo_channel_num := 2
+include $(MEMPOOL_DIR)/config/dse_s1_common.mk
