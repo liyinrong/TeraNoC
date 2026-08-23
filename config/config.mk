@@ -31,8 +31,29 @@ include $(MEMPOOL_DIR)/config/$(config).mk
 ##  Address configuration  ##
 #############################
 
-# Boot address (in dec)
-boot_addr ?= 2684354560 # A0000000
+# The system address map. Everything that decodes an address -- the SoC xbar,
+# the control registers, the FlooNoC SAM, the linker scripts and the runtime --
+# reads the three bases below, so a map move is one edit here plus a
+# regenerated FlooNoC package. `make update-floogen` fails the build if the
+# generated package and these knobs ever disagree.
+#
+#   0x0000_0000  TCDM                     1.5 GiB reserved (WP3 VC windows)
+#   0x6000_0000  bootrom                  bootrom_base
+#   0x7000_0000  control regs / periphs   periph_base, +0x2_0000 window
+#   0x7002_0000  RedMulE config regs      periph_base + 0x2_0000
+#   0x7100_0000  testbench UART           periph_base + 0x100_0000
+#   0x8000_0000  L2 / HBM                 l2_base, 2 GiB, nothing above it
+
+# Bootrom base address (in dec)
+bootrom_base ?= 1610612736 # 60000000
+
+# Boot address (in dec). This is the core reset vector, which has to land on the
+# first bootrom instruction, so it follows the bootrom rather than standing on
+# its own. The bootrom image is PC-relative -- regenerate it when this moves.
+boot_addr ?= $(bootrom_base)
+
+# Control register / peripheral region base (in dec)
+periph_base ?= 1879048192 # 70000000
 
 # L2 memory configuration (in dec)
 l2_base  ?= 2147483648 # 80000000

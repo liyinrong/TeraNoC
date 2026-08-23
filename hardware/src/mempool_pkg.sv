@@ -361,7 +361,10 @@ package mempool_pkg;
   localparam integer unsigned NumWideBankLocalPorts =
       (NumWideRmPorts > 0) ? NumWideRmPorts : 1;
 
-  localparam integer unsigned RMBaseAddr = 32'h4002_0000;
+  // RedMulE config regs sit directly above the SoC peripheral window
+  // (config/config.mk `periph_base`), so they move with it.
+  localparam integer unsigned RMBaseAddr =
+      (`ifdef PERIPH_BASE `PERIPH_BASE `else 32'h7000_0000 `endif) + 32'h0002_0000;
   localparam integer unsigned RMMask     = ~((1 << idx_width(RMRegSize)) - 1);
 
   // Per-tile local TCDM master ports: the (Spatz-scaled) core data ports plus

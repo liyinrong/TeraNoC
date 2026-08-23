@@ -111,6 +111,8 @@ DEFINES += -DNUM_CORES_PER_GROUP=$(shell awk 'BEGIN{print $(num_cores)/$(num_gro
 DEFINES += -DNUM_TILES_PER_GROUP=$(shell awk 'BEGIN{print ($(num_cores)/$(num_groups))/$(num_cores_per_tile)}')
 DEFINES += -DLOG2_NUM_CORES_PER_TILE=$(shell awk 'BEGIN{print log($(num_cores_per_tile))/log(2)}')
 DEFINES += -DBOOT_ADDR=$(boot_addr)
+DEFINES += -DBOOTROM_BASE=$(bootrom_base)
+DEFINES += -DPERIPH_BASE=$(periph_base)
 DEFINES += -DL1_BANK_SIZE=$(l1_bank_size)
 DEFINES += -DL2_BASE=$(l2_base)
 DEFINES += -DL2_SIZE=$(l2_size)

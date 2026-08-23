@@ -15,6 +15,6 @@ package bootrom_image_pkg;
     32'h00050067,
     32'h10500073,
     32'h00050513,
-    32'he0000517
+    32'h20000517
   };
 endpackage : bootrom_image_pkg

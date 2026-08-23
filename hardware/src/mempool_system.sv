@@ -39,12 +39,15 @@ module mempool_system
    *  AXI  *
    *********/
 
-  localparam addr_t PeripheralsBaseAddr   = 32'h4000_0000;
-  localparam addr_t PeripheralsEndAddr    = 32'h4002_0000;
+  // System address map -- config/config.mk owns the three bases; every window
+  // size below is an offset from one of them, so a map move never has to touch
+  // this file.
+  localparam addr_t PeripheralsBaseAddr   = `ifdef PERIPH_BASE `PERIPH_BASE `else 32'h7000_0000 `endif;
+  localparam addr_t PeripheralsEndAddr    = PeripheralsBaseAddr + 32'h0002_0000;
   localparam addr_t L2MemoryBaseAddr      = `ifdef L2_BASE `L2_BASE `else 32'h8000_0000 `endif;
   localparam addr_t L2MemoryEndAddr       = L2MemoryBaseAddr + L2Size;
-  localparam addr_t BootromBaseAddr       = 32'hA000_0000;
-  localparam addr_t BootromEndAddr        = 32'hA000_FFFF;
+  localparam addr_t BootromBaseAddr       = `ifdef BOOTROM_BASE `BOOTROM_BASE `else 32'h6000_0000 `endif;
+  localparam addr_t BootromEndAddr        = BootromBaseAddr + 32'h0000_FFFF;
 
   // One AXI channel per L2/HBM bank on the mesh perimeter -- these arrays are
   // indexed by bank, not by group. The two counts coincide only on the 4x4
@@ -926,10 +929,11 @@ module mempool_system
     NoAddrRules        : NumPeriphs
   };
 
-  localparam addr_t CtrlRegistersBaseAddr = 32'h4000_0000;
-  localparam addr_t CtrlRegistersEndAddr  = 32'h4001_0000;
-  localparam addr_t DMABaseAddr           = 32'h4001_0000;
-  localparam addr_t DMAEndAddr            = 32'h4002_0000;
+  // Offsets inside the peripheral window; only the window base ever moves.
+  localparam addr_t CtrlRegistersBaseAddr = PeripheralsBaseAddr;
+  localparam addr_t CtrlRegistersEndAddr  = PeripheralsBaseAddr + 32'h0001_0000;
+  localparam addr_t DMABaseAddr           = PeripheralsBaseAddr + 32'h0001_0000;
+  localparam addr_t DMAEndAddr            = PeripheralsBaseAddr + 32'h0002_0000;
 
   xbar_rule_32_t [NumPeriphs-1:0] axi_lite_xbar_rules;
   assign axi_lite_xbar_rules = '{

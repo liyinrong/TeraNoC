@@ -140,8 +140,13 @@ module mempool_tb;
    *  AXI Interconnect  *
    **********************/
 
-  localparam addr_t UARTBaseAddr = 32'hC000_0000;
-  localparam addr_t UARTEndAddr = 32'hC000_FFFF;
+  // The testbench UART is an off-cluster AXI slave reached through the SoC
+  // xbar's default (External) port, so it has to sit outside the on-chip
+  // peripheral window but below L2 -- 16 MiB above the peripheral base.
+  // software/runtime/arch.ld.c derives `fake_uart` from the same knob.
+  localparam addr_t UARTBaseAddr =
+      (`ifdef PERIPH_BASE `PERIPH_BASE `else 32'h7000_0000 `endif) + 32'h0100_0000;
+  localparam addr_t UARTEndAddr = UARTBaseAddr + 32'h0000_FFFF;
 
   xbar_rule_32_t [NumRules-1:0] xbar_routing_rules = '{
     '{idx: UART, start_addr: UARTBaseAddr, end_addr: UARTEndAddr}
@@ -457,9 +462,10 @@ module mempool_tb;
 
   // Simulation control
   initial begin
-    localparam ctrl_phys_addr = 32'h4000_0000;
+    // Only the window base moves; eoc lives at +0x0 and wake_up at +0x4.
+    localparam ctrl_phys_addr = `ifdef PERIPH_BASE `PERIPH_BASE `else 32'h7000_0000 `endif;
     localparam ctrl_size      = 32'h0100_0000;
-    localparam l2_phys_addr   = 32'h8000_0000;
+    localparam l2_phys_addr   = `ifdef L2_BASE `L2_BASE `else 32'h8000_0000 `endif;
     localparam l2_size        = 32'h0700_0000;
     localparam ctrl_virt_addr = ctrl_phys_addr;
     localparam l2_virt_addr   = l2_phys_addr;

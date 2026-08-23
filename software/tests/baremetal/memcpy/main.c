@@ -20,7 +20,7 @@
 #define SIZE (2048)
 #endif
 
-#define DMA_ADDRESS (0x40010000)
+#define DMA_ADDRESS (DMA_BASE)
 #define VERIFY
 
 // Assume banking factor of 4

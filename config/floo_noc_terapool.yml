@@ -50,41 +50,43 @@ endpoints:
   - name: "hbm0"
     addr_range:
       - start: 0x8000_0000
-        end: 0x800F_FFFF
+        end: 0x8010_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm1"
     addr_range:
       - start: 0x8010_0000
-        end: 0x801F_FFFF
+        end: 0x8020_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm2"
     addr_range:
       - start: 0x8020_0000
-        end: 0x802F_FFFF
+        end: 0x8030_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm3"
     addr_range:
       - start: 0x8030_0000
-        end: 0x803F_FFFF
+        end: 0x8040_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm4"
     addr_range:
       - start: 0x8040_0000
-        end: 0x804F_FFFF
+        end: 0x8050_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "host_hbm5_peri"
+    # Everything below L2. The old second rule covered the bootrom at
+    # 0xA000_0000 and the testbench UART at 0xC000_0000; both now sit below
+    # 0x8000_0000 (config/config.mk `bootrom_base` / `periph_base`), so the
+    # whole 2 GiB above `l2_base` belongs to L2/HBM and nothing else.
     addr_range:
       - start: 0x8050_0000
-        end: 0x805F_FFFF
+        end: 0x8060_0000
       - start: 0x0000_0000
-        end: 0x7FFF_FFFF
-      - start: 0xA000_0000
-        end: 0xC000_FFFF
+        end: 0x8000_0000
     mgr_port_protocol:
       - "wide_in"
     sbr_port_protocol:
@@ -92,61 +94,61 @@ endpoints:
   - name: "hbm6"
     addr_range:
       - start: 0x8060_0000
-        end: 0x806F_FFFF
+        end: 0x8070_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm7"
     addr_range:
       - start: 0x8070_0000
-        end: 0x807F_FFFF
+        end: 0x8080_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm8"
     addr_range:
       - start: 0x8080_0000
-        end: 0x808F_FFFF
+        end: 0x8090_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm9"
     addr_range:
       - start: 0x8090_0000
-        end: 0x809F_FFFF
+        end: 0x80A0_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm10"
     addr_range:
       - start: 0x80A0_0000
-        end: 0x80AF_FFFF
+        end: 0x80B0_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm11"
     addr_range:
       - start: 0x80B0_0000
-        end: 0x80BF_FFFF
+        end: 0x80C0_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm12"
     addr_range:
       - start: 0x80C0_0000
-        end: 0x80CF_FFFF
+        end: 0x80D0_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm13"
     addr_range:
       - start: 0x80D0_0000
-        end: 0x80DF_FFFF
+        end: 0x80E0_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm14"
     addr_range:
       - start: 0x80E0_0000
-        end: 0x80EF_FFFF
+        end: 0x80F0_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm15"
     addr_range:
       - start: 0x80F0_0000
-        end: 0x80FF_FFFF
+        end: 0x8100_0000
     sbr_port_protocol:
       - "wide_out"
 

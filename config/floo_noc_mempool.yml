@@ -55,11 +55,13 @@ endpoints:
     sbr_port_protocol:
       - "wide_out"
   - name: "host_peri"
+    # Everything below L2. The rule that used to cover
+    # 0xA000_0000-0xC000_FFFF held the bootrom and the testbench UART; both now
+    # sit below 0x8000_0000 (config/config.mk `bootrom_base` / `periph_base`),
+    # so the whole 2 GiB above `l2_base` belongs to L2/HBM and nothing else.
     addr_range:
       - start: 0x0000_0000
-        end: 0x7FFF_FFFF
-      - start: 0xA000_0000
-        end: 0xC000_FFFF
+        end: 0x8000_0000
     mgr_port_protocol:
       - "wide_in"
     sbr_port_protocol:

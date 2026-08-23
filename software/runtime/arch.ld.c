@@ -31,5 +31,7 @@ SECTIONS {
   __heap_start = __l1_start;
   __heap_end = __l1_end;
 
-  fake_uart              = 0xC0000000;
+  // Testbench UART, off-cluster behind the SoC xbar's default port.
+  // Kept in step with UARTBaseAddr in hardware/tb/mempool_tb.sv.
+  fake_uart              = PERIPH_BASE + 0x01000000;
 }

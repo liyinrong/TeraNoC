@@ -152,6 +152,8 @@ vlog_defs += -DNUM_DIVSQRT_PER_TILE=$(num_divsqrt_per_tile)
 vlog_defs += -DNUM_GROUPS=$(num_groups)
 vlog_defs += -DBANKING_FACTOR=$(banking_factor)
 vlog_defs += -DL2_BASE=32\'d$(l2_base)
+vlog_defs += -DBOOTROM_BASE=32\'d$(bootrom_base)
+vlog_defs += -DPERIPH_BASE=32\'d$(periph_base)
 vlog_defs += -DL2_SIZE=32\'d$(l2_size)
 vlog_defs += -DL2_BANKS=$(l2_banks)
 vlog_defs += -DL1_BANK_SIZE=$(l1_bank_size)
@@ -504,6 +506,10 @@ $(buildpath)/$(library):
 # Defaults to floo_noc_<config>.yml; a flavor .mk can set floo_noc_cfg to reuse
 # another config's (identical) FlooNoC yml instead of duplicating the file.
 floo_noc_cfg ?= floo_noc_$(config).yml
+# The address-map arguments every invocation of the guard shares.
+l2map_addr_args = --l2-base $(l2_base) --l2-size $(l2_size) \
+	--bootrom-base $(bootrom_base) --periph-base $(periph_base)
+
 .PHONY: update-floogen
 update-floogen: update-l2map
 	$(MAKE) -C .. FLOO_CFG=./config/$(floo_noc_cfg) update-floonoc config=$(config)
@@ -529,17 +535,27 @@ update-floogen: update-l2map
 		echo "       Does config/$(floo_noc_cfg) still say 'name: terapool'?"; \
 		exit 1; \
 	fi
+	$(python) $(MEMPOOL_DIR)/hardware/scripts/gen_l2_bank_map.py \
+		--n $(num_x) --banks $(l2_banks) \
+		--check-yml $(MEMPOOL_DIR)/config/$(floo_noc_cfg) \
+		--check-sam $(MEMPOOL_DIR)/hardware/generated \
+		$(l2map_addr_args)
 
-# L2/HBM bank -> mesh perimeter port map.
+# L2/HBM bank -> mesh perimeter port map, and the system address map.
 # The wrapper indexes the generated package; the floogen yml decides where the
 # endpoint actually sits in the network. --check-yml fails the build if the two
-# ever disagree, because a silent disagreement misroutes every L2 access.
+# ever disagree, because a silent disagreement misroutes every L2 access, and
+# the address-map arguments do the same for the L2/HBM, bootrom and peripheral
+# ranges. --check-bootrom catches a boot image left over from an older map:
+# it is PC-relative and checked in, so nothing else would notice.
 .PHONY: update-l2map
 update-l2map:
 	mkdir -p $(MEMPOOL_DIR)/hardware/generated
 	$(python) $(MEMPOOL_DIR)/hardware/scripts/gen_l2_bank_map.py \
 		--n $(num_x) --banks $(l2_banks) \
 		--check-yml $(MEMPOOL_DIR)/config/$(floo_noc_cfg) \
+		$(l2map_addr_args) --boot-addr $(boot_addr) \
+		--check-bootrom $(MEMPOOL_DIR)/hardware/$(BOOTROM_IMAGE_PKG) \
 		-o $(MEMPOOL_DIR)/hardware/generated/l2_bank_map_pkg.sv
 
 # Compilation

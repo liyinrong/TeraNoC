@@ -12,10 +12,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "addrmap.h"
 #include "mempool_dma_frontend.h"
 #include "runtime.h"
 
-#define DMA_BASE (0x40010000)
+// Second half of the peripheral window; mirrors DMABaseAddr in
+// hardware/src/mempool_system.sv. addrmap.h brings in PERIPH_BASE.
+#define DMA_BASE (CONTROL_REGISTER_OFFSET + 0x10000)
 
 static inline void dma_config(bool decouple, bool deburst, bool serialize) {
   volatile uint32_t *_dma_conf_reg =

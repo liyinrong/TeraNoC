@@ -87,11 +87,18 @@ module ctrl_registers
     logic [AddrWidth-1:0] end_addr;
   } ro_cache_region_t;
   ro_cache_region_t [ROCacheNumAddrRules-1:0] ro_cache_regions;
+  // Rules 2 and 3 are the bootrom and the bottom of L2 -- the two regions the
+  // instruction path fetches from. They follow the system address map, so they
+  // read the same config bases as mempool_system.sv rather than repeating them.
+  localparam logic [AddrWidth-1:0] BootromBase =
+      `ifdef BOOTROM_BASE `BOOTROM_BASE `else 32'h6000_0000 `endif;
+  localparam logic [AddrWidth-1:0] L2Base =
+      `ifdef L2_BASE `L2_BASE `else 32'h8000_0000 `endif;
   assign ro_cache_regions = '{
     '{start_addr: 32'h0000_000C, end_addr: 32'h0000_0010},
     '{start_addr: 32'h0000_0008, end_addr: 32'h0000_000C},
-    '{start_addr: 32'hA000_0000, end_addr: 32'hA000_1000},
-    '{start_addr: 32'h8000_0000, end_addr: 32'h8000_1000}
+    '{start_addr: BootromBase, end_addr: BootromBase + 32'h0000_1000},
+    '{start_addr: L2Base, end_addr: L2Base + 32'h0000_1000}
   };
   for (genvar i = 0; i < ROCacheNumAddrRules; i++) begin : gen_ro_cache_reg
     `FFL(ctrl_hw2reg.ro_cache_start[i].d, ctrl_reg2hw.ro_cache_start[i].q, ctrl_reg2hw.ro_cache_start[i].qe, ro_cache_regions[i].start_addr, clk_i, rst_ni)
