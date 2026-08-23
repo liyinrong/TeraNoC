@@ -257,4 +257,13 @@ rvd   ?= 0
 # A command-line `axi_width_interleaved=N` still overrides this.
 num_fus_per_core    := $(shell [ $(n_ipu) -gt $(n_fpu) ] && echo $(n_ipu) || echo $(n_fpu))
 num_banks_per_group := $(shell echo $$(( $(num_cores) * $(num_fus_per_core) * $(banking_factor) / $(num_groups) )))
-axi_width_interleaved := $(shell echo $$(( $(num_banks_per_group) * 4 / ($(axi_data_width) / 8) )))
+# HBM sits on the cluster perimeter, so a large mesh has fewer L2 banks than
+# groups (4N channels for N^2 groups) and each bank serves num_groups/l2_banks
+# of them. The invariant above is then the *set* of groups behind one bank:
+#     L2BankBeWidth * Interleave == (num_groups/l2_banks) * NumBanksPerGroup * 4
+# The ratio is 1 for every 4x4 flavor, so this is a no-op there. Getting it
+# wrong does not corrupt anything -- it changes *which* groups share a bank,
+# and at a ratio of 2 the alternative pairs a group with the one half a mesh
+# away instead of its vertical neighbour.
+groups_per_l2_bank  := $(shell echo $$(( $(num_groups) / $(l2_banks) )))
+axi_width_interleaved := $(shell echo $$(( $(groups_per_l2_bank) * $(num_banks_per_group) * 4 / ($(axi_data_width) / 8) )))
