@@ -178,13 +178,39 @@ void vc_dma_memcpy_blocking(const vc_desc_t *dst, const vc_desc_t *src) {
   // PRE-WP4: the frontend is 1-D, so walk the block-strided pattern as
   // count[0]*count[1] separate transfers. See the header for why this is a
   // bring-up path and not a benchmark path.
-  for (uint32_t j = 0; j < src->count[1]; ++j) {
-    for (uint32_t i = 0; i < src->count[0]; ++i) {
-      const uint32_t off_s = i * src->stride[0] + j * src->stride[1];
-      const uint32_t off_d = i * dst->stride[0] + j * dst->stride[1];
-      dma_memcpy_blocking((void *)(dst->base + off_d),
-                          (void *)(src->base + off_s), src->len);
-    }
+  // Walk the side that is actually block-strided. Looping on the SOURCE shape
+  // alone silently discards the destination's: an L2 source is flat
+  // (count {1,1}), so a strided VC destination collapsed into ONE contiguous
+  // copy that landed in the wrong physical words and spilled across the rows
+  // of neighbouring rectangles. Observed as a single 327680-byte transfer
+  // where 160 runs of 2048 were required.
+  const uint32_t d_runs = dst->count[0] * dst->count[1];
+  const uint32_t s_runs = src->count[0] * src->count[1];
+
+  if (s_runs == 1) { // flat source, strided destination
+    for (uint32_t j = 0; j < dst->count[1]; ++j)
+      for (uint32_t i = 0; i < dst->count[0]; ++i) {
+        const uint32_t run = j * dst->count[0] + i;
+        dma_memcpy_blocking(
+            (void *)(dst->base + i * dst->stride[0] + j * dst->stride[1]),
+            (void *)(src->base + run * dst->len), dst->len);
+      }
+  } else if (d_runs == 1) { // strided source, flat destination
+    for (uint32_t j = 0; j < src->count[1]; ++j)
+      for (uint32_t i = 0; i < src->count[0]; ++i) {
+        const uint32_t run = j * src->count[0] + i;
+        dma_memcpy_blocking((void *)(dst->base + run * src->len),
+                            (void *)(src->base + i * src->stride[0] +
+                                     j * src->stride[1]),
+                            src->len);
+      }
+  } else { // both strided: the shapes must agree run for run
+    for (uint32_t j = 0; j < dst->count[1]; ++j)
+      for (uint32_t i = 0; i < dst->count[0]; ++i)
+        dma_memcpy_blocking(
+            (void *)(dst->base + i * dst->stride[0] + j * dst->stride[1]),
+            (void *)(src->base + i * src->stride[0] + j * src->stride[1]),
+            dst->len);
   }
 }
 
