@@ -90,9 +90,22 @@ static uint32_t vc_reserved_rows[NUM_CORES][VC_MAX_LEVELS]
 // sum, not max. Reading "an independent bump pointer" as "each rewinds to the
 // floor" gives overlapping arenas, which the coexistence check catches as a
 // level-1 write showing up under a level-0 pointer.
+// Lay the row axis out LARGEST SCOPE FIRST: level k starts above the levels
+// above it, not below it.
+//
+// The direction is load-bearing. Agreement is required among the members of one
+// rectangle at one level, and a level-k rectangle sits entirely INSIDE every
+// level-j rectangle for j > k, so its members necessarily agree on the higher
+// levels' reservations. They may legitimately differ on the LOWER ones -- that
+// is exactly the heterogeneity the design allows, some rectangles using a level
+// while others give the space to smaller private scopes. Summing the lower
+// levels therefore let two members of one rectangle compute different bases for
+// the same logical allocation, and put one member's buffer on top of another
+// member's live data at a smaller scope. Summing the higher levels is uniform
+// by construction.
 static uint32_t vc_base_row(uint32_t c, uint32_t k) {
   uint32_t row = vc_floor_rows();
-  for (uint32_t j = 0; j < k; ++j) {
+  for (uint32_t j = k + 1; j < VC_MAX_LEVELS; ++j) {
     row += vc_reserved_rows[c][j];
   }
   return row;
@@ -163,7 +176,26 @@ vc_desc_t vc_descriptor(const vc_rect_t *r, uint32_t offset, uint32_t bytes) {
   // dim0 spans one bank row of one group TIMES the whole vc_gy field, since
   // the y-adjacent groups are contiguous in the global alias.
   const uint32_t inner = (uint32_t)VC_ROW_BYTES * side;
-  const uint32_t rows = bytes / (inner * side);
+  const uint32_t stride = inner * side; // == vc_row_stride(r->level)
+  // Round UP, as vc_malloc does. Truncating here made the natural idiom
+  // p = vc_malloc(k,n); d = vc_descriptor(&r, off, n) under-copy, and a
+  // sub-row `bytes` produced count[1] == 0, a descriptor that silently moves
+  // nothing.
+  const uint32_t rows = (bytes + stride - 1) / stride;
+
+  // The shape is only valid at a whole level row. A misaligned offset does not
+  // merely shift the copy, it walks into a NEIGHBOURING rectangle at the same
+  // row indices its own members use. There is no error channel here, so refuse
+  // by returning a descriptor that moves nothing -- vc_desc_valid() reports it.
+  if (offset % stride != 0) {
+    d.base = vc_global_addr(r, offset);
+    d.len = 0;
+    d.count[0] = 0;
+    d.count[1] = 0;
+    d.stride[0] = 0;
+    d.stride[1] = 0;
+    return d;
+  }
 
   d.base = vc_global_addr(r, offset);
   d.len = inner;

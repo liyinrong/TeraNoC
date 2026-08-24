@@ -143,8 +143,11 @@ static inline void *vc_ptr(uint32_t level, uint32_t offset) {
 uint32_t vc_global_addr(const vc_rect_t *r, uint32_t offset);
 
 // The global ND descriptor for `bytes` starting at a VC-local `offset`.
-// `offset` and `bytes` must both be multiples of vc_row_stride(level) / side
-// -- i.e. whole dim0 runs -- which vc_malloc guarantees.
+// `offset` must be a multiple of the FULL vc_row_stride(level), not of
+// vc_row_stride(level)/side: a dim0-aligned but not row-aligned offset builds a
+// shape that walks into a neighbouring rectangle. `bytes` rounds up to whole
+// rows, matching vc_malloc. A misaligned offset yields a descriptor that moves
+// nothing; check it with vc_desc_valid().
 vc_desc_t vc_descriptor(const vc_rect_t *r, uint32_t offset, uint32_t bytes);
 
 // Walk a descriptor as N 1-D DMA transfers.
@@ -154,6 +157,11 @@ vc_desc_t vc_descriptor(const vc_rect_t *r, uint32_t offset, uint32_t bytes);
 // transfers of `len` bytes. For a 1 MiB 2x2 buffer that is 512 x 2 KiB:
 // fine for the gate, useless for a benchmark. Real ND transfers arrive with
 // idma_nd_midend in Phase 4 (roadmap §T4.1).
+// False when vc_descriptor refused the arguments.
+static inline uint32_t vc_desc_valid(const vc_desc_t *d) {
+  return d->len != 0 && d->count[0] != 0 && d->count[1] != 0;
+}
+
 void vc_dma_memcpy_blocking(const vc_desc_t *dst, const vc_desc_t *src);
 
 // --- allocator -------------------------------------------------------------

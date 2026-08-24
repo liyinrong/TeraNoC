@@ -141,9 +141,24 @@ int main() {
       volatile uint32_t *g = (volatile uint32_t *)vc_global_addr(r, voff);
       check(*g == pattern(k, voff), "alias equivalence", *g, pattern(k, voff));
 
-      // ---- B: the DMA descriptor's base must be that same address --------
-      vc_desc_t d = vc_descriptor(r, voff, vc_row_stride(k));
-      check(d.base == (uint32_t)g, "descriptor base", d.base, (uint32_t)g);
+      // ---- B: the DMA descriptor -----------------------------------------
+      // Checking d.base alone was a tautology: vc_descriptor computes it with
+      // vc_global_addr from the same arguments used for `g`. Check the SHAPE,
+      // and check it at a row-aligned offset, which is the real precondition.
+      const uint32_t aoff = off - (off % vc_row_stride(k));
+      vc_desc_t d = vc_descriptor(r, aoff, vc_row_stride(k));
+      check(vc_desc_valid(&d), "descriptor valid", d.len, d.count[1]);
+      check(d.len * d.count[0] * d.count[1] == vc_row_stride(k),
+            "descriptor covers one row", d.len * d.count[0] * d.count[1],
+            vc_row_stride(k));
+      check(d.len == (uint32_t)VC_ROW_BYTES * r->side, "descriptor dim0",
+            d.len, (uint32_t)VC_ROW_BYTES * r->side);
+      // A misaligned offset must be refused, not silently aimed at a neighbour.
+      if (vc_row_stride(k) > VC_ROW_BYTES) {
+        vc_desc_t bad = vc_descriptor(r, aoff + VC_ROW_BYTES, vc_row_stride(k));
+        check(!vc_desc_valid(&bad), "misaligned descriptor refused", bad.len,
+              bad.count[1]);
+      }
     }
   }
   mempool_barrier(num_cores);
