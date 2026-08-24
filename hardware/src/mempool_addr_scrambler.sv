@@ -281,6 +281,15 @@ module mempool_addr_scrambler
     if (VcLevels > VcMeshLog2)
       $fatal(1, "VC level %0d exceeds the mesh (min(NumX,NumY)=%0d, log2=%0d).",
              VcLevels, (NumX < NumY ? NumX : NumY), VcMeshLog2);
+    // The VC branch and the tile-id remap are arms of one if/else chain, so a
+    // VC access correctly bypasses the remapper -- but the flat global alias of
+    // the SAME words, which the DMA and every global pointer use, is remapped.
+    // The two then land on different tiles and alias equivalence breaks.
+    // Falling through into the remap is NOT the fix: that stage reads
+    // address_i, the pre-permute window address, so it would remap the wrong
+    // value. Forbid the pair instead.
+    if (EnableTileIdRemap)
+      $fatal(1, "virtual_cluster and tile_id_remap cannot both be enabled: the VC branch bypasses the tile-id remap that the same words receive through their global alias.");
     if (NumTilesPerGroup * NumX * NumY != NumTiles)
       $fatal(1, "NumTilesPerGroup*NumX*NumY (%0d) != NumTiles (%0d); the VC geometry disagrees with the cluster.",
              NumTilesPerGroup*NumX*NumY, NumTiles);

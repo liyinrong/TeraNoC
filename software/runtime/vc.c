@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+#define VC_IMPL 1 // the library itself builds on any config; see vc.h
 #include "vc.h"
 
 #include "dma.h"

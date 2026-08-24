@@ -23,6 +23,17 @@
 
 #include "runtime.h"
 
+// VIRTUAL_CLUSTER gates the HARDWARE permuter. Without this guard the software
+// API stayed fully functional on a build whose permuter was compiled out, so a
+// VC pointer was just an address the cluster does not translate -- it leaves
+// with no decode error and no fault. vc.c defines VC_IMPL because it is
+// compiled into the runtime unconditionally (runtime.mk:211) and must still
+// build; every other includer is an application, and an application that wants
+// VC memory needs the hardware to be there.
+#if !defined(VC_IMPL) && (!defined(VIRTUAL_CLUSTER) || !VIRTUAL_CLUSTER)
+#error "vc.h needs virtual_cluster=1: the VC permuter is not in this hardware"
+#endif
+
 #ifndef VC_LEVELS
 #error "VC_LEVELS undefined: the runtime must be built through runtime.mk"
 #endif
