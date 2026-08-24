@@ -224,6 +224,50 @@ int main() {
     mempool_barrier(num_cores);
   }
 
+  // ---- E: heterogeneous lower-level budgets ------------------------------
+  //
+  // The regression for the arena-layout bug. Members of one level-1 rectangle
+  // are explicitly allowed to disagree about level 0 -- some rectangles use a
+  // level while others give the space to smaller private scopes -- so a level-1
+  // base that depended on level-0 reservations made them stop sharing the
+  // buffer they believe they share, and put one member's rows on another
+  // member's live level-0 data. Here the odd groups reserve twice the level-0
+  // rows of the even ones, and the level-1 sweep must still agree.
+  if ((uint32_t)VC_LEVELS > 1) {
+    for (uint32_t k = 0; k < (uint32_t)VC_LEVELS; k++)
+      vc_arena_reset(k);
+    const uint32_t gid = mempool_get_group_id();
+    check(vc_reserve(0, vc_row_stride(0) * (1 + (gid & 1))) == 0,
+          "heterogeneous level-0 reserve", gid, 0);
+    check(vc_reserve(1, vc_row_stride(1)) == 0, "level-1 reserve", gid, 0);
+
+    volatile uint32_t *hbuf = (volatile uint32_t *)vc_malloc(1, vc_row_stride(1));
+    check(hbuf != 0, "heterogeneous vc_malloc", 0, 0);
+    mempool_barrier(num_cores);
+
+    const vc_rect_t hr = vc_rect(1);
+    const uint32_t hoff = (uint32_t)hbuf - vc_window_base(1);
+    const uint32_t hgx = gid / NUM_Y;
+    const uint32_t hgy = gid % NUM_Y;
+    const uint32_t hlead =
+        group_leader && (hgx == hr.base_gx) && (hgy == hr.base_gy);
+
+    if (hlead)
+      for (uint32_t slot = 0; slot < hr.ngroups; slot++)
+        *(volatile uint32_t *)vc_ptr(1, hoff + slot * VC_ROW_BYTES) =
+            shared_pattern(1, hoff + slot * VC_ROW_BYTES);
+    mempool_barrier(num_cores);
+
+    if (group_leader)
+      for (uint32_t slot = 0; slot < hr.ngroups; slot++) {
+        const uint32_t voff = hoff + slot * VC_ROW_BYTES;
+        check(*(volatile uint32_t *)vc_ptr(1, voff) == shared_pattern(1, voff),
+              "heterogeneous sharing", *(volatile uint32_t *)vc_ptr(1, voff),
+              shared_pattern(1, voff));
+      }
+    mempool_barrier(num_cores);
+  }
+
   if (core_id == 0) {
     uint32_t total = 0;
     for (uint32_t c = 0; c < num_cores; c++) {
