@@ -1,0 +1,13 @@
+// Copyright 2026 ETH Zurich and University of Bologna.
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
+
+#define QWEN_BENCHMARK_NAME "qwen_attention_decode_qk_gemm"
+#define QWEN_LOGICAL_M 32
+#define QWEN_LOGICAL_N 256
+#define QWEN_LOGICAL_P 2048
+#define QWEN_TILE_N 256
+#define QWEN_DECODE 1
+#define QWEN_OUTPUT_CLASS 0
+
+#include "../qwen_redmule_op_main.h"

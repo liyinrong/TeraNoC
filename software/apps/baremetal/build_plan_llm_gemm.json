@@ -1,0 +1,146 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+
+  "//": "Pure-GEMM dense-LLM pack plus the stage-1 FFN DSE. Toy tasks are golden-checked; surrogate/full tasks use uninitialized L2 data and report cycles only. The 2-D mapping keys are data-generation parameters as well as C defines, so packed operand layouts cannot disagree with the selected kernel path.",
+
+  "rename_tag_rules": {
+    "llm_gemm_ffn_f16": ["S", "D", "I"],
+    "llm_gemm_attention_f16": ["S", "D", "N_HEADS", "HEAD_DIM"]
+  },
+
+  "extra_args": {
+    "llm_gemm_ffn_f16": "COMPILER=llvm",
+    "llm_gemm_attention_f16": "COMPILER=llvm"
+  },
+
+  "configs": [
+    {
+      "name": "tensorpool256_spatz4",
+      "pack_dir": "tensorpool256_spatz4/gemm_toy",
+      "apps": {
+        "llm_gemm_ffn_f16": [
+          {"S": 512, "D": 256, "I": 1024, "LLM_PERF_ONLY": 0}
+        ],
+        "llm_gemm_attention_f16": [
+          {"S": 512, "D": 256, "N_HEADS": 8, "HEAD_DIM": 32,
+           "LLM_PERF_ONLY": 0}
+        ]
+      }
+    },
+    {
+      "name": "tensorpool256_spatz4",
+      "pack_dir": "tensorpool256_spatz4/gemm_real",
+      "apps": {
+        "llm_gemm_ffn_f16": [
+          {"S": 2048, "D": 4096, "I": 16384, "LLM_PERF_ONLY": 1}
+        ],
+        "llm_gemm_attention_f16": [
+          {"S": 2048, "D": 4096, "N_HEADS": 32, "HEAD_DIM": 128,
+           "LLM_PERF_ONLY": 1}
+        ]
+      }
+    },
+    {
+      "name": "dse_s1_m1",
+      "pack_dir": "stage1_dse/s1_m1",
+      "apps": {
+        "llm_gemm_ffn_f16": {
+          "variants": {
+            "_2d": {
+              "tasks": [
+                {"S": 512, "D": 256, "I": 1024, "LLM_PERF_ONLY": 0,
+                 "LLM_GEMM_2D": 1, "NE_R": 8, "NE_C": 8},
+                {"S": 2048, "D": 4096, "I": 2048, "LLM_PERF_ONLY": 1,
+                 "LLM_GEMM_2D": 1, "NE_R": 8, "NE_C": 8},
+                {"S": 2048, "D": 4096, "I": 16384, "LLM_PERF_ONLY": 1,
+                 "LLM_GEMM_2D": 1, "NE_R": 8, "NE_C": 8}
+              ]
+            },
+            "_row": {
+              "tasks": [
+                {"S": 512, "D": 256, "I": 1024, "LLM_PERF_ONLY": 0,
+                 "LLM_GEMM_2D": 0, "NE_R": 1, "NE_C": 1},
+                {"S": 2048, "D": 4096, "I": 2048, "LLM_PERF_ONLY": 1,
+                 "LLM_GEMM_2D": 0, "NE_R": 1, "NE_C": 1}
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "dse_s1_m2",
+      "pack_dir": "stage1_dse/s1_m2",
+      "apps": {
+        "llm_gemm_ffn_f16": {
+          "variants": {
+            "_2d": {
+              "tasks": [
+                {"S": 512, "D": 256, "I": 1024, "LLM_PERF_ONLY": 0,
+                 "LLM_GEMM_2D": 1, "NE_R": 8, "NE_C": 8},
+                {"S": 2048, "D": 4096, "I": 2048, "LLM_PERF_ONLY": 1,
+                 "LLM_GEMM_2D": 1, "NE_R": 8, "NE_C": 8}
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "dse_s1_m3",
+      "pack_dir": "stage1_dse/s1_m3",
+      "apps": {
+        "llm_gemm_ffn_f16": {
+          "variants": {
+            "_2d": {
+              "tasks": [
+                {"S": 512, "D": 256, "I": 1024, "LLM_PERF_ONLY": 0,
+                 "LLM_GEMM_2D": 1, "NE_R": 8, "NE_C": 8},
+                {"S": 2048, "D": 4096, "I": 2048, "LLM_PERF_ONLY": 1,
+                 "LLM_GEMM_2D": 1, "NE_R": 8, "NE_C": 8}
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "dse_s1_m4",
+      "pack_dir": "stage1_dse/s1_m4",
+      "apps": {
+        "llm_gemm_ffn_f16": {
+          "variants": {
+            "_2d": {
+              "tasks": [
+                {"S": 512, "D": 256, "I": 1024, "LLM_PERF_ONLY": 0,
+                 "LLM_GEMM_2D": 1, "NE_R": 8, "NE_C": 8},
+                {"S": 2048, "D": 4096, "I": 2048, "LLM_PERF_ONLY": 1,
+                 "LLM_GEMM_2D": 1, "NE_R": 8, "NE_C": 8}
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "dse_s1_m5",
+      "pack_dir": "stage1_dse/s1_m5",
+      "apps": {
+        "llm_gemm_ffn_f16": {
+          "variants": {
+            "_2d": {
+              "tasks": [
+                {"S": 512, "D": 256, "I": 1024, "LLM_PERF_ONLY": 0,
+                 "LLM_GEMM_2D": 1, "NE_R": 8, "NE_C": 8},
+                {"S": 2048, "D": 4096, "I": 2048, "LLM_PERF_ONLY": 1,
+                 "LLM_GEMM_2D": 1, "NE_R": 8, "NE_C": 8}
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

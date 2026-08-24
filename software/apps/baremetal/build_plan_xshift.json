@@ -1,0 +1,56 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+  "//": "rm_gemm_xshift_f16: the RedMulE X contraction-start offset (REDMULE_XSHIFT, register index 18 = engine-relative 0x48) and the W column-start offset (MCFG1[31:16]), independently switchable. The four variants form a 2x2 so each axis and their combination can be attributed separately.",
+  "rename_tag_rules": {
+    "rm_gemm_xshift_f16": [
+      "matrix_M",
+      "matrix_N",
+      "matrix_P"
+    ]
+  },
+  "extra_args": {
+    "rm_gemm_xshift_f16": "COMPILER=llvm"
+  },
+  "configs": [
+    {
+      "name": "dse_s0_m4",
+      "pack_dir": "stage1_dse/rm_gemm_xshift",
+      "apps": {
+        "rm_gemm_xshift_f16": {
+          "tasks": [
+            {
+              "matrix_M": 256,
+              "matrix_N": 512,
+              "matrix_P": 512,
+              "LLM_PERF_ONLY": 0,
+              "RM_GEMM_TILED_2D": 1,
+              "NE_R": 4,
+              "NE_C": 4,
+              "ROW_TILE": 256,
+              "COL_TILE": 512
+            },
+            {
+              "matrix_M": 256,
+              "matrix_N": 4096,
+              "matrix_P": 512,
+              "LLM_PERF_ONLY": 1,
+              "RM_GEMM_TILED_2D": 1,
+              "NE_R": 4,
+              "NE_C": 4,
+              "ROW_TILE": 256,
+              "COL_TILE": 512
+            }
+          ],
+          "variants": {
+            "_none": "-DRM_X_SHIFT=0 -DRM_W_SHIFT=0",
+            "_x": "-DRM_X_SHIFT=1 -DRM_W_SHIFT=0",
+            "_w": "-DRM_X_SHIFT=0 -DRM_W_SHIFT=1",
+            "_xw": "-DRM_X_SHIFT=1 -DRM_W_SHIFT=1"
+          }
+        }
+      }
+    }
+  ]
+}

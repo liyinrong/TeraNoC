@@ -1,0 +1,72 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+  "rename_tag_rules": {
+    "axpy_f32": [
+      "array_N"
+    ],
+    "dotp_f32": [
+      "array_N"
+    ],
+    "gemv_f32": [
+      "matrix_M",
+      "matrix_N"
+    ],
+    "matmul_f32": [
+      "matrix_M",
+      "matrix_N",
+      "matrix_P"
+    ],
+    "matmul_i32": [
+      "matrix_M",
+      "matrix_N",
+      "matrix_P"
+    ]
+  },
+  "extra_args": {
+    "axpy_f32": "COMPILER=llvm",
+    "dotp_f32": "COMPILER=llvm",
+    "gemv_f32": "COMPILER=llvm",
+    "matmul_f32": "COMPILER=llvm",
+    "matmul_i32": "COMPILER=gcc"
+  },
+  "configs": [
+    {
+      "name": "terapool",
+      "pack_dir": "terapool",
+      "apps": {
+        "axpy_f32": [
+          {
+            "array_N": 262144
+          }
+        ],
+        "dotp_f32": [
+          {
+            "array_N": 262144
+          }
+        ],
+        "gemv_f32": [
+          {
+            "matrix_M": 4096,
+            "matrix_N": 192
+          }
+        ],
+        "matmul_f32": [
+          {
+            "matrix_M": 256,
+            "matrix_N": 256,
+            "matrix_P": 256
+          }
+        ],
+        "matmul_i32": [
+          {
+            "matrix_M": 256,
+            "matrix_N": 256,
+            "matrix_P": 256
+          }
+        ]
+      }
+    }
+  ]
+}

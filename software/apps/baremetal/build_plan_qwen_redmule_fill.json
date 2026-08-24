@@ -1,0 +1,398 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+  "//": "Qwen3.8 RedMulE pack built with QWEN_TILE_POLICY=1 -- 'fill': each operation takes as many engines as its operand shape and the L1 tile budget allow, split as squarely as possible. Four configs so the 4x4 and 8x8 chips are measured under the SAME tiling rule; the stage-1 packs (policy 0) keep the fixed 8x8 / 1x16 grid every 4x4 DSE number was measured against and are not replaced. Per-engine work is identical under both policies -- one engine always computes PORT_WIDTH x TILE_N x PORT_WIDTH -- so U_active is comparable across them and raw cycles are not.",
+  "extra_args": {
+    "qwen_ffn_prefill_gate_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_ffn_prefill_up_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_ffn_prefill_down_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_ffn_decode_gate_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_ffn_decode_up_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_ffn_decode_down_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_prefill_qg_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_prefill_k_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_prefill_v_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_prefill_qk_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_prefill_pv_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_prefill_o_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_decode_qg_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_decode_k_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_decode_v_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_decode_qk_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_decode_pv_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_decode_o_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_prefill_qkv_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_prefill_z_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_prefill_a_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_prefill_b_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_prefill_o_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_decode_qkv_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_decode_z_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_decode_a_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_decode_b_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_decode_o_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1"
+  },
+  "configs": [
+    {
+      "name": "dse_s1_winner",
+      "pack_dir": "stage2_fill/qwen_fill_s1_4x4",
+      "apps": {
+        "qwen_ffn_prefill_gate_gemm": [
+          {}
+        ],
+        "qwen_ffn_prefill_up_gemm": [
+          {}
+        ],
+        "qwen_ffn_prefill_down_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_gate_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_up_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_down_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_qg_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_k_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_v_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_qk_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_pv_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_o_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_qg_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_k_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_v_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_qk_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_pv_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_o_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_qkv_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_z_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_a_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_b_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_o_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_qkv_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_z_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_a_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_b_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_o_gemm": [
+          {}
+        ]
+      }
+    },
+    {
+      "name": "dse_s2_winner",
+      "pack_dir": "stage2_fill/qwen_fill_s2_4x4",
+      "apps": {
+        "qwen_ffn_prefill_gate_gemm": [
+          {}
+        ],
+        "qwen_ffn_prefill_up_gemm": [
+          {}
+        ],
+        "qwen_ffn_prefill_down_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_gate_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_up_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_down_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_qg_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_k_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_v_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_qk_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_pv_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_o_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_qg_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_k_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_v_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_qk_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_pv_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_o_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_qkv_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_z_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_a_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_b_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_o_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_qkv_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_z_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_a_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_b_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_o_gemm": [
+          {}
+        ]
+      }
+    },
+    {
+      "name": "dse_s1_8x8_winner",
+      "pack_dir": "stage2_fill/qwen_fill_s1_8x8",
+      "apps": {
+        "qwen_ffn_prefill_gate_gemm": [
+          {}
+        ],
+        "qwen_ffn_prefill_up_gemm": [
+          {}
+        ],
+        "qwen_ffn_prefill_down_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_gate_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_up_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_down_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_qg_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_k_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_v_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_qk_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_pv_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_o_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_qg_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_k_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_v_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_qk_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_pv_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_o_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_qkv_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_z_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_a_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_b_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_o_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_qkv_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_z_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_a_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_b_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_o_gemm": [
+          {}
+        ]
+      }
+    },
+    {
+      "name": "dse_s2_8x8_winner",
+      "pack_dir": "stage2_fill/qwen_fill_s2_8x8",
+      "apps": {
+        "qwen_ffn_prefill_gate_gemm": [
+          {}
+        ],
+        "qwen_ffn_prefill_up_gemm": [
+          {}
+        ],
+        "qwen_ffn_prefill_down_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_gate_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_up_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_down_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_qg_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_k_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_v_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_qk_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_pv_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_o_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_qg_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_k_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_v_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_qk_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_pv_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_o_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_qkv_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_z_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_a_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_b_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_o_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_qkv_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_z_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_a_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_b_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_o_gemm": [
+          {}
+        ]
+      }
+    }
+  ]
+}

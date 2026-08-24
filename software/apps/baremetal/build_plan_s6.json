@@ -1,0 +1,42 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+  "//": "S6 = H32 x W64. PORT_WIDTH = 128 elements, so the per-engine shards must tile 128 - hence ROW_TILE/NE_R and COL_TILE/NE_C both raised to 128.",
+  "rename_tag_rules": {
+    "rm_gemm_xshift_f16": [
+      "matrix_M",
+      "matrix_N",
+      "matrix_P"
+    ]
+  },
+  "extra_args": {
+    "rm_gemm_xshift_f16": "COMPILER=llvm"
+  },
+  "configs": [
+    {
+      "name": "dse_s6_m4",
+      "pack_dir": "stage1_dse/xshift_w1_s6",
+      "apps": {
+        "rm_gemm_xshift_f16": {
+          "tasks": [
+            {
+              "matrix_M": 1024,
+              "matrix_N": 4096,
+              "matrix_P": 1024,
+              "LLM_PERF_ONLY": 1,
+              "RM_GEMM_TILED_2D": 1,
+              "NE_R": 8,
+              "NE_C": 8,
+              "ROW_TILE": 1024,
+              "COL_TILE": 1024
+            }
+          ],
+          "variants": {
+            "_on": "-DRM_X_SHIFT=1 -DRM_W_SHIFT=0"
+          }
+        }
+      }
+    }
+  ]
+}

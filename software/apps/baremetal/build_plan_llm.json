@@ -1,0 +1,106 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+
+  "//": "Twelve-workload dense benchmark pack for tensorpool256_spatz4: four golden-checked, one-outer-tile classic Transformer workloads, four real-size classic Transformer performance workloads, and four real-size model-faithful Llama-3.1-8B layer workloads. Real-size tasks use uninitialized L2 data and do not run a golden check.",
+
+  "rename_tag_rules": {
+    "llm_classic_ffn_prefill_f16": ["S", "D", "I"],
+    "llm_classic_ffn_decode_f16": ["S", "D", "I"],
+    "llm_classic_attention_prefill_f16": ["S", "D", "N_HEADS", "HEAD_DIM"],
+    "llm_classic_attention_decode_f16": ["S", "KV_LEN", "D", "N_HEADS", "HEAD_DIM"],
+    "llm_ffn_prefill_f16": ["S", "D", "I"],
+    "llm_ffn_decode_f16": ["S", "D", "I"],
+    "llm_attention_prefill_f16": ["S", "D", "N_Q_HEADS", "N_KV_HEADS", "HEAD_DIM"],
+    "llm_attention_decode_f16": ["S", "KV_LEN", "D", "N_Q_HEADS", "N_KV_HEADS", "HEAD_DIM"]
+  },
+
+  "extra_args": {
+    "llm_classic_ffn_prefill_f16": "COMPILER=llvm",
+    "llm_classic_ffn_decode_f16": "COMPILER=llvm",
+    "llm_classic_attention_prefill_f16": "COMPILER=llvm",
+    "llm_classic_attention_decode_f16": "COMPILER=llvm",
+    "llm_ffn_prefill_f16": "COMPILER=llvm",
+    "llm_ffn_decode_f16": "COMPILER=llvm",
+    "llm_attention_prefill_f16": "COMPILER=llvm APP_DEFINES=\"-DLLM_FLASH_ATTENTION -DLLM_FLASH_TILED -DLLM_FLASH_BM=32 -DLLM_FLASH_BN=32\"",
+    "llm_attention_decode_f16": "COMPILER=llvm APP_DEFINES=\"-DLLM_FLASH_ATTENTION -DLLM_FLASH_TILED -DLLM_FLASH_BM=32 -DLLM_FLASH_BN=32\""
+  },
+
+  "configs": [
+    {
+      "name": "tensorpool256_spatz4",
+      "pack_dir": "tensorpool256_spatz4/classic_toy",
+      "apps": {
+        "llm_classic_ffn_prefill_f16": [
+          {"S": 512, "D": 256, "I": 1024}
+        ],
+        "llm_classic_ffn_decode_f16": [
+          {"S": 32, "D": 256, "I": 1024}
+        ],
+        "llm_classic_attention_prefill_f16": {
+          "tasks": [
+            {"S": 512, "D": 256, "N_HEADS": 8, "HEAD_DIM": 32}
+          ],
+          "variants": {
+            "_flash": "-DLLM_FLASH_ATTENTION"
+          }
+        },
+        "llm_classic_attention_decode_f16": {
+          "tasks": [
+            {"S": 32, "KV_LEN": 4096, "D": 256, "N_HEADS": 8, "HEAD_DIM": 32}
+          ],
+          "variants": {
+            "_flash": "-DLLM_FLASH_ATTENTION"
+          }
+        }
+      }
+    },
+    {
+      "name": "tensorpool256_spatz4",
+      "pack_dir": "tensorpool256_spatz4/classic_real_flash",
+      "apps": {
+        "llm_classic_ffn_prefill_f16": [
+          {"S": 2048, "D": 4096, "I": 16384, "LLM_PERF_ONLY": 1}
+        ],
+        "llm_classic_ffn_decode_f16": [
+          {"S": 32, "D": 4096, "I": 16384, "LLM_PERF_ONLY": 1}
+        ],
+        "llm_classic_attention_prefill_f16": {
+          "tasks": [
+            {"S": 2048, "D": 4096, "N_HEADS": 32, "HEAD_DIM": 128, "LLM_PERF_ONLY": 1}
+          ],
+          "variants": {
+            "_flash": "-DLLM_FLASH_ATTENTION"
+          }
+        },
+        "llm_classic_attention_decode_f16": {
+          "tasks": [
+            {"S": 32, "KV_LEN": 4096, "D": 4096, "N_HEADS": 32, "HEAD_DIM": 128, "LLM_PERF_ONLY": 1}
+          ],
+          "variants": {
+            "_flash": "-DLLM_FLASH_ATTENTION"
+          }
+        }
+      }
+    },
+    {
+      "name": "tensorpool256_spatz4",
+      "pack_dir": "tensorpool256_spatz4/llama_real",
+      "apps": {
+        "llm_ffn_prefill_f16": [
+          {"S": 2048, "D": 4096, "I": 14336, "ROW_TILE": 64, "LLM_PERF_ONLY": 1}
+        ],
+        "llm_ffn_decode_f16": [
+          {"S": 32, "D": 4096, "I": 14336, "ROW_TILE": 32, "LLM_PERF_ONLY": 1}
+        ],
+        "llm_attention_prefill_f16": [
+          {"S": 2048, "D": 4096, "N_Q_HEADS": 32, "N_KV_HEADS": 8, "HEAD_DIM": 128, "QK_NORM": 0, "ROPE_THETA": 500000, "LLM_PERF_ONLY": 1}
+        ],
+        "llm_attention_decode_f16": [
+          {"S": 32, "KV_LEN": 4096, "WINDOW_LEN": 0, "D": 4096, "N_Q_HEADS": 32, "N_KV_HEADS": 8, "HEAD_DIM": 128, "QK_NORM": 0, "ROPE_THETA": 500000, "KV_CACHE_TOKEN_MAJOR": 1, "LLM_PERF_ONLY": 1}
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+  "rename_tag_rules": {
+    "sp_axpy_f32": [
+      "array_N"
+    ],
+    "sp_dotp_f32": [
+      "array_N"
+    ],
+    "sp_gemv_f32": [
+      "matrix_M",
+      "matrix_N"
+    ],
+    "sp_matmul_f32": [
+      "matrix_M",
+      "matrix_N",
+      "matrix_P"
+    ],
+    "sp_matmul_i32": [
+      "matrix_M",
+      "matrix_N",
+      "matrix_P"
+    ]
+  },
+  "extra_args": {
+    "sp_axpy_f32": "COMPILER=llvm",
+    "sp_dotp_f32": "COMPILER=llvm",
+    "sp_gemv_f32": "COMPILER=llvm",
+    "sp_matmul_f32": "COMPILER=llvm",
+    "sp_matmul_i32": "COMPILER=llvm"
+  },
+  "configs": [
+    {
+      "name": "terapool_spatz4_fpu",
+      "pack_dir": "terapool_spatz4_fpu",
+      "apps": {
+        "sp_axpy_f32": [
+          {
+            "array_N": 262144
+          }
+        ],
+        "sp_dotp_f32": [
+          {
+            "array_N": 262144
+          }
+        ],
+        "sp_gemv_f32": {
+          "tasks": [
+            {
+              "matrix_M": 4096,
+              "matrix_N": 192,
+              "transpose_a": 1
+            }
+          ],
+          "variants": {"": "-DSP_GEMV_PREFETCH"}
+        },
+        "sp_matmul_f32": {
+          "tasks": [
+            {
+              "matrix_M": 256,
+              "matrix_N": 256,
+              "matrix_P": 256
+            }
+          ],
+          "variants": {"": "-DSP_MATMUL_KERNEL_SIZE=8"}
+        },
+        "sp_matmul_i32": {
+          "tasks": [
+            {
+              "matrix_M": 256,
+              "matrix_N": 256,
+              "matrix_P": 256
+            }
+          ],
+          "variants": {"": "-DSP_MATMUL_I32_KERNEL_SIZE=8"}
+        }
+      }
+    }
+  ]
+}

@@ -1,3 +1,7 @@
+# Copyright 2026 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+
 # Stage-1 DSE S1 / M5 read-optimized: (RO, RWreq, RWresp, WO) = (4, 2, 4, 2).
 config_build_path := dse_s1_m5
 noc_req_wide_ro_channel_num  := 4

@@ -1,0 +1,41 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+  "rename_tag_rules": {
+    "rm_gemm_opt_f16": ["matrix_M", "matrix_N", "matrix_P"]
+  },
+  "extra_args": {
+    "rm_gemm_opt_f16": "COMPILER=llvm"
+  },
+  "configs": [
+    {
+      "name": "tensorpool256_spatz4",
+      "pack_dir": "tensorpool256_spatz4/opt_smoke_parallel",
+      "apps": {
+        "rm_gemm_opt_f16": {
+          "tasks": [
+            {"matrix_M": 128, "matrix_N": 128, "matrix_P": 128,
+             "RM_GEMM_TILED_2D": 0}
+          ],
+          "variants": {"": "-DPARALLEL"}
+        }
+      }
+    },
+    {
+      "name": "tensorpool256_spatz4",
+      "pack_dir": "tensorpool256_spatz4/opt_smoke_tiled2d",
+      "apps": {
+        "rm_gemm_opt_f16": {
+          "tasks": [
+            {"matrix_M": 256, "matrix_N": 256, "matrix_P": 512,
+             "LLM_PERF_ONLY": 0, "RM_GEMM_TILED_2D": 1,
+             "NE_R": 4, "NE_C": 4,
+             "ROW_TILE": 256, "COL_TILE": 512}
+          ],
+          "variants": {"": ""}
+        }
+      }
+    }
+  ]
+}

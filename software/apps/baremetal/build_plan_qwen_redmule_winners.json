@@ -1,0 +1,188 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+  "//": "Qwen3.8 Stage-1 RedMulE pack built against the two stage-1 DSE WINNER configs. Guest geometry is identical to the dse_s{1,2}_m4 packs -- the winner configs differ only in wide-plane channel mix, ROB depth, remap and router FIFO depth, none of which is guest-visible. The separate pack exists so every ELF's provenance names the config it was measured on.",
+  "configs": [
+    {
+      "name": "dse_s1_winner",
+      "pack_dir": "stage1_dse/qwen_redmule_s1_winner",
+      "apps": {
+        "qwen_ffn_prefill_gate_gemm": [
+          {}
+        ],
+        "qwen_ffn_prefill_up_gemm": [
+          {}
+        ],
+        "qwen_ffn_prefill_down_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_gate_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_up_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_down_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_qg_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_k_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_v_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_qk_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_pv_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_o_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_qg_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_k_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_v_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_qk_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_pv_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_o_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_qkv_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_z_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_a_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_b_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_o_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_qkv_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_z_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_a_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_b_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_o_gemm": [
+          {}
+        ]
+      }
+    },
+    {
+      "name": "dse_s2_winner",
+      "pack_dir": "stage1_dse/qwen_redmule_s2_winner",
+      "apps": {
+        "qwen_ffn_prefill_gate_gemm": [
+          {}
+        ],
+        "qwen_ffn_prefill_up_gemm": [
+          {}
+        ],
+        "qwen_ffn_prefill_down_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_gate_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_up_gemm": [
+          {}
+        ],
+        "qwen_ffn_decode_down_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_qg_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_k_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_v_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_qk_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_pv_gemm": [
+          {}
+        ],
+        "qwen_attention_prefill_o_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_qg_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_k_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_v_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_qk_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_pv_gemm": [
+          {}
+        ],
+        "qwen_attention_decode_o_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_qkv_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_z_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_a_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_b_gemm": [
+          {}
+        ],
+        "qwen_gdn_prefill_o_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_qkv_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_z_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_a_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_b_gemm": [
+          {}
+        ],
+        "qwen_gdn_decode_o_gemm": [
+          {}
+        ]
+      }
+    }
+  ]
+}

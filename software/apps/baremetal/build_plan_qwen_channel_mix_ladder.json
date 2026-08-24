@@ -1,0 +1,68 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+  "_comment": [
+    "Qwen3.8 RedMulE prefill pack for the S1 wide-channel-mix RTL/GVSoC anchor.",
+    "Build the same fill-policy operations under M1 and the S1 winner, then require",
+    "the paired ELF hashes to match before reusing the winner pack for model sweeps."
+  ],
+  "extra_args": {
+    "qwen_ffn_prefill_gate_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_ffn_prefill_up_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_ffn_prefill_down_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_prefill_qg_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_prefill_k_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_prefill_v_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_prefill_qk_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_prefill_pv_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_attention_prefill_o_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_prefill_qkv_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_prefill_z_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_prefill_a_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_prefill_b_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1",
+    "qwen_gdn_prefill_o_gemm": "APP_DEFINES=-DQWEN_TILE_POLICY=1"
+  },
+  "configs": [
+    {
+      "name": "dse_s1_m1",
+      "pack_dir": "channel_mix_ladder/qwen_fill_s1_m1",
+      "apps": {
+        "qwen_ffn_prefill_gate_gemm": [{}],
+        "qwen_ffn_prefill_up_gemm": [{}],
+        "qwen_ffn_prefill_down_gemm": [{}],
+        "qwen_attention_prefill_qg_gemm": [{}],
+        "qwen_attention_prefill_k_gemm": [{}],
+        "qwen_attention_prefill_v_gemm": [{}],
+        "qwen_attention_prefill_qk_gemm": [{}],
+        "qwen_attention_prefill_pv_gemm": [{}],
+        "qwen_attention_prefill_o_gemm": [{}],
+        "qwen_gdn_prefill_qkv_gemm": [{}],
+        "qwen_gdn_prefill_z_gemm": [{}],
+        "qwen_gdn_prefill_a_gemm": [{}],
+        "qwen_gdn_prefill_b_gemm": [{}],
+        "qwen_gdn_prefill_o_gemm": [{}]
+      }
+    },
+    {
+      "name": "dse_s1_winner",
+      "pack_dir": "channel_mix_ladder/qwen_fill_s1_winner",
+      "apps": {
+        "qwen_ffn_prefill_gate_gemm": [{}],
+        "qwen_ffn_prefill_up_gemm": [{}],
+        "qwen_ffn_prefill_down_gemm": [{}],
+        "qwen_attention_prefill_qg_gemm": [{}],
+        "qwen_attention_prefill_k_gemm": [{}],
+        "qwen_attention_prefill_v_gemm": [{}],
+        "qwen_attention_prefill_qk_gemm": [{}],
+        "qwen_attention_prefill_pv_gemm": [{}],
+        "qwen_attention_prefill_o_gemm": [{}],
+        "qwen_gdn_prefill_qkv_gemm": [{}],
+        "qwen_gdn_prefill_z_gemm": [{}],
+        "qwen_gdn_prefill_a_gemm": [{}],
+        "qwen_gdn_prefill_b_gemm": [{}],
+        "qwen_gdn_prefill_o_gemm": [{}]
+      }
+    }
+  ]
+}

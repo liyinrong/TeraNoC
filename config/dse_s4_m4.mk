@@ -1,3 +1,7 @@
+# Copyright 2026 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+
 # Stage-1 DSE S4 / M4: (RO, RWreq, RWresp, WO) = (4, 1, 4, 1).
 config_build_path := dse_s4_m4
 noc_req_wide_ro_channel_num  := 4

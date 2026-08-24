@@ -1,0 +1,93 @@
+{
+ "make_cwd": ".",
+ "out_dir": "../../bin/apps/baremetal",
+ "gendata_params": "../../data/gendata_params.hjson",
+ "//": "Trace-complete steady-state W1 tiles. S0's 256x4096x512 logical tile gives all 16 RedMulEs one dense 64x4096x128 job using a 4x4 mapping. S1/S2 use 512x4096x1024 and an 8x8 mapping for the same S1 local job; S1 reuses one ELF on M1-M5, while S2 builds a distinct ELF because H16 PORT_WIDTH is compile-time.",
+ "rename_tag_rules": {
+  "rm_gemm_opt_f16": [
+   "matrix_M",
+   "matrix_N",
+   "matrix_P"
+  ]
+ },
+ "extra_args": {
+  "rm_gemm_opt_f16": "COMPILER=llvm"
+ },
+ "configs": [
+  {
+   "name": "dse_s0_m4",
+   "pack_dir": "stage1_dse/rm_gemm_w1_tile_s0_m4",
+   "apps": {
+    "rm_gemm_opt_f16": {
+     "variants": {
+      "_tiled_w1_tile": {
+       "tasks": [
+        {
+         "matrix_M": 256,
+         "matrix_N": 4096,
+         "matrix_P": 512,
+         "LLM_PERF_ONLY": 1,
+         "RM_GEMM_TILED_2D": 1,
+         "NE_R": 4,
+         "NE_C": 4,
+         "ROW_TILE": 256,
+         "COL_TILE": 512
+        }
+       ]
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "dse_s1_m4",
+   "pack_dir": "stage1_dse/rm_gemm_w1_tile_common",
+   "apps": {
+    "rm_gemm_opt_f16": {
+     "variants": {
+      "_tiled_w1_tile": {
+       "tasks": [
+        {
+         "matrix_M": 512,
+         "matrix_N": 4096,
+         "matrix_P": 1024,
+         "LLM_PERF_ONLY": 1,
+         "RM_GEMM_TILED_2D": 1,
+         "NE_R": 8,
+         "NE_C": 8,
+         "ROW_TILE": 512,
+         "COL_TILE": 1024
+        }
+       ]
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "dse_s2_m4",
+   "pack_dir": "stage1_dse/rm_gemm_w1_tile_s2_m4",
+   "apps": {
+    "rm_gemm_opt_f16": {
+     "variants": {
+      "_tiled_w1_tile": {
+       "tasks": [
+        {
+         "matrix_M": 512,
+         "matrix_N": 4096,
+         "matrix_P": 1024,
+         "LLM_PERF_ONLY": 1,
+         "RM_GEMM_TILED_2D": 1,
+         "NE_R": 8,
+         "NE_C": 8,
+         "ROW_TILE": 512,
+         "COL_TILE": 1024
+        }
+       ]
+      }
+     }
+    }
+   }
+  }
+ ]
+}

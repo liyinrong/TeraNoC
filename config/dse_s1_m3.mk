@@ -1,3 +1,7 @@
+# Copyright 2026 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+
 # Stage-1 DSE S1 / M3: (RO, RWreq, RWresp, WO) = (2, 1, 2, 1).
 config_build_path := dse_s1_m3
 noc_req_wide_ro_channel_num  := 2

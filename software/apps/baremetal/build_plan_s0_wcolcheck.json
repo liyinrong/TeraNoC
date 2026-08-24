@@ -1,0 +1,24 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+  "//": "Functional correctness of w_col_off: LLM_PERF_ONLY=0 so the DPI checker validates the GEMM result. If the column rotation covers exactly the right work, the shifted build must check out clean.",
+  "rename_tag_rules": { "rm_gemm_opt_f16": ["matrix_M", "matrix_N", "matrix_P"] },
+  "extra_args": { "rm_gemm_opt_f16": "COMPILER=llvm" },
+  "configs": [
+    {
+      "name": "dse_s0_m4",
+      "pack_dir": "stage1_dse/rm_gemm_s0_wcolcheck",
+      "apps": {
+        "rm_gemm_opt_f16": {
+          "tasks": [
+            {"matrix_M": 256, "matrix_N": 512, "matrix_P": 512,
+             "LLM_PERF_ONLY": 0, "RM_GEMM_TILED_2D": 1,
+             "NE_R": 4, "NE_C": 4, "ROW_TILE": 256, "COL_TILE": 512}
+          ],
+          "variants": {"_off": "-DWCOLSHIFT=0", "_on": "-DWCOLSHIFT=1"}
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,79 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+
+  "rename_tag_rules": {
+    "sp_axpy_f32": ["array_N"],
+    "sp_dotp_f32": ["array_N"],
+    "sp_gemv_f32": ["matrix_M", "matrix_N"],
+    "sp_matmul_f32": ["matrix_M", "matrix_N", "matrix_P"],
+    "sp_matmul_i32": ["matrix_M", "matrix_N", "matrix_P"],
+    "rm_gemm_f16": ["matrix_M", "matrix_N", "matrix_P"]
+  },
+
+  "extra_args": {
+    "sp_axpy_f32": "COMPILER=llvm",
+    "sp_dotp_f32": "COMPILER=llvm",
+    "sp_gemv_f32": "COMPILER=llvm",
+    "sp_matmul_f32": "COMPILER=llvm",
+    "sp_matmul_i32": "COMPILER=llvm",
+    "rm_gemm_f16": "COMPILER=llvm"
+  },
+
+  "configs": [
+    {
+      "name": "tensorpool256_spatz4",
+      "pack_dir": "tensorpool256_spatz4/vector_core",
+      "apps": {
+        "sp_axpy_f32": {
+          "tasks": [
+            {"array_N": 262144}
+          ],
+          "variants": {"": "-DSP_AXPY_LMUL=8"}
+        },
+        "sp_dotp_f32": {
+          "tasks": [
+            {"array_N": 262144}
+          ],
+          "variants": {
+            "": "-DSP_DOTP_PARTITION=0 -DSP_DOTP_UNROLL=8"
+          }
+        },
+        "sp_gemv_f32": {
+          "tasks": [
+            {"matrix_M": 4096, "matrix_N": 192, "transpose_a": 1}
+          ],
+          "variants": {"": "-DSP_GEMV_PREFETCH"}
+        },
+        "sp_matmul_f32": {
+          "tasks": [
+            {"matrix_M": 256, "matrix_N": 256, "matrix_P": 256}
+          ],
+          "variants": {"": "-DSP_MATMUL_KERNEL_SIZE=8"}
+        },
+        "sp_matmul_i32": {
+          "tasks": [
+            {"matrix_M": 256, "matrix_N": 256, "matrix_P": 256}
+          ],
+          "variants": {"": "-DSP_MATMUL_I32_KERNEL_SIZE=8"}
+        }
+      }
+    },
+    {
+      "name": "tensorpool256_spatz4",
+      "pack_dir": "tensorpool256_spatz4/tensor_engine",
+      "apps": {
+        "rm_gemm_f16": {
+          "tasks": [
+            {"matrix_M": 128, "matrix_N": 128, "matrix_P": 128},
+            {"matrix_M": 128, "matrix_N": 256, "matrix_P": 128},
+            {"matrix_M": 256, "matrix_N": 256, "matrix_P": 256},
+            {"matrix_M": 512, "matrix_N": 512, "matrix_P": 512}
+          ],
+          "variants": {"": "-DPARALLEL"}
+        }
+      }
+    }
+  ]
+}

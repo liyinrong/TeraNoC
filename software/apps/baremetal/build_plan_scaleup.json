@@ -1,0 +1,28 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+  "//": "Stage-1 DSE scale-up rungs (plan 11.7): 8 tiles/group = 128 tiles and 128 engines. Same surrogate shape as the S1/S2/S3 matrix (512x4096x1024, ROW_TILE 512, COL_TILE 1024) so the cells are directly comparable; only the engine grid changes, 8x8 -> 8x16. The ELF depends on PORT_WIDTH (= REDMULE_H), not on ce_width, so S5 (H16xW64) reuses the S8 (H16xW32) binary exactly as S3 reuses S2's.",
+  "rename_tag_rules": {"rm_gemm_xshift_f16": ["matrix_M", "matrix_N", "matrix_P"]},
+  "extra_args": {"rm_gemm_xshift_f16": "COMPILER=llvm"},
+  "configs": [
+    {
+      "name": "dse_s4_m4",
+      "pack_dir": "stage1_dse/xshift_scale_s4",
+      "apps": {"rm_gemm_xshift_f16": {
+        "tasks": [{"matrix_M": 512, "matrix_N": 4096, "matrix_P": 1024,
+                   "LLM_PERF_ONLY": 1, "RM_GEMM_TILED_2D": 1,
+                   "NE_R": 8, "NE_C": 16, "ROW_TILE": 512, "COL_TILE": 1024}],
+        "variants": {"_on": "-DRM_X_SHIFT=1 -DRM_W_SHIFT=0"}}}
+    },
+    {
+      "name": "dse_s8_m4",
+      "pack_dir": "stage1_dse/xshift_scale_s8",
+      "apps": {"rm_gemm_xshift_f16": {
+        "tasks": [{"matrix_M": 512, "matrix_N": 4096, "matrix_P": 1024,
+                   "LLM_PERF_ONLY": 1, "RM_GEMM_TILED_2D": 1,
+                   "NE_R": 8, "NE_C": 16, "ROW_TILE": 512, "COL_TILE": 1024}],
+        "variants": {"_on": "-DRM_X_SHIFT=1 -DRM_W_SHIFT=0"}}}
+    }
+  ]
+}

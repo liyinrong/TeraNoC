@@ -25,6 +25,11 @@
               "matrix_P": 256
             },
             {
+              "matrix_M": 256,
+              "matrix_N": 128,
+              "matrix_P": 256
+            },
+            {
               "matrix_M": 128,
               "matrix_N": 256,
               "matrix_P": 128
@@ -37,7 +42,8 @@
           ],
           "variants": {
             "": "-DPARALLEL",
-            "_wshift": "-DPARALLEL -DWSHIFT=1"
+            "_wshift": "-DPARALLEL -DWSHIFT=1",
+            "_shift": "-DPARALLEL -DXSHIFT=1 -DWSHIFT=1"
           }
         }
       }
