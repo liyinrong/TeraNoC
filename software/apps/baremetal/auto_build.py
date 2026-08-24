@@ -247,8 +247,9 @@ def move_and_rename(
     dst_dir = out_dir / pack_dir
     ensure_dir(dst_dir)
 
-    dst_bin = dst_dir / f"{app}{variant}_{size_tag}"
-    dst_dump = dst_dir / f"{app}{variant}_{size_tag}.dump"
+    tag_suffix = f"_{size_tag}" if size_tag else ""
+    dst_bin = dst_dir / f"{app}{variant}{tag_suffix}"
+    dst_dump = dst_dir / f"{app}{variant}{tag_suffix}.dump"
 
     # overwrite to avoid confusion
     if dst_bin.exists():
@@ -350,8 +351,9 @@ def print_dry_run_summary(
                           f"app={app}{vsuffix} tag={tag}")
                     print(f"      params={params}")
                     print(f"      make: (cwd={make_cwd}) {' '.join(cmd)}")
+                    tag_suffix = f"_{tag}" if tag else ""
                     print(f"      pack: "
-                          f"{pack_root / (app + vsuffix + '_' + tag)}")
+                          f"{pack_root / (app + vsuffix + tag_suffix)}")
 
     print("\n" + "=" * 100)
     print(f"[DRY-RUN] Total tasks: {total}")
@@ -470,9 +472,13 @@ def main():
                         logger.log(f"          params={params}")
 
                         # patch gendata
-                        patched = patch_workload_block(original, app, params)
+                        patched = (patch_workload_block(original, app, params)
+                                   if params else original)
                         gendata_params.write_text(patched, encoding="utf-8")
-                        logger.log("STEP: patched gendata_params.hjson")
+                        logger.log(
+                            "STEP: patched gendata_params.hjson"
+                            if params else
+                            "STEP: no per-task gendata parameters")
 
                         # make + per-task make log (also under pack_dir)
                         cmd = (["make", app, f"config={cfg_name}"] + vextra)

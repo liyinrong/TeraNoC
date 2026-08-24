@@ -23,6 +23,10 @@ I_SUFFIXES := q16 q32 i16 i32 i8
 I_APPS := $(foreach suf, $(I_SUFFIXES), $(filter %_$(suf), $(ALL)))
 FP_APPS := $(foreach suf, $(FP_SUFFIXES), $(filter %_$(suf), $(ALL)))
 LLM_APPS := $(filter llm_%,$(ALL))
+# Qwen Stage-1 microbenchmarks are named qwen_<workload>_<operation>. They are
+# intentionally separate from the composed llm_* apps but still require the
+# LLVM toolchain plus a Spatz+RedMulE configuration.
+QWEN_APPS := $(filter qwen_%,$(ALL))
 # Spatz/RVV vector apps are screened by the `sp_` prefix. They need a Spatz
 # config and the LLVM toolchain (RVV codegen); the config is selected by the
 # user (no automatic override).
@@ -34,8 +38,8 @@ REDMULE_APPS := $(filter rm_%, $(ALL))
 
 # Default compiler per app type: gcc for integer apps, llvm for floating-point
 # and vector apps. Still overridable on the command line.
-LLVM_TARGETS := $(FP_APPS) $(SPATZ_APPS) $(REDMULE_APPS) $(LLM_APPS)
-LLVM_TARGETS += all_llvm all_spatz all_redmule all_llm
+LLVM_TARGETS := $(FP_APPS) $(SPATZ_APPS) $(REDMULE_APPS) $(LLM_APPS) $(QWEN_APPS)
+LLVM_TARGETS += all_llvm all_spatz all_redmule all_llm all_qwen
 ifneq ($(filter $(LLVM_TARGETS),$(MAKECMDGOALS)),)
   COMPILER ?= llvm
 endif
@@ -49,7 +53,7 @@ BINARIES := $(addprefix $(BIN_DIR)/,$(APPS))
 # (`all_llvm`); the vector apps go through `all_spatz`, the RedMulE apps
 # through `all_redmule`.
 ALL_GCC := $(filter-out $(FP_APPS) $(SPATZ_APPS) $(REDMULE_APPS), $(ALL))
-ALL_LLVM := $(filter-out $(I_APPS) $(SPATZ_APPS) $(REDMULE_APPS) $(LLM_APPS), $(ALL))
+ALL_LLVM := $(filter-out $(I_APPS) $(SPATZ_APPS) $(REDMULE_APPS) $(LLM_APPS) $(QWEN_APPS), $(ALL))
 
 # Make all applications
 all: $(ALL_GCC)
@@ -66,6 +70,9 @@ all_redmule: $(REDMULE_APPS)
 # Dense-LLM applications require a combined Spatz + RedMulE configuration.
 # Keep them out of generic `all_llvm`; callers must select that configuration.
 all_llm: $(LLM_APPS)
+
+# Single-operation Qwen workloads for Stage-1 S1/S2 experiments.
+all_qwen: $(QWEN_APPS)
 
 $(APPS): % : $(BIN_DIR)/% $(APPS_DIR)/Makefile $(shell find $(RUNTIME_DIR)/**.{S,c,h,ld} -type f)
 
