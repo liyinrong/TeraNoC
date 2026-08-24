@@ -13,6 +13,8 @@
 #include "baremetal/mempool_llm_tiling.h"
 #include "baremetal/mempool_qwen_redmule_op.h"
 
+
+
 #ifndef QWEN_BENCHMARK_NAME
 #error "QWEN_BENCHMARK_NAME must be defined"
 #endif
@@ -198,10 +200,75 @@ _Static_assert((((long)QWEN_TILE_M * QWEN_TILE_N +
                 (long)sizeof(__fp16)) <= L1_TILE_BUDGET_BYTES,
                "Qwen one-operation tile exceeds the L1 budget");
 
+// ---------------------------------------------------------------------------
+// Virtual-cluster operand placement (WP3). Undefined => every operand stays in
+// the flat global interleave and this file is byte-identical to the pre-VC
+// build; that identity is checked by an ELF hash, not by inspection.
+//
+// QWEN_VC_W_LEVEL places W in that fractal level's window. Only W, and only
+// for a single-engine-row map: with NE_R > 1 a W column block is read by every
+// engine row, so confining it to one rectangle turns uniform bank load into a
+// hotspot rather than buying locality. X and Z are the row-aligned pair and
+// come later (they share a rectangle with each other, never with W -- engine
+// rows and columns are orthogonal partitions, so at most one side can be
+// confined).
+// ---------------------------------------------------------------------------
+#ifdef QWEN_VC_W_LEVEL
+#include "vc.h"
+
+_Static_assert(QWEN_NE_R == 1,
+               "QWEN_VC_W_LEVEL assumes a single engine row: with NE_R > 1 "
+               "each W block has NE_R readers spread across rectangles.");
+_Static_assert(QWEN_VC_W_LEVEL < VC_MAX_LEVELS, "VC level above the mesh");
+
+// The tile budget must be re-derived against the LEVEL's aperture, not full
+// L1: confinement trades capacity for locality, and a rectangle holds
+// 4^k / NUM_GROUPS of the array.
+#define QWEN_VC_WSIZE_(k) VC_WINDOW_SIZE_##k
+#define QWEN_VC_WSIZE(k) QWEN_VC_WSIZE_(k)
+
+// Every RedMulE tile is one engine, so a level-k rectangle owns 4^k groups
+// worth of them.
+#define QWEN_VC_ENGINES_PER_RECT                                               \
+  ((uint32_t)(1u << (2 * QWEN_VC_W_LEVEL)) *                                   \
+   (NUM_REDMULE_TILES / NUM_GROUPS))
+#define QWEN_VC_W_BYTES_PER_ENGINE                                             \
+  ((uint32_t)(sizeof(__fp16) * QWEN_TILE_N * QWEN_COLS_PER_ENGINE))
+// Only ACTIVE engines have a W block, and a rectangle never holds more than
+// the whole active set, so size the reservation by the smaller of the two.
+// Rectangles that hold no active engine over-reserve harmlessly; what matters
+// is that the figure is the same for every core, since the reservation is
+// collective within a rectangle.
+#define QWEN_VC_W_ENGINES                                                      \
+  ((QWEN_VC_ENGINES_PER_RECT < (uint32_t)QWEN_ACTIVE_ENGINES)                  \
+       ? QWEN_VC_ENGINES_PER_RECT                                              \
+       : (uint32_t)QWEN_ACTIVE_ENGINES)
+#define QWEN_VC_W_BYTES_PER_RECT                                               \
+  (QWEN_VC_W_ENGINES * QWEN_VC_W_BYTES_PER_ENGINE)
+
+_Static_assert(QWEN_VC_W_BYTES_PER_RECT <= QWEN_VC_WSIZE(QWEN_VC_W_LEVEL),
+               "W does not fit this level's rectangle: shrink TILE_N or the "
+               "engine grid, or place W at a larger level");
+
+// This core's engine-slot within its own rectangle, and the rectangle's first
+// engine in global numbering. Groups are row-major and a rectangle is a
+// contiguous (gy, gx) block, so the slot is the raster position of the group
+// inside the rectangle times the tiles per group.
+static inline uint32_t qwen_vc_rect_first_engine(void) {
+  const vc_rect_t r = vc_rect(QWEN_VC_W_LEVEL);
+  // x-major, matching vc.c's gid decomposition (gx = gid / NUM_Y) and the RTL's
+  // group_id_t'({group_id.x, group_id.y}). The y-major form is identity only on
+  // the diagonal, so it survives rectangle (0,0) and breaks everywhere else.
+  return (uint32_t)(r.base_gx * NUM_Y + r.base_gy) * NUM_TILES_PER_GROUP;
+}
+#endif
+
 __fp16 qwen_l1_x[QWEN_TILE_M * QWEN_TILE_N]
     __attribute__((aligned(NUM_BANKS * sizeof(int32_t)), section(".l1_prio")));
+#ifndef QWEN_VC_W_LEVEL
 __fp16 qwen_l1_w[QWEN_TILE_N * QWEN_TILE_P]
     __attribute__((aligned(NUM_BANKS * sizeof(int32_t)), section(".l1_prio")));
+#endif
 __fp16 qwen_l1_z[QWEN_TILE_M * QWEN_TILE_P]
     __attribute__((aligned(NUM_BANKS * sizeof(int32_t)), section(".l1_prio")));
 
@@ -227,8 +294,10 @@ int main() {
            LLM_RM_X_SHIFT);
     dma_memcpy_blocking(qwen_l1_x, qwen_l2_x,
                         sizeof(__fp16) * QWEN_TILE_M * QWEN_TILE_N);
+#ifndef QWEN_VC_W_LEVEL
     dma_memcpy_blocking(qwen_l1_w, qwen_l2_w,
                         sizeof(__fp16) * QWEN_TILE_N * QWEN_TILE_P);
+#endif
   }
   mempool_barrier(num_cores);
 
@@ -239,11 +308,111 @@ int main() {
   }
   mempool_barrier(num_cores);
 
+#ifdef QWEN_VC_W_LEVEL
+  // Reserve before allocating: a level's base depends on the lower levels'
+  // reservations, so a late reservation moves live arenas (contract
+  // [allocator]). One reservation, then one allocation, both collective.
+  vc_init();
+  mempool_barrier(num_cores);
+  if (vc_reserve(QWEN_VC_W_LEVEL, QWEN_VC_W_BYTES_PER_RECT) < 0) {
+    if (core_id == 0)
+      printf("[%s] VC reservation of %u bytes at level %d failed\n",
+             QWEN_BENCHMARK_NAME, (unsigned)QWEN_VC_W_BYTES_PER_RECT,
+             QWEN_VC_W_LEVEL);
+    return 1;
+  }
+  __fp16 *const qwen_vc_w =
+      (__fp16 *)vc_malloc(QWEN_VC_W_LEVEL, QWEN_VC_W_BYTES_PER_RECT);
+  const uint32_t qwen_vc_off =
+      (uint32_t)qwen_vc_w - vc_window_base(QWEN_VC_W_LEVEL);
+  const uint32_t qwen_vc_first = qwen_vc_rect_first_engine();
+  mempool_barrier(num_cores);
+
+  // One core per rectangle pulls that rectangle's W blocks out of L2. The
+  // descriptor is a GLOBAL alias -- the DMA never sees a VC address, which is
+  // what keeps one implementation of the map (contract [dma]).
+  if (core_id == qwen_vc_first * NUM_CORES_PER_TILE) {
+    const vc_rect_t rect = vc_rect(QWEN_VC_W_LEVEL);
+    for (uint32_t e = 0; e < QWEN_VC_W_ENGINES; e++) {
+      if (qwen_vc_first + e >= QWEN_ACTIVE_ENGINES)
+        break;
+      const vc_desc_t dst =
+          vc_descriptor(&rect, qwen_vc_off + e * QWEN_VC_W_BYTES_PER_ENGINE,
+                        QWEN_VC_W_BYTES_PER_ENGINE);
+      const vc_desc_t src = {
+          .base = (uint32_t)(qwen_l2_w + (uint32_t)(qwen_vc_first + e) *
+                                             QWEN_TILE_N *
+                                             QWEN_COLS_PER_ENGINE),
+          .len = QWEN_VC_W_BYTES_PER_ENGINE,
+          .count = {1, 1},
+          .stride = {0, 0}};
+      vc_dma_memcpy_blocking(&dst, &src);
+    }
+  }
+  mempool_barrier(num_cores);
+
+  // Alias equivalence on this allocation, which is what [EOC] retval=0 cannot
+  // show: these apps are perf-only, and qwen_l2_w is untouched .l2_bss, so a
+  // read-back against L2 would compare zeros to zeros and pass wherever the
+  // pointer resolved. Instead write a pattern through the DMA's view
+  // (vc_global_addr, plain arithmetic) and read it through the compute view
+  // (vc_ptr, the hardware permuter). Two independent address computations, so
+  // agreement cannot be accidental. INTEGER pattern on purpose: the probe tests
+  // ADDRESSES, and routing it through __fp16 dragged in two unrelated datapath
+  // bugs that presented as an address failure -- this toolchain compiles
+  // (__fp16)<integer> as a BITCAST, and Spatz's widen_fp16_to_fp32 mishandles
+  // the subnormals that produced. 0xA5xx also cannot alias zero-filled memory.
+  // Sixteen samples, all L1, before the fill
+  // overwrites the region -- an L2-crossing sweep costs hours of simulation.
+#define QWEN_VC_PROBE_N 16
+  {
+    const vc_rect_t prect = vc_rect(QWEN_VC_W_LEVEL);
+    const uint32_t step =
+        (QWEN_VC_W_BYTES_PER_RECT / QWEN_VC_PROBE_N) & ~(uint32_t)1;
+    if (core_id == qwen_vc_first * NUM_CORES_PER_TILE) {
+      for (uint32_t i = 0; i < QWEN_VC_PROBE_N; i++)
+        *(volatile uint16_t *)vc_global_addr(&prect, qwen_vc_off + i * step) =
+            (uint16_t)(0xA500u + i);
+      __sync_synchronize();
+    }
+    mempool_barrier(num_cores);
+    if (redmule_id < QWEN_ACTIVE_ENGINES) {
+      uint32_t bad = 0;
+      for (uint32_t i = 0; i < QWEN_VC_PROBE_N; i++)
+        if (*(volatile uint16_t *)vc_ptr(QWEN_VC_W_LEVEL,
+                                         qwen_vc_off + i * step) !=
+            (uint16_t)(0xA500u + i))
+          bad++;
+      if (bad)
+        printf("[%s] VC alias probe FAILED on engine %u: %u/%u\n",
+               QWEN_BENCHMARK_NAME, (unsigned)redmule_id, (unsigned)bad,
+               QWEN_VC_PROBE_N);
+      else if (redmule_id == 0)
+        printf("[%s] VC alias probe OK (level %d, %u samples, %u B/rect)\n",
+               QWEN_BENCHMARK_NAME, QWEN_VC_W_LEVEL, QWEN_VC_PROBE_N,
+               (unsigned)QWEN_VC_W_BYTES_PER_RECT);
+    }
+  }
+  mempool_barrier(num_cores);
+#endif
+
   const uint32_t time_init = mempool_get_timer();
   mempool_start_benchmark();
+#ifdef QWEN_VC_W_LEVEL
+  // NE_R == 1 is asserted above, so there is exactly one X row block and the
+  // engine's W block is its slot within its own rectangle.
+  if (redmule_id < QWEN_ACTIVE_ENGINES)
+    qwen_redmule_op_engine_f16(
+        qwen_l1_x,
+        qwen_vc_w + (uint32_t)(redmule_id - qwen_vc_first) * QWEN_TILE_N *
+                        QWEN_COLS_PER_ENGINE,
+        qwen_l1_z + redmule_id * QWEN_ROWS_PER_ENGINE * QWEN_COLS_PER_ENGINE,
+        QWEN_ROWS_PER_ENGINE, QWEN_TILE_N, QWEN_COLS_PER_ENGINE);
+#else
   qwen_redmule_op_tile_f16(qwen_l1_x, qwen_l1_w, qwen_l1_z, QWEN_TILE_N,
                            QWEN_ROWS_PER_ENGINE, QWEN_COLS_PER_ENGINE,
                            QWEN_NE_C, QWEN_ACTIVE_ENGINES, redmule_id);
+#endif
   mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
   const uint32_t time_end = mempool_get_timer();
