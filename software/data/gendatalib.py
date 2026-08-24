@@ -288,6 +288,75 @@ def generate_fgemm(my_type=np.float32, defines={}):
     return [X, W, Y, Z], defines
 
 
+def generate_rm_gemm(my_type=np.float16, defines={}):
+    """Generate RedMulE GEMM data, optionally packed for the 2-D DSE map.
+
+    The logical operation is always ``Z[M,P] = X[M,N] @ W[N,P] + Y[M,P]``.
+    SINGLE and PARALLEL retain the shipped natural row-major arrays.  The
+    tiled path packs W as ``[col_panel][col_group][N][COL_TILE/NE_C]`` and
+    packs Y/Z as dense engine tiles in
+    ``[row_panel][col_panel][row_group][col_group]`` order.
+    """
+    arrays, defines = generate_fgemm(my_type=my_type, defines=defines)
+    tiled = int(defines.get('RM_GEMM_TILED_2D', 0))
+    if tiled not in (0, 1):
+        raise Exception("RM_GEMM_TILED_2D must be 0 or 1")
+
+    matrix_M = int(defines['matrix_M'])
+    matrix_N = int(defines['matrix_N'])
+    matrix_P = int(defines['matrix_P'])
+
+    if not tiled:
+        # generate_fgemm builds Z with np.matmul, which accumulates a float16
+        # product in float32 and rounds once at the end.  RedMulE rounds every
+        # fused multiply-add back to binary16 and feeds that forward, so the
+        # two drift with the contraction depth: at N=512 they part by up to
+        # 0.0586, which clears the 0.05 absolute tolerance and reports the
+        # correct hardware result as 25 errors.  Use the same per-contraction
+        # oracle the tiled path below already uses.
+        x, w, y, _ = arrays
+        z = _llm_mm(x.reshape(matrix_M, matrix_N),
+                    w.reshape(matrix_N, matrix_P),
+                    y.reshape(matrix_M, matrix_P)).reshape(-1)
+        return [x, w, y, z.astype(my_type)], defines
+
+    row_tile = int(defines['ROW_TILE'])
+    col_tile = int(defines['COL_TILE'])
+    ne_r = int(defines['NE_R'])
+    ne_c = int(defines['NE_C'])
+    if (row_tile <= 0 or col_tile <= 0 or ne_r <= 0 or ne_c <= 0):
+        raise Exception("ROW_TILE, COL_TILE, NE_R and NE_C must be positive")
+    if (matrix_M % row_tile != 0 or matrix_P % col_tile != 0 or
+            row_tile % ne_r != 0 or col_tile % ne_c != 0):
+        raise Exception(
+            "tiled rm_gemm_f16 requires exact row/column and engine shards")
+
+    x, w, y, _ = arrays
+    # NumPy's bulk matmul does not reproduce RedMulE's binary16 accumulator
+    # order exactly.  A single 0.0625 boundary miss in the 512x256x1024 gate
+    # demonstrated that the usual 0.05 tolerance is not sufficient to hide
+    # that oracle mismatch.  Use the same per-contraction f16 FMA oracle as
+    # the LLM generators so the checked tiled path validates the hardware
+    # result rather than a host accumulation convention.
+    z = _llm_mm(x.reshape(matrix_M, matrix_N),
+                w.reshape(matrix_N, matrix_P),
+                y.reshape(matrix_M, matrix_P)).reshape(-1)
+    row_panels = matrix_M // row_tile
+    col_panels = matrix_P // col_tile
+    rows_per_engine = row_tile // ne_r
+    cols_per_engine = col_tile // ne_c
+
+    w_packed = (w.reshape(matrix_N, col_panels, ne_c, cols_per_engine)
+                .transpose(1, 2, 0, 3).reshape(-1))
+
+    def pack_output_tiles(a):
+        return (a.reshape(row_panels, ne_r, rows_per_engine,
+                          col_panels, ne_c, cols_per_engine)
+                .transpose(0, 3, 1, 4, 2, 5).reshape(-1))
+
+    return [x, w_packed, pack_output_tiles(y), pack_output_tiles(z)], defines
+
+
 def generate_fmatmul(my_type=np.float32, defines={}):
 
     # f8: Cast correct type
@@ -1181,9 +1250,9 @@ _LLM_F64 = np.float64
 _LLM_U32 = np.uint32
 _LLM_I32 = np.int32
 
-# tensorpool256_spatz4 has VLEN=512. RMSNorm uses e16,m1 for its inputs and
-# e32,m2 for its widening accumulator, so both views contain 32 elements.
-_LLM_RMS_LANES = 32
+# tensorpool256_spatz4 has VLEN=512. RMSNorm uses e16,m4 for its inputs and
+# e32,m8 for its widening accumulator, so both views contain 128 elements.
+_LLM_RMS_LANES = 128
 
 
 def _llm_f32_literal(bits):
@@ -1317,8 +1386,6 @@ def _llm_rmsnorm(x, gamma, eps=1e-5):
     dmodel = x16.shape[-1]
     if gamma16.shape != (dmodel,):
         raise ValueError("_llm_rmsnorm gamma must match the final x dimension")
-    if dmodel > _LLM_RMS_LANES and dmodel % _LLM_RMS_LANES != 0:
-        raise ValueError("exact RMSNorm oracle requires full 32-lane chunks")
 
     rows = x16.reshape(-1, dmodel)
     lane_count = min(dmodel, _LLM_RMS_LANES)
@@ -1479,8 +1546,9 @@ def generate_llm_ffn(my_type=np.float16, defines={}):
     port_width = int(defines.pop('PORT_WIDTH', 32))
 
     if row_tile <= 0 or row_tile > S or S % row_tile != 0:
-        raise Exception("ROW_TILE={} must be a positive divisor of S={}".format(
-            row_tile, S))
+        raise Exception(
+            "ROW_TILE={} must be a positive divisor of S={}".format(
+                row_tile, S))
 
     if 'PANEL_I' in defines:
         PANEL = int(defines['PANEL_I'])
@@ -1537,6 +1605,18 @@ def _llm_pick_classic_ffn_tiles(S, D, inter, l1_bytes, port_width, defines):
     """
     budget = int(0.8 * l1_bytes) // 2 if l1_bytes else (1 << 62)
     step = port_width if port_width else 1
+    use_2d = int(defines.get('LLM_GEMM_2D', 0))
+    ne_r = int(defines.get('NE_R', 1))
+    ne_c = int(defines.get('NE_C', 1))
+    if use_2d not in (0, 1):
+        raise Exception("LLM_GEMM_2D must be 0 or 1")
+    if ne_r <= 0 or ne_c <= 0:
+        raise Exception("NE_R and NE_C must be positive")
+    if use_2d and (D % ne_c != 0 or D // ne_c < step or
+                   (D // ne_c) % step != 0):
+        raise Exception(
+            "2-D FFN D={} cannot be split into {} RedMulE column shards"
+            .format(D, ne_c))
 
     row_cands = [r for r in range(step, S + 1, step) if S % r == 0]
     panel_cands = [p for p in range(step, inter + 1, step)
@@ -1553,9 +1633,15 @@ def _llm_pick_classic_ffn_tiles(S, D, inter, l1_bytes, port_width, defines):
     for rows in row_cands:
         if rows <= 0 or S % rows != 0 or rows % step != 0:
             continue
+        if use_2d and (rows % ne_r != 0 or rows // ne_r < step or
+                       (rows // ne_r) % step != 0):
+            continue
         for panel in panel_cands:
             if (panel <= 0 or inter % panel != 0 or
                     panel % step != 0):
+                continue
+            if use_2d and (panel % ne_c != 0 or panel // ne_c < step or
+                           (panel // ne_c) % step != 0):
                 continue
             elems = (2 * rows * D + rows * panel +
                      4 * D * panel)
@@ -1720,6 +1806,173 @@ def generate_llm_classic_attention(my_type=np.float16, defines={}):
     return [a.astype(my_type) for a in arrays], defines
 
 
+def _llm_gemm_uniform(shape, contraction=None):
+    """Uniform binary16 operand for the pure-GEMM benchmarks.
+
+    Without ``contraction`` the result is U(-1, 1) (unit-ish activations). With
+    it the tensor is scaled to a per-element standard deviation of
+    1/sqrt(contraction), so a GEMM of that contraction length reproduces its
+    input magnitude. The classic layers keep their intermediates near O(1) via
+    RMSNorm/softmax; this tier has neither stage, so the scaling has to do it.
+    That matters because the golden check tolerance is absolute: a binary16
+    value near 1 has a ~1e-3 spacing, a value near 1e3 a ~1 spacing.
+    """
+    a = np.random.rand(*shape) * 2.0 - 1.0
+    if contraction:
+        a = a * np.sqrt(3.0 / float(contraction))
+    return a.astype(_LLM_F16)
+
+
+def generate_llm_gemm_ffn(my_type=np.float16, defines={}):
+    """Pure-GEMM Transformer FFN layer: ``y = (x @ W1) @ W2``.
+
+    Only the two representative GEMMs remain - there is no ReLU,
+    normalization, gating or residual. Operand layouts and the derived tiling
+    are shared with the classic FFN benchmark, so the two tiers are directly
+    comparable.  The shipped row split uses panel-major W1 and natural W2.
+    LLM_GEMM_2D packs both panels into dense engine-local column shards because
+    RedMulE has no arbitrary leading-dimension configuration.
+    """
+    np.random.seed(47)
+    S = int(defines['S'])
+    D = int(defines['D'])
+    inter = int(defines['I'])
+    l1_bytes = int(defines.pop('L1_BYTES', 0))
+    port_width = int(defines.pop('PORT_WIDTH', 32))
+    _llm_pick_classic_ffn_tiles(
+        S, D, inter, l1_bytes, port_width, defines)
+    panel = int(defines['PANEL_I'])
+    npanel = int(defines['NUM_IP'])
+    use_2d = int(defines.get('LLM_GEMM_2D', 0))
+    ne_c = int(defines.get('NE_C', 1))
+
+    x = _llm_gemm_uniform((S, D))
+    w1 = _llm_gemm_uniform((D, inter), D)
+    w2 = _llm_gemm_uniform((inter, D), inter)
+
+    # Mirror the kernel's panel order: one W1 panel product feeds one
+    # accumulating W2 contraction panel.
+    y = None
+    for p in range(npanel):
+        begin = p * panel
+        end = begin + panel
+        hidden = _llm_mm(x, w1[:, begin:end])
+        y = _llm_mm(hidden, w2[begin:end, :], y)
+
+    if use_2d:
+        panel_per_engine = panel // ne_c
+        dmodel_per_engine = D // ne_c
+        w1_pm = (w1.reshape(D, npanel, ne_c, panel_per_engine)
+                 .transpose(1, 2, 0, 3).reshape(-1))
+        w2_pm = (w2.reshape(npanel, ne_c, panel_per_engine,
+                            ne_c, dmodel_per_engine)
+                 .transpose(0, 1, 3, 2, 4).reshape(-1))
+    else:
+        w1_pm = w1.reshape(D, npanel, panel).transpose(1, 0, 2).reshape(-1)
+        w2_pm = w2.reshape(-1)
+    arrays = [x.reshape(-1), w1_pm, w2_pm, y.reshape(-1)]
+    return [a.astype(my_type) for a in arrays], defines
+
+
+def _llm_pick_gemm_attention_tiles(S, D, head_dim, l1_bytes, port_width,
+                                   defines):
+    """Derive the query/key tiles of the pure-GEMM attention benchmark.
+
+    Projected K/V spill to L2. L1 keeps one input/output row tile, one
+    D-by-HEAD_DIM projection weight, the Q/K/V/K^T/context tiles and the score
+    tile::
+
+      2*BM*D + D*HD + 2*BM*HD + 3*BN*HD + BM*BN
+
+    Heads run serially so the head count does not scale L1 use. This is the
+    classic FlashAttention tiling minus the float32 online-softmax state.
+    Uses a conservative 80% of physical L1 because the generator does not see
+    the per-core stack region.
+    """
+    budget = int(0.8 * l1_bytes) // 2 if l1_bytes else (1 << 62)
+    step = port_width if port_width else 1
+
+    cands = [r for r in range(step, S + 1, step) if S % r == 0]
+    cands = cands or [S]
+    bm_cands = list(cands)
+    bn_cands = list(cands)
+    if 'LLM_GEMM_BM' in defines:
+        bm_cands = [int(defines['LLM_GEMM_BM'])]
+    if 'LLM_GEMM_BN' in defines:
+        bn_cands = [int(defines['LLM_GEMM_BN'])]
+
+    choices = []
+    for bm in bm_cands:
+        if bm <= 0 or S % bm != 0 or bm % step != 0:
+            continue
+        for bn in bn_cands:
+            if bn <= 0 or S % bn != 0 or bn % step != 0 or bn < bm:
+                continue
+            elems = (2 * bm * D + D * head_dim + 2 * bm * head_dim +
+                     3 * bn * head_dim + bm * bn)
+            if elems <= budget:
+                choices.append((bm, bn))
+
+    if not choices:
+        raise Exception(
+            "Pure-GEMM attention S={} D={} HD={} has no BM/BN tile that fits "
+            "the L1 budget ({} bytes)".format(S, D, head_dim, l1_bytes))
+
+    # Query rows set the RedMulE row parallelism; among equal-BM choices take
+    # the largest key tile so the key loop runs the fewest iterations.
+    best_bm = max(bm for bm, _ in choices)
+    best_bn = max(bn for bm, bn in choices if bm == best_bm)
+    defines['LLM_GEMM_BM'] = best_bm
+    defines['LLM_GEMM_BN'] = best_bn
+    return defines
+
+
+def generate_llm_gemm_attention(my_type=np.float16, defines={}):
+    """Pure-GEMM Transformer multi-head attention layer.
+
+    Only the four representative GEMMs remain: the per-head Q/K/V projections,
+    ``scores = q @ k^T``, ``ctx = scores @ v`` and the head-accumulated output
+    projection. There is no scale, causal mask, softmax or residual, and all
+    heads have equal Q/K/V cardinality.
+
+    Wk additionally carries the 1/sqrt(HEAD_DIM) attention scale so the score
+    magnitude does not depend on HEAD_DIM even though the explicit scale stage
+    is gone; see _llm_gemm_uniform for why the magnitudes matter.
+    """
+    np.random.seed(48)
+    S = int(defines['S'])
+    D = int(defines['D'])
+    num_heads = int(defines['N_HEADS'])
+    head_dim = int(defines['HEAD_DIM'])
+    l1_bytes = int(defines.pop('L1_BYTES', 0))
+    port_width = int(defines.pop('PORT_WIDTH', 32))
+    if D != num_heads * head_dim:
+        raise Exception("Pure-GEMM MHA requires D == N_HEADS*HEAD_DIM")
+    _llm_pick_gemm_attention_tiles(
+        S, D, head_dim, l1_bytes, port_width, defines)
+
+    x = _llm_gemm_uniform((S, D))
+    wq = _llm_gemm_uniform((num_heads, D, head_dim), D)
+    wk = _llm_gemm_uniform((num_heads, D, head_dim), D * head_dim)
+    wv = _llm_gemm_uniform((num_heads, D, head_dim), D)
+    wo = _llm_gemm_uniform((num_heads, head_dim, D), num_heads * head_dim)
+
+    # Heads are processed serially and the output projection accumulates over
+    # them, exactly as the kernel does.
+    out = None
+    for h in range(num_heads):
+        q = _llm_mm(x, wq[h])
+        k = _llm_mm(x, wk[h])
+        v = _llm_mm(x, wv[h])
+        scores = _llm_mm(q, k.T)
+        ctx = _llm_mm(scores, v)
+        out = _llm_mm(ctx, wo[h], out)
+
+    arrays = [x.reshape(-1), wq.reshape(-1), wk.reshape(-1), wv.reshape(-1),
+              wo.reshape(-1), out.reshape(-1)]
+    return [a.astype(my_type) for a in arrays], defines
+
+
 def _llm_rope_tables(positions, head_dim, theta):
     half = head_dim // 2
     exps = -(2.0 * np.arange(half)) / head_dim
@@ -1869,7 +2122,15 @@ def llm_perf_defines(app_name, defines):
     budget; drop the generator-only L1_BYTES/PORT_WIDTH hints."""
     l1 = int(defines.pop('L1_BYTES', 0))
     pw = int(defines.pop('PORT_WIDTH', 32))
-    if app_name.startswith('llm_classic_ffn'):
+    if app_name.startswith('llm_gemm_ffn'):
+        _llm_pick_classic_ffn_tiles(
+            int(defines['S']), int(defines['D']), int(defines['I']),
+            l1, pw, defines)
+    elif app_name.startswith('llm_gemm_attention'):
+        _llm_pick_gemm_attention_tiles(
+            int(defines['S']), int(defines['D']), int(defines['HEAD_DIM']),
+            l1, pw, defines)
+    elif app_name.startswith('llm_classic_ffn'):
         _llm_pick_classic_ffn_tiles(
             int(defines['S']), int(defines['D']), int(defines['I']),
             l1, pw, defines)
@@ -1897,6 +2158,26 @@ def llm_perf_defines(app_name, defines):
 def llm_perf_arrays(app_name, defines):
     """(name, count) of every L2 array a perf run reserves (no values)."""
     d = defines
+    if app_name in ('rm_gemm_f16', 'rm_gemm_opt_f16', 'rm_gemm_xshift_f16'):
+        M = int(d['matrix_M'])
+        N = int(d['matrix_N'])
+        P = int(d['matrix_P'])
+        return [('l2_X', M * N), ('l2_W', N * P), ('l2_Y', M * P)]
+    if app_name.startswith('llm_gemm_ffn'):
+        S = int(d['S'])
+        D = int(d['D'])
+        inter = int(d['I'])
+        return [('l2_x', S * D), ('l2_w1', D * inter),
+                ('l2_w2', inter * D)]
+    if app_name.startswith('llm_gemm_attention'):
+        S = int(d['S'])
+        D = int(d['D'])
+        heads = int(d['N_HEADS'])
+        head_dim = int(d['HEAD_DIM'])
+        return [('l2_x', S * D), ('l2_wq', heads * D * head_dim),
+                ('l2_wk', heads * D * head_dim),
+                ('l2_wv', heads * D * head_dim),
+                ('l2_wo', heads * head_dim * D)]
     if app_name.startswith('llm_classic_ffn'):
         S = int(d['S'])
         D = int(d['D'])

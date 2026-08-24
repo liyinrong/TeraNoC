@@ -44,6 +44,10 @@ void gemv_f16vecp_local_unrolled4(__fp16 *in_a, __fp16 *in_x, __fp16 *y,
         // Unrolled by 4
         for (uint32_t j_inc = 0; j_inc < j_block; j_inc += 8) {
           uint32_t j = j_start + (j_offset + j_inc) % j_block;
+          // Skip elements beyond the row: the j_block tiling overshoots when N
+          // is not a multiple of j_block, which would read past in_x/in_a.
+          if (j >= idx_stop)
+            continue;
           a01 = (*(v2h *)&in_a[i * N + j]);
           a23 = (*(v2h *)&in_a[i * N + j + 2]);
           a45 = (*(v2h *)&in_a[i * N + j + 4]);

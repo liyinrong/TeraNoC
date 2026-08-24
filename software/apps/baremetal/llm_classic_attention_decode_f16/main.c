@@ -118,26 +118,64 @@ int main() {
   }
   mempool_barrier(num_cores);
 
+  llm_classic_attention_perf_t perf = {0};
   uint32_t time_init = mempool_get_timer();
+#if !LLM_CLASSIC_STAGE_PERF
   mempool_start_benchmark();
+#endif
 #ifdef LLM_FLASH_ATTENTION
   llm_classic_attention_flash_f16(
       l2_x, l2_k_cache, l2_v_cache, l2_wq, l2_wk, l2_wv, l2_wo, l2_k_new,
       l2_v_new, l2_check, l1_x, l1_q, l1_k, l1_v, l1_kt, l1_scores, l1_ctx,
       l1_out, l1_wbuf, l1_m, l1_l, S, KV_LEN, D, N_HEADS, HEAD_DIM,
-      LLM_FLASH_BM, LLM_FLASH_BN, core_id, num_cores, redmule_id);
+      LLM_FLASH_BM, LLM_FLASH_BN, core_id, num_cores, redmule_id, &perf);
 #else
   llm_classic_attention_decode_materialized_f16(
       l2_x, l2_k_cache, l2_v_cache, l2_wq, l2_wk, l2_wv, l2_wo, l2_check, l1_x,
       l1_q, l1_k, l1_v, l1_k_full, l1_v_full, l1_kt, l1_scores, l1_ctx, l1_out,
-      l1_wbuf, S, KV_LEN, D, N_HEADS, HEAD_DIM, core_id, num_cores, redmule_id);
+      l1_wbuf, S, KV_LEN, D, N_HEADS, HEAD_DIM, core_id, num_cores, redmule_id,
+      &perf);
 #endif
+#if !LLM_CLASSIC_STAGE_PERF
   mempool_stop_benchmark();
+#endif
   uint32_t time_end = mempool_get_timer();
+  mempool_barrier(num_cores);
 
-  if (core_id == 0)
-    printf("[llm_classic_attention_decode_f16] kernel takes %d cycles\n",
+  if (core_id == 0) {
+#if LLM_CLASSIC_STAGE_PERF
+    printf("[llm_classic_attention_decode_f16] stage=input_dma cycles=%u\n",
+           perf.input_dma);
+    printf("[llm_classic_attention_decode_f16] stage=q_projection cycles=%u\n",
+           perf.q_projection);
+    printf("[llm_classic_attention_decode_f16] stage=k_projection cycles=%u\n",
+           perf.k_projection);
+    printf("[llm_classic_attention_decode_f16] stage=v_projection cycles=%u\n",
+           perf.v_projection);
+    printf("[llm_classic_attention_decode_f16] stage=kv_cache_load cycles=%u\n",
+           perf.kv_cache_load);
+    printf(
+        "[llm_classic_attention_decode_f16] stage=kv_cache_append cycles=%u\n",
+        perf.kv_cache_append);
+    printf("[llm_classic_attention_decode_f16] stage=k_transpose cycles=%u\n",
+           perf.k_transpose);
+    printf("[llm_classic_attention_decode_f16] stage=qk_gemm cycles=%u\n",
+           perf.qk_gemm);
+    printf("[llm_classic_attention_decode_f16] stage=scale_mask cycles=%u\n",
+           perf.scale_mask);
+    printf("[llm_classic_attention_decode_f16] stage=softmax cycles=%u\n",
+           perf.softmax);
+    printf("[llm_classic_attention_decode_f16] stage=pv_gemm cycles=%u\n",
+           perf.pv_gemm);
+    printf("[llm_classic_attention_decode_f16] "
+           "stage=output_projection cycles=%u\n",
+           perf.output_projection);
+    printf("[llm_classic_attention_decode_f16] stage=output_dma cycles=%u\n",
+           perf.output_dma);
+#endif
+    printf("[llm_classic_attention_decode_f16] kernel takes %u clock cycles\n",
            time_end - time_init);
+  }
   mempool_barrier(num_cores);
 
 #if !LLM_PERF_ONLY

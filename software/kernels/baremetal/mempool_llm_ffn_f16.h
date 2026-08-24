@@ -16,12 +16,14 @@
 //     the squares with a widening f32 MAC (vfwmacc) and an e32 reduction
 //     (vfredusum), and applies the scale with vfmul.vf/.vv; the residual add is
 //     vfadd.vv.
-//   * The hardware has NO scalar fdiv/fsqrt (and Spatz has no vector divide),
-//     so the per-row 1/sqrt(rms) uses a divide/sqrt-free inverse-sqrt and the
-//     SiLU transcendental (exp + reciprocal) is computed in scalar f32
-//     (range-reduced exp + divide-free reciprocal). f16 scalars handed to .vf
-//     ops are carried NaN-boxed inside `float` registers (the soft-float ilp32
-//     ABI only allows the "f" inline-asm constraint on `float`).
+//   * The hardware has NO scalar fdiv/fsqrt or vector divide. The per-row
+//     1/sqrt(rms) uses a divide/sqrt-free inverse-sqrt, while SiLU uses a
+//     vector range-reduced exp and bit-seeded reciprocal with Newton
+//     refinement. Spatz does not implement vfwcvt or vfrec7, so widening uses
+//     vfwadd with a zero operand and reciprocal uses supported integer/FP
+//     vector operations. f16 scalars handed to .vf ops are carried NaN-boxed
+//     inside `float` registers (the soft-float ilp32 ABI only allows the "f"
+//     inline-asm constraint on `float`).
 //   * Bias-less RedMulE jobs use owner-local vector stores to clear their GEMM
 //     addend. The following HWPE MMIO access waits for acknowledged Spatz
 //     stores, preserving clear-before-trigger ordering.
@@ -105,11 +107,6 @@ static inline float llm_recip_pos(float x) {
   return y;
 }
 
-// SiLU(z) = z * sigmoid(z) = z / (1 + exp(-z)), scalar f32.
-static inline float llm_silu_f32(float z) {
-  return z * llm_recip_pos(1.0f + llm_expf(-z));
-}
-
 // Owner-local vector clear for interleaved L1. RedMulE GEMM reads its addend
 // from the destination buffer, so bias-less products must clear that buffer
 // first. Keep the clear on Spatz because scalar stores to interleaved L1 are
@@ -119,7 +116,7 @@ static inline void llm_zero_f16(__fp16 *p, uint32_t n) {
   uint32_t avl = n;
   while (avl > 0) {
     uint32_t vl;
-    asm volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(avl));
+    asm volatile("vsetvli %0, %1, e16, m8, ta, ma" : "=r"(vl) : "r"(avl));
     asm volatile("vmv.v.i v0, 0");
     asm volatile("vse16.v v0, (%0)" : : "r"(p) : "memory");
     p += vl;
@@ -129,43 +126,72 @@ static inline void llm_zero_f16(__fp16 *p, uint32_t n) {
 }
 
 // ---------------------------------------------------------------------------
-// Spatz vector path (opt-in via -DLLM_SPATZ_VEC). Moves the transcendental
-// stages (SiLU here; softmax/RoPE in the attention header) onto the vector unit
-// per the dense_workload.md engine map. The scalar paths above stay the default
-// reference; the vector numerics are host-validated (poly-exp / softmax / SiLU
-// vs libm) but require a sim-clean Spatz config for full functional validation,
-// hence the flag. exp uses the same degree-5 range-reduced approximation as
-// llm_expf, computed on an e32,m2 vector in v16 (scratch: v20/v24/v28).
+// Spatz vector transcendental helpers. The e32,m8 exp helper deliberately uses
+// only three aligned register groups: input/output v0, temporary/polynomial v8,
+// and integer exponent v16. This leaves v24 available to callers for live data
+// or a reduction accumulator. The reciprocal helper preserves the denominator
+// in v0, returns the reciprocal in v8, and uses v16 as scratch. Both helpers
+// assume that the caller has selected e32,m8.
 // ---------------------------------------------------------------------------
-#ifdef LLM_SPATZ_VEC
-static inline void llm_rvv_expf_m2(void) {
+static inline __attribute__((always_inline)) void llm_rvv_expf_m8(void) {
   const float C80 = 80.0f, Cn80 = -80.0f;
   const float L2E = 1.4426950408f, LN2 = 0.6931471806f;
   const float A5 = 0.0083333338f, A4 = 0.041666668f, A3 = 0.16666667f;
   const float A2 = 0.5f, A1 = 1.0f;
   const int BIAS = 127;
-  asm volatile("vfmin.vf v16, v16, %0" ::"f"(C80));   // clamp hi
-  asm volatile("vfmax.vf v16, v16, %0" ::"f"(Cn80));  // clamp lo
-  asm volatile("vfmul.vf v20, v16, %0" ::"f"(L2E));   // t = x*log2e
-  asm volatile("vfcvt.x.f.v v24, v20");               // k = round(t)
-  asm volatile("vfcvt.f.x.v v20, v24");               // kf
-  asm volatile("vfnmsac.vf v16, %0, v20" ::"f"(LN2)); // r = x - ln2*kf
-  asm volatile("vfmv.v.f v28, %0" ::"f"(A5));         // Horner poly(r)
-  asm volatile("vfmul.vv v28, v28, v16");
-  asm volatile("vfadd.vf v28, v28, %0" ::"f"(A4));
-  asm volatile("vfmul.vv v28, v28, v16");
-  asm volatile("vfadd.vf v28, v28, %0" ::"f"(A3));
-  asm volatile("vfmul.vv v28, v28, v16");
-  asm volatile("vfadd.vf v28, v28, %0" ::"f"(A2));
-  asm volatile("vfmul.vv v28, v28, v16");
-  asm volatile("vfadd.vf v28, v28, %0" ::"f"(A1));
-  asm volatile("vfmul.vv v28, v28, v16");
-  asm volatile("vfadd.vf v28, v28, %0" ::"f"(A1));  // +1.0 (c0)
-  asm volatile("vadd.vx v24, v24, %0" ::"r"(BIAS)); // 2^k = (k+127)<<23
-  asm volatile("vsll.vi v24, v24, 23");
-  asm volatile("vfmul.vv v16, v28, v24"); // exp = poly * 2^k
+  asm volatile("vfmin.vf v0, v0, %0" : : "f"(C80));
+  asm volatile("vfmax.vf v0, v0, %0" : : "f"(Cn80));
+  asm volatile("vfmul.vf v8, v0, %0" : : "f"(L2E));
+  asm volatile("vfcvt.x.f.v v16, v8");
+  asm volatile("vfcvt.f.x.v v8, v16");
+  asm volatile("vfnmsac.vf v0, %0, v8" : : "f"(LN2));
+  asm volatile("vfmv.v.f v8, %0" : : "f"(A5));
+  asm volatile("vfmul.vv v8, v8, v0");
+  asm volatile("vfadd.vf v8, v8, %0" : : "f"(A4));
+  asm volatile("vfmul.vv v8, v8, v0");
+  asm volatile("vfadd.vf v8, v8, %0" : : "f"(A3));
+  asm volatile("vfmul.vv v8, v8, v0");
+  asm volatile("vfadd.vf v8, v8, %0" : : "f"(A2));
+  asm volatile("vfmul.vv v8, v8, v0");
+  asm volatile("vfadd.vf v8, v8, %0" : : "f"(A1));
+  asm volatile("vfmul.vv v8, v8, v0");
+  asm volatile("vfadd.vf v8, v8, %0" : : "f"(A1));
+  asm volatile("vadd.vx v16, v16, %0" : : "r"(BIAS));
+  asm volatile("vsll.vi v16, v16, 23");
+  asm volatile("vfmul.vv v0, v8, v16");
 }
-#endif // LLM_SPATZ_VEC
+
+static inline __attribute__((always_inline)) void llm_rvv_recip_pos_m8(void) {
+  const uint32_t SEED = 0x7ef311c3u;
+  const float TWO = 2.0f;
+  asm volatile("vrsub.vx v8, v0, %0" : : "r"(SEED));
+  asm volatile("vfmul.vv v16, v0, v8");
+  asm volatile("vfrsub.vf v16, v16, %0" : : "f"(TWO));
+  asm volatile("vfmul.vv v8, v8, v16");
+  asm volatile("vfmul.vv v16, v0, v8");
+  asm volatile("vfrsub.vf v16, v16, %0" : : "f"(TWO));
+  asm volatile("vfmul.vv v8, v8, v16");
+}
+
+// Scale an f16 vector by an f32 scalar. e16,m4 -> e32,m8 is the widest legal
+// widening pair; v0 and v8 are non-overlapping source/destination groups.
+static inline void llm_scale_f16_f32(__fp16 *p, uint32_t n, float scale) {
+  const float ZERO_H = llm_f16box(0.0f);
+  uint32_t avl = n;
+  while (avl > 0) {
+    uint32_t vl;
+    asm volatile("vsetvli %0, %1, e16, m4, ta, ma" : "=r"(vl) : "r"(avl));
+    asm volatile("vle16.v v0, (%0)" : : "r"(p) : "memory");
+    asm volatile("vfwadd.vf v8, v0, %0" : : "f"(ZERO_H));
+    asm volatile("vsetvli zero, %0, e32, m8, ta, ma" : : "r"(vl));
+    asm volatile("vfmul.vf v8, v8, %0" : : "f"(scale));
+    asm volatile("vsetvli zero, %0, e16, m4, ta, ma" : : "r"(vl));
+    asm volatile("vfncvt.f.f.w v0, v8");
+    asm volatile("vse16.v v0, (%0)" : : "r"(p) : "memory");
+    p += vl;
+    avl -= vl;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // RMSNorm: h[r,:] = x[r,:] / sqrt(mean(x[r,:]^2) + eps) * gamma[:]
@@ -179,6 +205,7 @@ static inline void llm_rmsnorm_f16(const __fp16 *x, const __fp16 *gamma,
                                    uint32_t core_id, uint32_t ncores) {
   const float eps = 1e-5f;
   const float invD = llm_recip_pos((float)dmodel);
+  const float ZERO_F = 0.0f;
 
   for (uint32_t r = core_id; r < seqlen; r += ncores) {
     const __fp16 *xr = x + r * dmodel;
@@ -190,21 +217,21 @@ static inline void llm_rmsnorm_f16(const __fp16 *x, const __fp16 *gamma,
     //    kept in f32 for stability.
     uint32_t avl = dmodel;
     const __fp16 *p = xr;
-    asm volatile("vsetvli zero, %0, e32, m2, ta, ma" ::"r"(dmodel));
+    asm volatile("vsetvli zero, %0, e32, m8, tu, ma" : : "r"(dmodel));
     asm volatile("vmv.v.i v8, 0");
     while (avl > 0) {
       uint32_t vl;
-      asm volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(avl));
-      asm volatile("vle16.v v0, (%0)" ::"r"(p));
+      asm volatile("vsetvli %0, %1, e16, m4, tu, ma" : "=r"(vl) : "r"(avl));
+      asm volatile("vle16.v v0, (%0)" : : "r"(p) : "memory");
       asm volatile("vfwmacc.vv v8, v0, v0"); // f32 += x*x
       p += vl;
       avl -= vl;
     }
-    asm volatile("vsetvli zero, %0, e32, m2, ta, ma" ::"r"(dmodel));
-    asm volatile("vmv.s.x v12, zero");
-    asm volatile("vfredusum.vs v12, v8, v12");
+    asm volatile("vsetvli zero, %0, e32, m8, ta, ma" : : "r"(dmodel));
+    asm volatile("vfmv.s.f v24, %0" : : "f"(ZERO_F));
+    asm volatile("vfredusum.vs v24, v8, v24");
     float sumsq;
-    asm volatile("vfmv.f.s %0, v12" : "=f"(sumsq));
+    asm volatile("vfmv.f.s %0, v24" : "=f"(sumsq));
 
     // 2) Reciprocal rms (no hardware sqrt/div).
     float ms = sumsq * invD + eps;
@@ -217,12 +244,12 @@ static inline void llm_rmsnorm_f16(const __fp16 *x, const __fp16 *gamma,
     __fp16 *op = hr;
     while (avl > 0) {
       uint32_t vl;
-      asm volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(avl));
-      asm volatile("vle16.v v0, (%0)" ::"r"(xp));
-      asm volatile("vfmul.vf v0, v0, %0" ::"f"(rinv));
-      asm volatile("vle16.v v4, (%0)" ::"r"(gp));
-      asm volatile("vfmul.vv v0, v0, v4");
-      asm volatile("vse16.v v0, (%0)" ::"r"(op));
+      asm volatile("vsetvli %0, %1, e16, m8, ta, ma" : "=r"(vl) : "r"(avl));
+      asm volatile("vle16.v v0, (%0)" : : "r"(xp) : "memory");
+      asm volatile("vfmul.vf v0, v0, %0" : : "f"(rinv));
+      asm volatile("vle16.v v8, (%0)" : : "r"(gp) : "memory");
+      asm volatile("vfmul.vv v0, v0, v8");
+      asm volatile("vse16.v v0, (%0)" : : "r"(op) : "memory");
       xp += vl;
       gp += vl;
       op += vl;
@@ -233,9 +260,8 @@ static inline void llm_rmsnorm_f16(const __fp16 *x, const __fp16 *gamma,
 
 // ---------------------------------------------------------------------------
 // SiLU-gated multiply: a = SiLU(g) * u, elementwise over n contiguous elements.
-// Computed in scalar f32 (the SiLU sigmoid needs an exp and a divide, neither
-// available on the Spatz vector path here). Work is partitioned into contiguous
-// per-core ranges.
+// Computed in vector f32 using the supported exp and reciprocal approximations.
+// Work is partitioned into contiguous per-core ranges.
 // ---------------------------------------------------------------------------
 static inline void llm_silu_mul_f16(const __fp16 *__restrict__ g,
                                     const __fp16 *__restrict__ u,
@@ -247,46 +273,40 @@ static inline void llm_silu_mul_f16(const __fp16 *__restrict__ g,
   if (end > n)
     end = n;
 
-#ifdef LLM_SPATZ_VEC
-  // a = g * sigmoid(g) * u, sigmoid via 1/(1+exp(-g)); exp on the vector unit,
-  // reciprocal via vfrec7 + one Newton step (>=14-bit, ample for f16).
-  const float ONE = 1.0f, TWO = 2.0f;
+  // Four e32,m8 groups are live at peak: exp/denominator v0, reciprocal v8,
+  // u/scratch v16, and the preserved g/result v24. The paired e16,m4 loads and
+  // narrows keep VLMAX=128 across SEW changes without register overlap.
+  const float ONE = 1.0f;
+  const float ZERO_H = llm_f16box(0.0f);
   const __fp16 *gp = g + start;
   const __fp16 *up = u + start;
   __fp16 *ap = a + start;
   uint32_t avl = (start < end) ? (end - start) : 0;
   while (avl > 0) {
     uint32_t vl;
-    asm volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(avl));
-    asm volatile("vle16.v v0, (%0)" ::"r"(gp));
-    asm volatile("vle16.v v4, (%0)" ::"r"(up));
-    asm volatile("vfwcvt.f.f.v v8, v0");  // g -> f32 (m2)
-    asm volatile("vfwcvt.f.f.v v12, v4"); // u -> f32 (m2)
-    asm volatile("vsetvli zero, %0, e32, m2, ta, ma" ::"r"(vl));
-    asm volatile("vfsgnjn.vv v16, v8, v8");            // v16 = -g
-    llm_rvv_expf_m2();                                 // v16 = exp(-g)
-    asm volatile("vfadd.vf v16, v16, %0" ::"f"(ONE));  // denom = 1+exp(-g)
-    asm volatile("vfrec7.v v20, v16");                 // y0 ~ 1/denom
-    asm volatile("vfmul.vv v24, v16, v20");            // denom*y0
-    asm volatile("vfrsub.vf v24, v24, %0" ::"f"(TWO)); // 2 - denom*y0
-    asm volatile("vfmul.vv v20, v20, v24");            // y = 1/denom
-    asm volatile("vfmul.vv v8, v8, v20");              // g*sigmoid(g)
-    asm volatile("vfmul.vv v8, v8, v12");              // * u
-    asm volatile("vsetvli zero, %0, e16, m1, ta, ma" ::"r"(vl));
-    asm volatile("vfncvt.f.f.w v0, v8"); // f32 -> f16
-    asm volatile("vse16.v v0, (%0)" ::"r"(ap));
+    asm volatile("vsetvli %0, %1, e16, m4, ta, ma" : "=r"(vl) : "r"(avl));
+    asm volatile("vle16.v v0, (%0)" : : "r"(gp) : "memory");
+    asm volatile("vfwadd.vf v24, v0, %0" : : "f"(ZERO_H));
+    asm volatile("vsetvli zero, %0, e32, m8, ta, ma" : : "r"(vl));
+    asm volatile("vfsgnjn.vv v0, v24, v24");
+    llm_rvv_expf_m8();
+    asm volatile("vfadd.vf v0, v0, %0" : : "f"(ONE));
+    llm_rvv_recip_pos_m8();
+
+    asm volatile("vsetvli zero, %0, e16, m4, ta, ma" : : "r"(vl));
+    asm volatile("vle16.v v0, (%0)" : : "r"(up) : "memory");
+    asm volatile("vfwadd.vf v16, v0, %0" : : "f"(ZERO_H));
+    asm volatile("vsetvli zero, %0, e32, m8, ta, ma" : : "r"(vl));
+    asm volatile("vfmul.vv v24, v24, v8");
+    asm volatile("vfmul.vv v24, v24, v16");
+    asm volatile("vsetvli zero, %0, e16, m4, ta, ma" : : "r"(vl));
+    asm volatile("vfncvt.f.f.w v0, v24");
+    asm volatile("vse16.v v0, (%0)" : : "r"(ap) : "memory");
     gp += vl;
     up += vl;
     ap += vl;
     avl -= vl;
   }
-#else
-  for (uint32_t i = start; i < end; i++) {
-    float gv = (float)g[i];
-    float uv = (float)u[i];
-    a[i] = (__fp16)(llm_silu_f32(gv) * uv);
-  }
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -309,11 +329,11 @@ static inline void llm_residual_add_f16(__fp16 *__restrict__ out,
 
   while (avl > 0) {
     uint32_t vl;
-    asm volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(avl));
-    asm volatile("vle16.v v0, (%0)" ::"r"(op));
-    asm volatile("vle16.v v4, (%0)" ::"r"(xp));
-    asm volatile("vfadd.vv v0, v0, v4");
-    asm volatile("vse16.v v0, (%0)" ::"r"(op));
+    asm volatile("vsetvli %0, %1, e16, m8, ta, ma" : "=r"(vl) : "r"(avl));
+    asm volatile("vle16.v v0, (%0)" : : "r"(op) : "memory");
+    asm volatile("vle16.v v8, (%0)" : : "r"(xp) : "memory");
+    asm volatile("vfadd.vv v0, v0, v8");
+    asm volatile("vse16.v v0, (%0)" : : "r"(op) : "memory");
     op += vl;
     xp += vl;
     avl -= vl;

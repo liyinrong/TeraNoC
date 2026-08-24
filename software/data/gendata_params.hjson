@@ -419,6 +419,57 @@
     ]
   },
 
+  // Optimized RedMulE GEMM: same logical Z = X@W + Y as rm_gemm_f16, plus the
+  // packed row-by-column DSE schedule (RM_GEMM_TILED_2D) whose operand layout
+  // is emitted by the generator so kernel and data cannot disagree.
+  "rm_gemm_opt_f16": {
+    "type": "float16",
+    "defines": [
+      ("matrix_M", 64)
+      ("matrix_N", 64)
+      ("matrix_P", 64)
+      ("LLM_PERF_ONLY", 0)
+      ("RM_GEMM_TILED_2D", 0)
+      ("NE_R", 8)
+      ("NE_C", 8)
+      ("ROW_TILE", 512)
+      ("COL_TILE", 1024)
+      ("XSHIFT", 0)
+      ("WSHIFT", 0)
+    ]
+    "arrays": [
+      ("__fp16", "l2_X")
+      ("__fp16", "l2_W")
+      ("__fp16", "l2_Y")
+      ("__fp16", "l2_Z")
+    ]
+  },
+
+  // rm_gemm_opt_f16 plus the RedMulE X contraction-start offset. Same data
+  // layout; RM_X_SHIFT selects whether the per-engine offset is programmed.
+  "rm_gemm_xshift_f16": {
+    "type": "float16",
+    "defines": [
+      ("matrix_M", 64)
+      ("matrix_N", 64)
+      ("matrix_P", 64)
+      ("LLM_PERF_ONLY", 0)
+      ("RM_GEMM_TILED_2D", 0)
+      ("NE_R", 8)
+      ("NE_C", 8)
+      ("ROW_TILE", 512)
+      ("COL_TILE", 1024)
+      ("XSHIFT", 0)
+      ("WSHIFT", 0)
+    ]
+    "arrays": [
+      ("__fp16", "l2_X")
+      ("__fp16", "l2_W")
+      ("__fp16", "l2_Y")
+      ("__fp16", "l2_Z")
+    ]
+  },
+
   "matmul_f16": {
     "type": "float16",
     "defines": [
@@ -699,12 +750,54 @@
     ]
   },
 
+  // Pure-GEMM benchmarks: only the representative GEMM workloads of the two
+  // layer types.  Shapes follow the classic-Transformer toy/real geometry; the
+  // tiles (ROW_TILE/PANEL_I/NUM_IP, LLM_GEMM_BM/BN) are derived from the config
+  // L1 budget by the generator.
+  "llm_gemm_ffn_f16": {
+    "type": "float16",
+    "defines": [
+      ("S", 512)
+      ("D", 256)
+      ("I", 1024)
+      ("LLM_PERF_ONLY", 0)
+      ("LLM_GEMM_2D", 0)
+      ("NE_R", 1)
+      ("NE_C", 1)
+    ]
+    "arrays": [
+      ("__fp16", "l2_x")
+      ("__fp16", "l2_w1")
+      ("__fp16", "l2_w2")
+      ("__fp16", "l2_y")
+    ]
+  },
+
+  "llm_gemm_attention_f16": {
+    "type": "float16",
+    "defines": [
+      ("S", 512)
+      ("D", 256)
+      ("N_HEADS", 8)
+      ("HEAD_DIM", 32)
+      ("LLM_PERF_ONLY", 0)
+    ]
+    "arrays": [
+      ("__fp16", "l2_x")
+      ("__fp16", "l2_wq")
+      ("__fp16", "l2_wk")
+      ("__fp16", "l2_wv")
+      ("__fp16", "l2_wo")
+      ("__fp16", "l2_y")
+    ]
+  },
+
   // Minimal classic-Transformer benchmarks: causal equal-head attention and
   // a two-linear ReLU FFN.  They intentionally omit all Llama-specific stages.
   "llm_classic_ffn_prefill_f16": {
     "type": "float16",
     "defines": [
-      ("S", 128)
+      ("S", 512)
       ("D", 256)
       ("I", 1024)
       ("LLM_PERF_ONLY", 0)
@@ -736,7 +829,7 @@
   "llm_classic_attention_prefill_f16": {
     "type": "float16",
     "defines": [
-      ("S", 128)
+      ("S", 512)
       ("D", 256)
       ("N_HEADS", 8)
       ("HEAD_DIM", 32)
@@ -756,7 +849,7 @@
     "type": "float16",
     "defines": [
       ("S", 32)
-      ("KV_LEN", 128)
+      ("KV_LEN", 4096)
       ("D", 256)
       ("N_HEADS", 8)
       ("HEAD_DIM", 32)

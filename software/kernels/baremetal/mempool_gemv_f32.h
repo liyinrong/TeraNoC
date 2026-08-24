@@ -41,6 +41,10 @@ void gemv_f32p_local_unrolled4(float *in_a, float *in_x, float *y, uint32_t N,
         // Unrolled by 4
         for (uint32_t j_inc = 0; j_inc < j_block; j_inc += 4) {
           uint32_t j = j_start + (j_offset + j_inc) % j_block;
+          // Skip elements beyond the row: the j_block tiling overshoots when N
+          // is not a multiple of j_block, which would read past in_x/in_a.
+          if (j >= idx_stop)
+            continue;
           a0 = in_a[i * N + j];
           a1 = in_a[i * N + j + 1];
           a2 = in_a[i * N + j + 2];

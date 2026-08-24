@@ -181,6 +181,17 @@ if __name__ == '__main__':
     # Parse the command-line arguments
     args = parser.parse_args()
     app_name = args.app_name
+
+    # Stage-1 Qwen operation benchmarks declare perf-only tile buffers in their
+    # shared C harness. They still participate in the normal Make dependency on
+    # data_<app>.h, so emit a generated stub without requiring 28 duplicate
+    # hjson blocks.
+    if app_name.startswith("qwen_"):
+        filename = os.path.dirname(os.path.abspath(__file__))
+        filename = os.path.join(filename, "data_{}.h".format(app_name))
+        print_file(header, {}, [], filename)
+        raise SystemExit(0)
+
     with open(args.params, 'r') as hjson_file:
         config_data = hjson.load(hjson_file)
     data_args = config_data.get(app_name)
@@ -232,7 +243,9 @@ if __name__ == '__main__':
         "cmatmul_q16": {"func": datalib.generate_qcmatmul},
         "dotp_f16": {"func": datalib.generate_fdotp},
         "dotp_f32": {"func": datalib.generate_fdotp},
-        "rm_gemm_f16": {"func": datalib.generate_fgemm},
+        "rm_gemm_f16": {"func": datalib.generate_rm_gemm},
+        "rm_gemm_opt_f16": {"func": datalib.generate_rm_gemm},
+        "rm_gemm_xshift_f16": {"func": datalib.generate_rm_gemm},
         "dotp_i32": {"func": datalib.generate_idotp},
         "conv2d_f16": {"func": datalib.generate_fconv2d},
         "conv2d_f32": {"func": datalib.generate_fconv2d},
@@ -259,6 +272,9 @@ if __name__ == '__main__':
         "barriers_test": {"func": datalib.generate_barriers_test},
         "softmax_f8": {"func": datalib.generate_fsoftmax},
         "softmax_f16": {"func": datalib.generate_fsoftmax},
+        "llm_gemm_ffn_f16": {"func": datalib.generate_llm_gemm_ffn},
+        "llm_gemm_attention_f16": {
+            "func": datalib.generate_llm_gemm_attention},
         "llm_ffn_prefill_f16": {"func": datalib.generate_llm_ffn},
         "llm_ffn_decode_f16": {"func": datalib.generate_llm_ffn},
         "llm_classic_ffn_prefill_f16": {

@@ -50,17 +50,36 @@ int main() {
   }
   mempool_barrier(num_cores);
 
+  llm_classic_ffn_perf_t perf = {0};
   uint32_t time_init = mempool_get_timer();
+#if !LLM_CLASSIC_STAGE_PERF
   mempool_start_benchmark();
+#endif
   llm_classic_ffn_f16(l2_x, l2_w1, l2_w2, l2_check, l1_x, l1_hidden, l1_out,
                       l1_wbuf, S, D, I, ROW_TILE, PANEL_I, NUM_IP, core_id,
-                      num_cores, redmule_id);
+                      num_cores, redmule_id, &perf);
+#if !LLM_CLASSIC_STAGE_PERF
   mempool_stop_benchmark();
+#endif
   uint32_t time_end = mempool_get_timer();
+  mempool_barrier(num_cores);
 
-  if (core_id == 0)
-    printf("[llm_classic_ffn_decode_f16] kernel takes %d cycles\n",
+  if (core_id == 0) {
+#if LLM_CLASSIC_STAGE_PERF
+    printf("[llm_classic_ffn_decode_f16] stage=load_x_w1_w2 cycles=%u\n",
+           perf.load_x_w1_w2);
+    printf("[llm_classic_ffn_decode_f16] stage=w1_and_prefetch cycles=%u\n",
+           perf.w1_and_prefetch);
+    printf("[llm_classic_ffn_decode_f16] stage=relu cycles=%u\n", perf.relu);
+    printf("[llm_classic_ffn_decode_f16] stage=w2 cycles=%u\n", perf.w2);
+    printf("[llm_classic_ffn_decode_f16] stage=prefetch_wait cycles=%u\n",
+           perf.prefetch_wait);
+    printf("[llm_classic_ffn_decode_f16] stage=store_y cycles=%u\n",
+           perf.store_y);
+#endif
+    printf("[llm_classic_ffn_decode_f16] kernel takes %u clock cycles\n",
            time_end - time_init);
+  }
   mempool_barrier(num_cores);
 
 #if !LLM_PERF_ONLY
