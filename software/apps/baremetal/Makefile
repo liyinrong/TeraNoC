@@ -27,6 +27,9 @@ LLM_APPS := $(filter llm_%,$(ALL))
 # intentionally separate from the composed llm_* apps but still require the
 # LLVM toolchain plus a Spatz+RedMulE configuration.
 QWEN_APPS := $(filter qwen_%,$(ALL))
+# Virtual-cluster tests. vc_* needs the same Spatz-capable LLVM toolchain: the
+# gate configs are Spatz builds, for which gcc has no ISA string at all.
+VC_APPS := $(filter vc_%,$(ALL))
 # Spatz/RVV vector apps are screened by the `sp_` prefix. They need a Spatz
 # config and the LLVM toolchain (RVV codegen); the config is selected by the
 # user (no automatic override).
@@ -39,6 +42,7 @@ REDMULE_APPS := $(filter rm_%, $(ALL))
 # Default compiler per app type: gcc for integer apps, llvm for floating-point
 # and vector apps. Still overridable on the command line.
 LLVM_TARGETS := $(FP_APPS) $(SPATZ_APPS) $(REDMULE_APPS) $(LLM_APPS) $(QWEN_APPS)
+LLVM_TARGETS += $(VC_APPS)
 LLVM_TARGETS += all_llvm all_spatz all_redmule all_llm all_qwen
 ifneq ($(filter $(LLVM_TARGETS),$(MAKECMDGOALS)),)
   COMPILER ?= llvm

@@ -45,6 +45,14 @@ static void check(uint32_t cond, const char *what, uint32_t a, uint32_t b) {
 
 // A word this core owns at (level, offset), distinct per group so a collision
 // between rectangles shows up as wrong content rather than as a silent pass.
+// Sections A-C write and read each group's OWN slot, so folding the group id
+// in is what proves no other group clobbered it. The cross-group sweep is the
+// opposite case -- one core writes, every member reads -- so it needs a value
+// that does not depend on who is looking.
+static uint32_t shared_pattern(uint32_t level, uint32_t offset) {
+  return 0x5C000000u ^ (level << 24) ^ (offset >> 2);
+}
+
 static uint32_t pattern(uint32_t level, uint32_t offset) {
   return 0xA5000000u ^ (level << 24) ^ (mempool_get_group_id() << 16) ^
          (offset >> 2);
@@ -155,6 +163,51 @@ int main() {
     }
   }
   mempool_barrier(num_cores);
+
+  // ---- D: cross-group sweep of the whole rectangle -----------------------
+  //
+  // Sections A-C only ever touch the accessing core's OWN slot, and at this
+  // geometry voff % VC_ROW_BYTES == 0 with VC_ROW_BYTES equal to the
+  // byte|bank|tile field width, so every one of those accesses resolves to the
+  // requester's own group and stays inside its tile. Nothing in the gate had
+  // put a virtual-cluster address on an inter-tile wire, which is why the
+  // confinement assertion had never been armed.
+  //
+  // Here ONE core -- the rectangle's leader -- writes every slot of its
+  // rectangle, so ngroups-1 of the writes leave the group, and then EVERY
+  // group leader in the rectangle reads all of them back through both address
+  // paths. That checks the sharing contract of vc.h: any member passing the
+  // same (level, offset) reaches the same physical words.
+  for (uint32_t k = 0; k < (uint32_t)VC_LEVELS; k++) {
+    const vc_rect_t rr = vc_rect(k);
+    const vc_rect_t *r = &rr;
+    const uint32_t gid = mempool_get_group_id();
+    const uint32_t gx = gid / NUM_Y; // x-major, as vc.c decomposes it
+    const uint32_t gy = gid % NUM_Y;
+    const uint32_t off = (uint32_t)buf[k] - vc_window_base(k);
+    const uint32_t rect_leader =
+        group_leader && (gx == r->base_gx) && (gy == r->base_gy);
+
+
+    if (rect_leader)
+      for (uint32_t slot = 0; slot < r->ngroups; slot++) {
+        const uint32_t voff = off + slot * VC_ROW_BYTES;
+        *(volatile uint32_t *)vc_ptr(k, voff) = shared_pattern(k, voff);
+      }
+    mempool_barrier(num_cores);
+
+    if (group_leader)
+      for (uint32_t slot = 0; slot < r->ngroups; slot++) {
+        const uint32_t voff = off + slot * VC_ROW_BYTES;
+        const uint32_t want = shared_pattern(k, voff);
+        check(*(volatile uint32_t *)vc_ptr(k, voff) == want, "rect sweep vc",
+              *(volatile uint32_t *)vc_ptr(k, voff), want);
+        check(*(volatile uint32_t *)vc_global_addr(r, voff) == want,
+              "rect sweep alias",
+              *(volatile uint32_t *)vc_global_addr(r, voff), want);
+      }
+    mempool_barrier(num_cores);
+  }
 
   if (core_id == 0) {
     uint32_t total = 0;
