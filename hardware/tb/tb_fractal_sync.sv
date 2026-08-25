@@ -146,6 +146,21 @@ module tb_fractal_sync;
     h_req[c][0] = '0;
   endtask
 
+  // Vertical pairing uses the CU's v leaf port and id=1. The direction is a
+  // property of the GEOMETRY, not of a requested default: the reference
+  // generator returns id=1 for a vertically-adjacent pair even when asked for
+  // the horizontal direction, and id=0 for a horizontal pair asked vertically.
+  task automatic arrive_v(input int unsigned x, input int unsigned y,
+                          input logic [IN_AGGR_WIDTH-1:0] aggr);
+    int unsigned c = leaf_idx(x, y);
+    @(negedge clk);
+    v_req[c][0].sync     = 1'b1;
+    v_req[c][0].sig.aggr = aggr;
+    v_req[c][0].sig.id   = 1;
+    @(negedge clk);
+    v_req[c][0] = '0;
+  endtask
+
   task automatic check(input logic cond, input string what);
     if (!cond) begin
       errors++;
@@ -234,6 +249,40 @@ module tb_fractal_sync;
     arrive(SIDE - 1, SIDE - 1, aggr_of(4));
     repeat (30) @(posedge clk);
     expect_woke({NCU{1'b1}}, "C: 4x4 completion");
+
+    // ---------------------------------------------------------------- D
+    // PARTIAL SCOPE: a horizontal PAIR is the finest barrier the tree
+    // supports (a single CU is refused by the generator). aggr=0x1, id=0.
+    reset_dut();
+    clear_woke();
+    arrive(0, 0, 1);
+    repeat (20) @(posedge clk);
+    expect_woke('0, "D: h-pair woke on 1 of 2 arrivals");
+    arrive(1, 0, 1);
+    repeat (20) @(posedge clk);
+    begin
+      logic [NCU-1:0] m = '0;
+      m[leaf_idx(0, 0)] = 1'b1;
+      m[leaf_idx(1, 0)] = 1'b1;
+      expect_woke(m, "D: h-pair completion");
+    end
+
+    // ---------------------------------------------------------------- E
+    // The vertical direction, which tests A-D never exercise: same aggr, but
+    // the v leaf port and id=1.
+    reset_dut();
+    clear_woke();
+    arrive_v(0, 0, 1);
+    repeat (20) @(posedge clk);
+    expect_woke('0, "E: v-pair woke on 1 of 2 arrivals");
+    arrive_v(0, 1, 1);
+    repeat (20) @(posedge clk);
+    begin
+      logic [NCU-1:0] m = '0;
+      m[leaf_idx(0, 0)] = 1'b1;
+      m[leaf_idx(0, 1)] = 1'b1;
+      expect_woke(m, "E: v-pair completion");
+    end
 
     $display("[tb_fractal_sync] %0d errors", errors);
     if (errors == 0) $display("[EOC] Simulation ended at %t (retval = 0).", $time);
