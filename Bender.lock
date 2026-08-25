@@ -104,6 +104,12 @@ packages:
       Git: https://github.com/pulp-platform/fpu_div_sqrt_mvp.git
     dependencies:
     - common_cells
+  fractal_sync:
+    revision: df8e21b7e2b0e2d3198bf44a60b4ca67c334bcc2
+    version: null
+    source:
+      Git: https://github.com/VictorIsachi/fractal_sync.git
+    dependencies: []
   hci:
     revision: a8d8132b7f7839fd55f92df65cdc3e361ea80a6b
     version: 2.6.1

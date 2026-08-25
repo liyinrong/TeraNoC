@@ -23,6 +23,7 @@ dependencies:
   scm:                  { path: "hardware/deps/scm"                                                          }
   redmule:              { git: "https://github.com/liyinrong/redmule.git",                  rev: yinrong/devel }
   hci:                  { git: "https://github.com/pulp-platform/hci.git",                  version: 2.6.1   }
+  fractal_sync:         { git: "https://github.com/VictorIsachi/fractal_sync.git",         rev: df8e21b7e2b0e2d3198bf44a60b4ca67c334bcc2 }
 
 workspace:
   checkout_dir: "./hardware/deps"
