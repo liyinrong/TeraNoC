@@ -623,6 +623,11 @@ fsync-gate:
 	$(MAKE) simc top_level=tb_fractal_sync config=$(config) \
 	  questa_simc_args="-c"
 
+.PHONY: fsync-shim-gate
+fsync-shim-gate:
+	$(MAKE) simc top_level=tb_fsync_shim config=$(config) \
+	  questa_simc_args="-c"
+
 simc: clean-dasm compile_questa_opt
 	cd $(buildpath) && \
 	$(questa_cmd) vsim $(questa_simc_args) $(questa_args) $(library).$(top_level)_opt -do "run -a"

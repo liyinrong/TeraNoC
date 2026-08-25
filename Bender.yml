@@ -35,6 +35,7 @@ export_include_dirs:
 sources:
   # Level 0
   - hardware/src/mempool_pkg.sv
+  - hardware/src/fsync_shim.sv
   - target: spatz
     files:
     - hardware/src/tcdm_id_remapper.sv
@@ -89,6 +90,9 @@ sources:
       # set) and isolation (disjoint scopes do not see each other), driven
       # at the tree's leaf ports with no cores and no shim.
       - hardware/tb/tb_fractal_sync.sv
+      # Shim driven only through its software-visible trigger, against a
+      # real tree: covers id steering, wake broadcast and one-outstanding.
+      - hardware/tb/tb_fsync_shim.sv
       # Level 2
       - hardware/tb/mempool_tb.sv
       # DRAMsys
