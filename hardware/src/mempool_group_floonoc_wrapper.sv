@@ -312,8 +312,8 @@ if (NocRouterRemapping == 1 || NocRouterRemapping == 3) begin: gen_req_remapping
             meta_id : tcdm_master_req[i][j+(1)].wdata.meta_id,                      // For Register File
             core_id : tcdm_master_req[i][j+(1)].wdata.core_id,                      // For Core
             src_tile_id : i,                                                        // For Crossbar when response back
-            src_id: group_xy_id_t'({group_id_i, 1'b0}),                             // For NoC Router when response back
-            dst_id: group_xy_id_t'({tcdm_master_req[i][j+(1)].tgt_group_id, 1'b0}), // For NoC Router when request send
+            src_id: group_xy_of(group_id_i),                             // For NoC Router when response back
+            dst_id: group_xy_of(tcdm_master_req[i][j+(1)].tgt_group_id), // For NoC Router when request send
             tgt_addr: tcdm_master_req[i][j+(1)].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
             last : 1'b1,                                                            // Non Burst Request
             collective_op : 1'b0                                                    // Not used
@@ -336,8 +336,8 @@ if (NocRouterRemapping == 1 || NocRouterRemapping == 3) begin: gen_req_remapping
           meta_id : tcdm_master_req[i][j].wdata.meta_id,                      // For Register File
           core_id : tcdm_master_req[i][j].wdata.core_id,                      // For Core
           src_tile_id : i,                                                    // For Crossbar when response back
-          src_id: group_xy_id_t'({group_id_i, 1'b0}),                         // For NoC Router when response back
-          dst_id: group_xy_id_t'({tcdm_master_req[i][j].tgt_group_id, 1'b0}), // For NoC Router when request send
+          src_id: group_xy_of(group_id_i),                         // For NoC Router when response back
+          dst_id: group_xy_of(tcdm_master_req[i][j].tgt_group_id), // For NoC Router when request send
           tgt_addr: tcdm_master_req[i][j].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
           last : 1'b1,                                                        // Non Burst Request
           collective_op : 1'b0                                                // Not used
@@ -393,8 +393,8 @@ end else begin: gen_req_remapping_bypass
             meta_id : tcdm_master_req[i][j+(1)].wdata.meta_id,                      // For Register File
             core_id : tcdm_master_req[i][j+(1)].wdata.core_id,                      // For Core
             src_tile_id : i,                                                        // For Crossbar when response back
-            src_id: group_xy_id_t'({group_id_i, 1'b0}),                             // For NoC Router when response back
-            dst_id: group_xy_id_t'({tcdm_master_req[i][j+(1)].tgt_group_id, 1'b0}), // For NoC Router when request send
+            src_id: group_xy_of(group_id_i),                             // For NoC Router when response back
+            dst_id: group_xy_of(tcdm_master_req[i][j+(1)].tgt_group_id), // For NoC Router when request send
             tgt_addr: tcdm_master_req[i][j+(1)].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
             last : 1'b1,                                                            // Non Burst Request
             collective_op : 1'b0                                                    // Not used
@@ -417,8 +417,8 @@ end else begin: gen_req_remapping_bypass
           meta_id : tcdm_master_req[i][j].wdata.meta_id,                      // For Register File
           core_id : tcdm_master_req[i][j].wdata.core_id,                      // For Core
           src_tile_id : i,                                                    // For Crossbar when response back
-          src_id: group_xy_id_t'({group_id_i, 1'b0}),                         // For NoC Router when response back
-          dst_id: group_xy_id_t'({tcdm_master_req[i][j].tgt_group_id, 1'b0}), // For NoC Router when request send
+          src_id: group_xy_of(group_id_i),                         // For NoC Router when response back
+          dst_id: group_xy_of(tcdm_master_req[i][j].tgt_group_id), // For NoC Router when request send
           tgt_addr: tcdm_master_req[i][j].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
           last : 1'b1,                                                        // Non Burst Request
           collective_op : 1'b0                                                // Not used
@@ -613,8 +613,8 @@ if (NocRouterRemapping == 2 || NocRouterRemapping == 3) begin: gen_resp_remappin
           meta_id : tcdm_slave_resp[i][j].rdata.meta_id,                          // For Register File
           core_id : tcdm_slave_resp[i][j].rdata.core_id,                          // For Core
           tile_id : tcdm_slave_resp[i][j].ini_addr,                               // Sender's Tile ID
-          src_id  : group_xy_id_t'({ group_id_i, 1'b0 }),                         // For NoC Router
-          dst_id  : group_xy_id_t'({ tcdm_slave_resp[i][j].src_group_id, 1'b0 }), // Sender's Group ID
+          src_id  : group_xy_of(group_id_i),                         // For NoC Router
+          dst_id  : group_xy_of(tcdm_slave_resp[i][j].src_group_id), // Sender's Group ID
           last    : 1'b1,                                                         // Non Burst Request
           collective_op : 1'b0                                                    // Not used
         }
@@ -651,8 +651,8 @@ end else begin: gen_resp_remapping_bypass
           meta_id : tcdm_slave_resp[i][j].rdata.meta_id,                      // For Register File
           core_id : tcdm_slave_resp[i][j].rdata.core_id,                      // For Core
           tile_id : tcdm_slave_resp[i][j].ini_addr,                           // For Crossbar when response back (Sender's Tile ID, propagated from request)
-          src_id: group_xy_id_t'({group_id_i, 1'b0}),                         // For NoC Router when response back
-          dst_id: group_xy_id_t'({tcdm_slave_resp[i][j].src_group_id, 1'b0}), // For NoC Router when response back (Sender's Group ID, propagated from request)
+          src_id: group_xy_of(group_id_i),                         // For NoC Router when response back
+          dst_id: group_xy_of(tcdm_slave_resp[i][j].src_group_id), // For NoC Router when response back (Sender's Group ID, propagated from request)
           last : 1'b1,                                                        // Non Burst Request
           collective_op : 1'b0                                                // Not used
         }
@@ -827,7 +827,7 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_connecti
 end : gen_router_router_connection_i
 
 group_xy_id_t group_xy_id;
-assign group_xy_id = group_xy_id_t'({group_id_i, 1'b0});
+assign group_xy_id = group_xy_of(group_id_i);
 
 for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
 `ifdef USE_RO_NARROW_REQ_CHANNEL
@@ -1072,8 +1072,8 @@ end : gen_router_router_i
           meta_id:       tcdm_wide_master_req[t][WideRoBase+k].wdata.meta_id,
           core_id:       tcdm_wide_master_req[t][WideRoBase+k].wdata.core_id,
           src_tile_id:   tcdm_wide_master_req[t][WideRoBase+k].src_tile_id,
-          src_id:        group_xy_id_t'({group_id_i, 1'b0}),
-          dst_id:        group_xy_id_t'({tcdm_wide_master_req[t][WideRoBase+k].tgt_group_id, 1'b0}),
+          src_id:        group_xy_of(group_id_i),
+          dst_id:        group_xy_of(tcdm_wide_master_req[t][WideRoBase+k].tgt_group_id),
           tgt_addr:      tcdm_wide_master_req[t][WideRoBase+k].tgt_addr,
           last:          1'b1,
           collective_op: 1'b0
@@ -1279,8 +1279,8 @@ end : gen_router_router_i
           meta_id:       tcdm_wide_master_req[t][WideWoBase+w].wdata.meta_id,
           core_id:       tcdm_wide_master_req[t][WideWoBase+w].wdata.core_id,
           src_tile_id:   tcdm_wide_master_req[t][WideWoBase+w].src_tile_id,
-          src_id:        group_xy_id_t'({group_id_i, 1'b0}),
-          dst_id:        group_xy_id_t'({tcdm_wide_master_req[t][WideWoBase+w].tgt_group_id, 1'b0}),
+          src_id:        group_xy_of(group_id_i),
+          dst_id:        group_xy_of(tcdm_wide_master_req[t][WideWoBase+w].tgt_group_id),
           tgt_addr:      tcdm_wide_master_req[t][WideWoBase+w].tgt_addr,
           last:          1'b1,
           collective_op: 1'b0
@@ -1474,8 +1474,8 @@ end : gen_router_router_i
           meta_id:       tcdm_wide_slave_resp[t][WideRwBase+k].rdata.meta_id,
           core_id:       tcdm_wide_slave_resp[t][WideRwBase+k].rdata.core_id,
           tile_id:       tcdm_wide_slave_resp[t][WideRwBase+k].ini_addr,
-          src_id:        group_xy_id_t'({group_id_i, 1'b0}),
-          dst_id:        group_xy_id_t'({tcdm_wide_slave_resp[t][WideRwBase+k].src_group_id, 1'b0}),
+          src_id:        group_xy_of(group_id_i),
+          dst_id:        group_xy_of(tcdm_wide_slave_resp[t][WideRwBase+k].src_group_id),
           last:          1'b1,
           collective_op: 1'b0
         }
@@ -1670,8 +1670,8 @@ end : gen_router_router_i
           meta_id:       tcdm_wide_slave_resp[t][WideWoRespBase+w].rdata.meta_id,
           core_id:       tcdm_wide_slave_resp[t][WideWoRespBase+w].rdata.core_id,
           tile_id:       tcdm_wide_slave_resp[t][WideWoRespBase+w].ini_addr,
-          src_id:        group_xy_id_t'({group_id_i, 1'b0}),
-          dst_id:        group_xy_id_t'({tcdm_wide_slave_resp[t][WideWoRespBase+w].src_group_id, 1'b0}),
+          src_id:        group_xy_of(group_id_i),
+          dst_id:        group_xy_of(tcdm_wide_slave_resp[t][WideWoRespBase+w].src_group_id),
           last:          1'b1,
           collective_op: 1'b0
         }

@@ -119,8 +119,8 @@ class MortonRule:
         return g.compose(row, out_gid, tile, bank, byte)
 
     def alias(self, offset: int, gid_i: int) -> int:
-        """The software path, by independent arithmetic (+,*,//) -- this is what
-        vc_global_addr computes, and it must equal permute()."""
+        """The software path, by independent arithmetic. This is what
+        vc_global_addr computes; it must equal permute()."""
         g = self.g
         rb = g.row_bytes()
         byte_in_row = offset % rb
@@ -152,7 +152,8 @@ def check(g: Geom, k: int, word_step: int = 1) -> List[str]:
         seen: Dict[int, int] = {}
         base_gid = gid_i - (gid_i % r.ngroups)
         rect = set(range(base_gid, base_gid + r.ngroups))
-        for off in range(0, r.aperture, rb * word_step):
+        step_b = rb * word_step
+        for off in range(0, r.aperture, step_b):
             a = r.permute(off, gid_i)
             b = r.alias(off, gid_i)
             if a != b:
@@ -173,8 +174,8 @@ def check(g: Geom, k: int, word_step: int = 1) -> List[str]:
 
 
 def check_contiguity(g: Geom, k: int) -> List[str]:
-    """The claim that buys the 2-D descriptor: a rectangle's group ids form a
-    contiguous range, so one bank row of the rectangle is one contiguous run."""
+    """The claim that buys the 2-D descriptor: a rectangle's group ids form
+    a contiguous range, so one rectangle bank row is one contiguous run."""
     r = MortonRule(g, k)
     fails = []
     for b in range(0, g.groups, r.ngroups):
@@ -189,7 +190,7 @@ def check_contiguity(g: Geom, k: int) -> List[str]:
         bx, by = min(xs), min(ys)
         if any(x < bx or x >= bx + r.side or y < by or y >= by + r.side
                for x, y in coords):
-            fails.append(f"{g.name} k={k}: rectangle at {b} not a square block")
+            fails.append(f"{g.name} k={k}: rect at {b} not square")
     return fails
 
 
@@ -211,10 +212,11 @@ def main() -> int:
             step = 1 if r.aperture <= (1 << 22) else r.aperture >> 22
             f = check(g, k, step) + check_contiguity(g, k)
             d = r.descriptor(0, 4)
-            two_d = d["len"] == r.row_stride()
-            print(f"  k={k} side={r.side} aperture={r.aperture >> 10:>7} KiB "
+            shape = "2-D" if d["len"] == r.row_stride() else "3-D"
+            print(f"  k={k} side={r.side} "
+                  f"aperture={r.aperture >> 10:>7} KiB "
                   f"step={step:<5} dim0={d['len']:>6} B contiguous "
-                  f"{'2-D' if two_d else '3-D'}  "
+                  f"{shape}  "
                   f"{'OK' if not f else 'FAIL'}")
             for line in f[:3]:
                 print("      " + line)

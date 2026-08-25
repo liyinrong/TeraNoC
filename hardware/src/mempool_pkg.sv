@@ -693,6 +693,15 @@ package mempool_pkg;
   typedef logic group_port_id_t;
   `FLOO_TYPEDEF_XY_NODE_ID_T(group_xy_id_t, group_x_id_t, group_y_id_t, group_port_id_t)
 
+  // The ONE definition of how a flat group id becomes mesh coordinates.
+  // It was previously an inline bit-cast repeated at 21 sites in
+  // mempool_group_floonoc_wrapper.sv, which meant the numbering convention had
+  // no single place to change and no single place to read. Behaviourally
+  // identical to that cast; the point is that it is now one function.
+  function automatic group_xy_id_t group_xy_of(group_id_t gid);
+    group_xy_of = group_xy_id_t'({gid, 1'b0});
+  endfunction
+
   // FlooNoC req types
   typedef struct packed {
     amo_t               amo;
