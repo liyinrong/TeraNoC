@@ -615,6 +615,14 @@ vc-replay:
 	$(MAKE) simc top_level=tb_vc_scrambler config=$(config) \
 	  questa_simc_args="-c +GOLDEN_DIR=$(abspath ../scripts/vc/golden)/"
 
+# Standalone fractal_sync barrier gate. Drives the tree's leaf ports directly --
+# no cores, no cluster, no shim -- so it runs in seconds and can be used while
+# the per-core shim is still being written.
+.PHONY: fsync-gate
+fsync-gate:
+	$(MAKE) simc top_level=tb_fractal_sync config=$(config) \
+	  questa_simc_args="-c"
+
 simc: clean-dasm compile_questa_opt
 	cd $(buildpath) && \
 	$(questa_cmd) vsim $(questa_simc_args) $(questa_args) $(library).$(top_level)_opt -do "run -a"

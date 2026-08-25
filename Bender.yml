@@ -85,6 +85,10 @@ sources:
       # vc-replay` can elaborate it as an alternative top; it was in no target
       # at all before, which meant the golden-vector gate could not be run.
       - hardware/tb/tb_vc_scrambler.sv
+      # Standalone fractal_sync barrier gate: safety (no wake on a partial
+      # set) and isolation (disjoint scopes do not see each other), driven
+      # at the tree's leaf ports with no cores and no shim.
+      - hardware/tb/tb_fractal_sync.sv
       # Level 2
       - hardware/tb/mempool_tb.sv
       # DRAMsys
