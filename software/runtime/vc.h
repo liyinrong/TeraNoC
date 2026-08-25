@@ -93,9 +93,10 @@ static inline uint32_t vc_row_stride(uint32_t k) {
 // ---------------------------------------------------------------------------
 
 typedef struct {
-  uint32_t level;   // k
-  uint32_t side;    // 2^k groups per axis
-  uint32_t base_gx; // rectangle origin, = (gx >> k) << k
+  uint32_t level;    // k
+  uint32_t side;     // 2^k groups per axis
+  uint32_t base_gid; // rectangle origin as a flat Morton id, = gid & ~(4^k-1)
+  uint32_t base_gx;  // the same origin in coordinates, for humans and the map
   uint32_t base_gy;
   uint32_t rx; // rectangle-grid coordinate, = gx >> k
   uint32_t ry;

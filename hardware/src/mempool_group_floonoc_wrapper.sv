@@ -586,10 +586,7 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_req_to_slave_re
                        (idx_width(NumBanksPerTile) + TCDMAddrMemWidth)
                      ], // For TCDM Bank, remove tile offset
       ini_addr     : floo_tcdm_narrow_req_from_router_after_xbar[i][j].hdr.src_tile_id, // For Crossbar response
-      src_group_id : group_id_t'({
-                        floo_tcdm_narrow_req_from_router_after_xbar[i][j].hdr.src_id.x,
-                        floo_tcdm_narrow_req_from_router_after_xbar[i][j].hdr.src_id.y
-                      }) // For NoC Router when response back
+      src_group_id : gid_of_xy(floo_tcdm_narrow_req_from_router_after_xbar[i][j].hdr.src_id.x, floo_tcdm_narrow_req_from_router_after_xbar[i][j].hdr.src_id.y) // For NoC Router when response back
     };
     assign tcdm_slave_req_valid[i][j]                    = floo_tcdm_narrow_req_from_router_after_xbar_valid[i][j];
     assign floo_tcdm_narrow_req_from_router_after_xbar_ready[i][j] = tcdm_slave_req_ready[i][j];
@@ -1219,7 +1216,7 @@ end : gen_router_router_i
         be:           '0,
         tgt_addr:     xbar_out[t].hdr.tgt_addr,
         ini_addr:     xbar_out[t].hdr.src_tile_id,
-        src_group_id: group_id_t'({xbar_out[t].hdr.src_id.x, xbar_out[t].hdr.src_id.y})
+        src_group_id: gid_of_xy(xbar_out[t].hdr.src_id.x, xbar_out[t].hdr.src_id.y)
       };
       assign tcdm_wide_slave_req_valid[t][WideRoBase+k] = xbar_out_valid[t];
       assign xbar_out_ready[t] = tcdm_wide_slave_req_ready[t][WideRoBase+k];
@@ -1441,7 +1438,7 @@ end : gen_router_router_i
         be:           floo_tcdm_wide_wo_req_after_xbar[Oup].payload.be,
         tgt_addr:     floo_tcdm_wide_wo_req_after_xbar[Oup].hdr.tgt_addr,
         ini_addr:     floo_tcdm_wide_wo_req_after_xbar[Oup].hdr.src_tile_id,
-        src_group_id: group_id_t'({floo_tcdm_wide_wo_req_after_xbar[Oup].hdr.src_id.x, floo_tcdm_wide_wo_req_after_xbar[Oup].hdr.src_id.y})
+        src_group_id: gid_of_xy(floo_tcdm_wide_wo_req_after_xbar[Oup].hdr.src_id.x, floo_tcdm_wide_wo_req_after_xbar[Oup].hdr.src_id.y)
       };
       assign tcdm_wide_slave_req_valid[t][WideWoBase+w] = floo_tcdm_wide_wo_req_after_xbar_valid[Oup];
       assign floo_tcdm_wide_wo_req_after_xbar_ready[Oup] = tcdm_wide_slave_req_ready[t][WideWoBase+w];

@@ -80,6 +80,10 @@ sources:
       # Level 1
       - hardware/tb/axi_uart.sv
       - hardware/tb/traffic_generator.sv
+      # Standalone WP3 permuter replay. Compiled with the design so `make
+      # vc-replay` can elaborate it as an alternative top; it was in no target
+      # at all before, which meant the golden-vector gate could not be run.
+      - hardware/tb/tb_vc_scrambler.sv
       # Level 2
       - hardware/tb/mempool_tb.sv
       # DRAMsys

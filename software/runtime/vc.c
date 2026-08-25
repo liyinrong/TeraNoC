@@ -113,19 +113,34 @@ static uint32_t vc_base_row(uint32_t c, uint32_t k) {
 }
 
 // Recomputed rather than stored; see above.
+// De-interleave a Morton group id. Must mirror mempool_pkg::group_xy_of; both
+// directions of the encoding live in exactly two places, one per language.
+static void vc_unmorton(uint32_t gid, uint32_t *gx, uint32_t *gy) {
+  uint32_t x = 0, y = 0;
+  for (uint32_t i = 0; (1u << i) < (uint32_t)NUM_X; ++i) {
+    y |= ((gid >> (2 * i)) & 1u) << i;
+    x |= ((gid >> (2 * i + 1)) & 1u) << i;
+  }
+  *gx = x;
+  *gy = y;
+}
+
 static vc_rect_t vc_rect_of(uint32_t k) {
   const uint32_t gid = mempool_get_group_id();
-  const uint32_t gx = gid / NUM_Y; // flat id is {gx, gy}, gy in the low half
-  const uint32_t gy = gid % NUM_Y;
+  uint32_t gx, gy;
+  vc_unmorton(gid, &gx, &gy);
   vc_rect_t r;
   r.level = k;
   r.side = 1u << k;
+  r.ngroups = r.side * r.side;
+  // The whole point of Morton: the rectangle is a contiguous id range, so the
+  // base is ONE flat mask rather than a per-axis one (the old INVARIANT #4).
+  r.base_gid = gid & ~(r.ngroups - 1u);
   r.rx = gx >> k;
   r.ry = gy >> k;
   r.base_gx = r.rx << k;
   r.base_gy = r.ry << k;
   r.id = r.rx * ((uint32_t)NUM_Y >> k) + r.ry;
-  r.ngroups = r.side * r.side;
   return r;
 }
 
@@ -156,19 +171,18 @@ vc_rect_t vc_rect(uint32_t level) { return vc_rect_of(level); }
 // address by addition, which is exactly the property invariant #4 exists to
 // guarantee: with a per-axis base mask, OR equals +.
 uint32_t vc_global_addr(const vc_rect_t *r, uint32_t offset) {
-  const uint32_t k = r->level;
-  const uint32_t side = r->side;
-
+  // Morton group ids: the rectangle is a contiguous id range, so the offset's
+  // group field is ONE 4^k-wide index and the base is one flat mask. The
+  // per-axis split this used to do only existed because the raster id made a
+  // rectangle discontiguous.
+  const uint32_t ngroups = r->ngroups;
   const uint32_t byte_in_row = offset % VC_ROW_BYTES;
-  uint32_t rest = offset / VC_ROW_BYTES;
-  const uint32_t vc_gy = rest % side;
-  rest /= side;
-  const uint32_t vc_gx = rest % side;
-  const uint32_t row = rest / side;
+  const uint32_t rest = offset / VC_ROW_BYTES;
+  const uint32_t vc_g = rest % ngroups;
+  const uint32_t row = rest / ngroups;
 
-  (void)k; // k is implicit in base_gx/base_gy and side
-  return byte_in_row + (r->base_gy + vc_gy) * VC_GY_STRIDE +
-         (r->base_gx + vc_gx) * VC_GX_STRIDE + row * VC_WORD_STRIDE;
+  return byte_in_row + (r->base_gid + vc_g) * VC_GY_STRIDE +
+         row * VC_WORD_STRIDE;
 }
 
 vc_desc_t vc_descriptor(const vc_rect_t *r, uint32_t offset, uint32_t bytes) {
@@ -176,8 +190,10 @@ vc_desc_t vc_descriptor(const vc_rect_t *r, uint32_t offset, uint32_t bytes) {
   const uint32_t side = r->side;
   // dim0 spans one bank row of one group TIMES the whole vc_gy field, since
   // the y-adjacent groups are contiguous in the global alias.
-  const uint32_t inner = (uint32_t)VC_ROW_BYTES * side;
-  const uint32_t stride = inner * side; // == vc_row_stride(r->level)
+  // Under Morton a whole rectangle bank row is CONTIGUOUS, so dim0 is the
+  // entire row and the gx dimension disappears: the descriptor is 2-D.
+  const uint32_t inner = (uint32_t)VC_ROW_BYTES * side * side;
+  const uint32_t stride = inner; // == vc_row_stride(r->level)
   // Round UP, as vc_malloc does. Truncating here made the natural idiom
   // p = vc_malloc(k,n); d = vc_descriptor(&r, off, n) under-copy, and a
   // sub-row `bytes` produced count[1] == 0, a descriptor that silently moves
@@ -199,9 +215,9 @@ vc_desc_t vc_descriptor(const vc_rect_t *r, uint32_t offset, uint32_t bytes) {
   }
 
   d.base = vc_global_addr(r, offset);
-  d.len = inner;
-  d.count[0] = side; // one step per vc_gx
-  d.stride[0] = VC_GX_STRIDE;
+  d.len = inner;  // one whole rectangle row, contiguous
+  d.count[0] = 1; // no gx dimension under Morton
+  d.stride[0] = 0;
   d.count[1] = rows; // one step per bank row
   d.stride[1] = VC_WORD_STRIDE;
   return d;
@@ -232,10 +248,10 @@ void vc_dma_memcpy_blocking(const vc_desc_t *dst, const vc_desc_t *src) {
     for (uint32_t j = 0; j < src->count[1]; ++j)
       for (uint32_t i = 0; i < src->count[0]; ++i) {
         const uint32_t run = j * src->count[0] + i;
-        dma_memcpy_blocking((void *)(dst->base + run * src->len),
-                            (void *)(src->base + i * src->stride[0] +
-                                     j * src->stride[1]),
-                            src->len);
+        dma_memcpy_blocking(
+            (void *)(dst->base + run * src->len),
+            (void *)(src->base + i * src->stride[0] + j * src->stride[1]),
+            src->len);
       }
   } else { // both strided: the shapes must agree run for run
     for (uint32_t j = 0; j < dst->count[1]; ++j)

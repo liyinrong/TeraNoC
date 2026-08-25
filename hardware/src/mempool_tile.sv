@@ -1253,11 +1253,13 @@ module mempool_tile
   function automatic bit vc_in_rect(input int unsigned own,
                                     input int unsigned tgt,
                                     input int unsigned k);
-    // Flat group id is {gx, gy} with gy in the low half.
-    automatic int unsigned own_gx = own / NumY, own_gy = own % NumY;
-    automatic int unsigned tgt_gx = tgt / NumY, tgt_gy = tgt % NumY;
-    vc_in_rect = ((own_gx >> k) == (tgt_gx >> k)) &&
-                 ((own_gy >> k) == (tgt_gy >> k));
+    // Morton group ids: a level-k rectangle is a contiguous id range, so
+    // membership is "same base", one mask and one compare. The per-axis form
+    // this replaces was the raster rectangle test and would reject legal
+    // Morton neighbours -- it flagged group 0 reaching group 2 at k=1, which
+    // is inside group 0's own rectangle {0,1,2,3}.
+    automatic int unsigned ngroups = 1 << (2*k);
+    vc_in_rect = (own / ngroups) == (tgt / ngroups);
   endfunction
 
   if (VirtualCluster && (NumGroups > 1)) begin : gen_vc_router_confinement

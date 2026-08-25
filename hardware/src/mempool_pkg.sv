@@ -693,13 +693,54 @@ package mempool_pkg;
   typedef logic group_port_id_t;
   `FLOO_TYPEDEF_XY_NODE_ID_T(group_xy_id_t, group_x_id_t, group_y_id_t, group_port_id_t)
 
-  // The ONE definition of how a flat group id becomes mesh coordinates.
+  // The ONE definition of how a flat group id relates to mesh coordinates.
   // It was previously an inline bit-cast repeated at 21 sites in
   // mempool_group_floonoc_wrapper.sv, which meant the numbering convention had
-  // no single place to change and no single place to read. Behaviourally
-  // identical to that cast; the point is that it is now one function.
+  // no single place to change and no single place to read.
+  //
+  // MORTON (Z-order) numbering: the id is the bit interleave of gx and gy,
+  // with gy in the even positions so the ordering matches the raster form's
+  // gy-low convention. Its point is that a level-k virtual-cluster rectangle
+  // becomes a CONTIGUOUS id range, which (a) collapses the per-axis base mask
+  // of INVARIANT #4 into one flat mask -- deleting the strip-instead-of-square
+  // failure mode entirely -- and (b) makes one rectangle bank row a single
+  // contiguous run in the global alias, so the DMA descriptor drops from 3-D
+  // to 2-D. Proven bijective, alias-exact and confined at every level of four
+  // geometries by scripts/vc/vc_morton.py before any of this was written.
+  //
+  // Morton is only defined on a square mesh, so a non-square geometry keeps
+  // the raster concatenation. Every current flavor is square, and the VC
+  // permuter separately refuses a non-square mesh.
+  localparam bit MortonGroupId = (NumX == NumY) && (NumX > 1);
+
   function automatic group_xy_id_t group_xy_of(group_id_t gid);
-    group_xy_of = group_xy_id_t'({gid, 1'b0});
+    group_x_id_t gx;
+    group_y_id_t gy;
+    if (MortonGroupId) begin
+      gx = '0;
+      gy = '0;
+      for (int unsigned i = 0; i < idx_width(NumX); i++) begin
+        gy[i] = gid[2*i];
+        gx[i] = gid[2*i + 1];
+      end
+      group_xy_of = '{x: gx, y: gy, port_id: 1'b0};
+    end else begin
+      group_xy_of = group_xy_id_t'({gid, 1'b0});
+    end
+  endfunction
+
+  // The inverse: a group's own coordinates to its flat id. Both directions
+  // must come from here, or they drift apart.
+  function automatic group_id_t gid_of_xy(group_x_id_t gx, group_y_id_t gy);
+    gid_of_xy = '0;
+    if (MortonGroupId) begin
+      for (int unsigned i = 0; i < idx_width(NumX); i++) begin
+        gid_of_xy[2*i]     = gy[i];
+        gid_of_xy[2*i + 1] = gx[i];
+      end
+    end else begin
+      gid_of_xy = group_id_t'({gx, gy});
+    end
   endfunction
 
   // FlooNoC req types

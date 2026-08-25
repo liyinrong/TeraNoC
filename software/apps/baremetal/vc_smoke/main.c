@@ -116,9 +116,9 @@ int main() {
       const uint32_t off = (uint32_t)buf[k] - vc_window_base(k);
       // Each group writes only the slice of the row that lives in its own
       // L1, so leaders of the same rectangle do not race.
-      const uint32_t slot =
-          (mempool_get_group_id() % r->side) * 1 +
-          ((mempool_get_group_id() / NUM_Y) % r->side) * r->side;
+      // Morton: a group's position inside its rectangle is simply the low
+      // 4^k bits of its id. The raster form needed a per-axis recomposition.
+      const uint32_t slot = mempool_get_group_id() % r->ngroups;
       const uint32_t word = slot * (VC_ROW_BYTES / 4);
       buf[k][word] = pattern(k, off + word * 4);
     }
@@ -131,9 +131,9 @@ int main() {
       const vc_rect_t rr = vc_rect(k);
       const vc_rect_t *r = &rr;
       const uint32_t off = (uint32_t)buf[k] - vc_window_base(k);
-      const uint32_t slot =
-          (mempool_get_group_id() % r->side) * 1 +
-          ((mempool_get_group_id() / NUM_Y) % r->side) * r->side;
+      // Morton: a group's position inside its rectangle is simply the low
+      // 4^k bits of its id. The raster form needed a per-axis recomposition.
+      const uint32_t slot = mempool_get_group_id() % r->ngroups;
       const uint32_t word = slot * (VC_ROW_BYTES / 4);
       const uint32_t voff = off + word * 4;
 
@@ -151,8 +151,10 @@ int main() {
       check(d.len * d.count[0] * d.count[1] == vc_row_stride(k),
             "descriptor covers one row", d.len * d.count[0] * d.count[1],
             vc_row_stride(k));
-      check(d.len == (uint32_t)VC_ROW_BYTES * r->side, "descriptor dim0",
-            d.len, (uint32_t)VC_ROW_BYTES * r->side);
+      // Under Morton dim0 is the WHOLE rectangle row -- the gx dimension is
+      // gone, which is the point of the encoding. It was VC_ROW_BYTES * side.
+      check(d.len == vc_row_stride(k) && d.count[0] == 1, "descriptor dim0",
+            d.len, vc_row_stride(k));
       // A misaligned offset must be refused, not silently aimed at a neighbour.
       if (vc_row_stride(k) > VC_ROW_BYTES) {
         vc_desc_t bad = vc_descriptor(r, aoff + VC_ROW_BYTES, vc_row_stride(k));
@@ -169,9 +171,9 @@ int main() {
       const vc_rect_t rr = vc_rect(k);
       const vc_rect_t *r = &rr;
       const uint32_t off = (uint32_t)buf[k] - vc_window_base(k);
-      const uint32_t slot =
-          (mempool_get_group_id() % r->side) * 1 +
-          ((mempool_get_group_id() / NUM_Y) % r->side) * r->side;
+      // Morton: a group's position inside its rectangle is simply the low
+      // 4^k bits of its id. The raster form needed a per-axis recomposition.
+      const uint32_t slot = mempool_get_group_id() % r->ngroups;
       const uint32_t word = slot * (VC_ROW_BYTES / 4);
       check(buf[k][word] == pattern(k, off + word * 4), "coexistence",
             buf[k][word], pattern(k, off + word * 4));
@@ -197,12 +199,9 @@ int main() {
     const vc_rect_t rr = vc_rect(k);
     const vc_rect_t *r = &rr;
     const uint32_t gid = mempool_get_group_id();
-    const uint32_t gx = gid / NUM_Y; // x-major, as vc.c decomposes it
-    const uint32_t gy = gid % NUM_Y;
     const uint32_t off = (uint32_t)buf[k] - vc_window_base(k);
-    const uint32_t rect_leader =
-        group_leader && (gx == r->base_gx) && (gy == r->base_gy);
-
+    // Morton: the rectangle's base IS an id, so leadership is one compare.
+    const uint32_t rect_leader = group_leader && (gid == r->base_gid);
 
     if (rect_leader)
       for (uint32_t slot = 0; slot < r->ngroups; slot++) {
@@ -218,8 +217,8 @@ int main() {
         check(*(volatile uint32_t *)vc_ptr(k, voff) == want, "rect sweep vc",
               *(volatile uint32_t *)vc_ptr(k, voff), want);
         check(*(volatile uint32_t *)vc_global_addr(r, voff) == want,
-              "rect sweep alias",
-              *(volatile uint32_t *)vc_global_addr(r, voff), want);
+              "rect sweep alias", *(volatile uint32_t *)vc_global_addr(r, voff),
+              want);
       }
     mempool_barrier(num_cores);
   }
@@ -241,16 +240,14 @@ int main() {
           "heterogeneous level-0 reserve", gid, 0);
     check(vc_reserve(1, vc_row_stride(1)) == 0, "level-1 reserve", gid, 0);
 
-    volatile uint32_t *hbuf = (volatile uint32_t *)vc_malloc(1, vc_row_stride(1));
+    volatile uint32_t *hbuf =
+        (volatile uint32_t *)vc_malloc(1, vc_row_stride(1));
     check(hbuf != 0, "heterogeneous vc_malloc", 0, 0);
     mempool_barrier(num_cores);
 
     const vc_rect_t hr = vc_rect(1);
     const uint32_t hoff = (uint32_t)hbuf - vc_window_base(1);
-    const uint32_t hgx = gid / NUM_Y;
-    const uint32_t hgy = gid % NUM_Y;
-    const uint32_t hlead =
-        group_leader && (hgx == hr.base_gx) && (hgy == hr.base_gy);
+    const uint32_t hlead = group_leader && (gid == hr.base_gid);
 
     if (hlead)
       for (uint32_t slot = 0; slot < hr.ngroups; slot++)

@@ -606,6 +606,15 @@ $(buildpath)/.questa_opt_stamp_$(top_level): $(buildpath)/compile.tcl
 # Run the pre-elaborated design. The GUI `sim` target above deliberately keeps
 # the unoptimised top: it needs -voptargs=+acc for `log -r *` in run.tcl.
 .PHONY: simc
+# WP3 golden-vector replay. The permuter's own gate item: it catches the
+# invariant-#4 reading that collides WITHOUT escaping the rectangle, which the
+# confinement assertion cannot see. Runs standalone in seconds -- no cores, no
+# cluster -- and takes the same config knobs so the geometry matches.
+.PHONY: vc-replay
+vc-replay:
+	$(MAKE) simc top_level=tb_vc_scrambler config=$(config) \
+	  questa_simc_args="-c +GOLDEN_DIR=$(abspath ../scripts/vc/golden)/"
+
 simc: clean-dasm compile_questa_opt
 	cd $(buildpath) && \
 	$(questa_cmd) vsim $(questa_simc_args) $(questa_args) $(library).$(top_level)_opt -do "run -a"

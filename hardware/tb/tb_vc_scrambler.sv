@@ -60,6 +60,7 @@ module vc_replay #(
     .TCDMMask                (~(TCDMSize - 1)   ),
     .EnableSeqInterleaveSwap (1'b1              ),
     .EnableTileIdRemap       (1'b1              ), // S9 regression, see above
+    .VcTileRemapTbOnly       (1'b1              ), // permitted here only
     .TCDMSize                (TCDMSize          ),
     .NumTilesPerGroup        (NumTilesPerGroup  ),
     .NumX                    (NumX              ),
@@ -78,7 +79,7 @@ module vc_replay #(
     automatic string line;
     automatic string dir = "../../scripts/vc/golden/";
     automatic string path;
-    automatic int unsigned k, gxi, gyi, cbase, crows, off, phys;
+    automatic int unsigned k, gxi, gyi, gid, cbase, crows, off, phys;
     automatic int unsigned n_pass = 0, n_fail = 0, n_skip = 0, n_line = 0;
     automatic logic [AddrWidth-1:0] base, exp;
 
@@ -93,8 +94,8 @@ module vc_replay #(
       void'($fgets(line, fd));
       if (line.len() == 0) continue;
       if (line.substr(0, 0) == "#") continue;
-      if ($sscanf(line, "%h %h %h %h %h %h %h",
-                  k, gxi, gyi, cbase, crows, off, phys) != 7) continue;
+      if ($sscanf(line, "%h %h %h %h %h %h %h %h",
+                  k, gxi, gyi, gid, cbase, crows, off, phys) != 8) continue;
       n_line++;
 
       // The TOP level has no window: its permuter is provably the identity,
@@ -116,7 +117,12 @@ module vc_replay #(
 
       base       = i_dut.vc_window_base(k);
       address_i  = base + off;
-      group_id_i = GroupIdWidth'(gxi * NumY + gyi);
+      // The vectors carry the flat id, so this testbench holds NO copy of
+      // the encoding. It cannot go stale, and -- unlike a package function --
+      // it works for a fixture whose geometry differs from the compiled
+      // configuration, which is how the 8x8 fixture failed while the 4x4 ones
+      // passed.
+      group_id_i = GroupIdWidth'(gid);
       exp        = TCDMBase + phys;
       #1ns;
 
@@ -149,7 +155,7 @@ module tb_vc_scrambler;
 
   // config/terapool.mk: 4x4 groups, 16 tiles/group, 16 banks/tile, 1 KiB banks
   vc_replay #(
-    .GoldenFile        ("vc_golden_terapool_v1.txt"),
+    .GoldenFile        ("vc_golden_morton_terapool_v1.txt"),
     .Label             ("terapool"),
     .NumX              (4 ),
     .NumY              (4 ),
@@ -163,7 +169,7 @@ module tb_vc_scrambler;
   // The former dse_s1_8x8_winner: 8x8 groups, 4 tiles/group, 64 banks/tile,
   // 4 KiB banks (Track A finding S2 — NOT the 32 banks/tile of the brief).
   vc_replay #(
-    .GoldenFile        ("vc_golden_monsterpool8x8_v1.txt"),
+    .GoldenFile        ("vc_golden_morton_monsterpool8x8_v1.txt"),
     .Label             ("monsterpool8x8"),
     .NumX              (8 ),
     .NumY              (8 ),
@@ -174,6 +180,21 @@ module tb_vc_scrambler;
     .n_pass_o (mp_pass), .n_fail_o (mp_fail), .n_skip_o (mp_skip)
   );
 
+  // config/dse_s1_winner.mk: the configuration the gate actually builds, and
+  // the one every VC simulation has used. The TB carried vectors for neither.
+  int unsigned s1_pass, s1_fail, s1_skip;
+  vc_replay #(
+    .GoldenFile        ("vc_golden_morton_dse_s1_winner_v1.txt"),
+    .Label             ("dse_s1_winner"),
+    .NumX              (4 ),
+    .NumY              (4 ),
+    .NumTilesPerGroup  (4 ),
+    .NumBanksPerTile   (64),
+    .BankSizeBytes     (4096)
+  ) i_dse_s1_winner (
+    .n_pass_o (s1_pass), .n_fail_o (s1_fail), .n_skip_o (s1_skip)
+  );
+
   initial begin : p_summary
     #1ms;
     $display("=== VC scrambler golden replay ===");
@@ -181,11 +202,24 @@ module tb_vc_scrambler;
              tp_pass, tp_fail, tp_skip);
     $display("  monsterpool8x8 : %0d pass, %0d fail, %0d skipped",
              mp_pass, mp_fail, mp_skip);
-    if (tp_fail != 0 || mp_fail != 0)
-      $fatal(1, "VC REPLAY FAILED: %0d mismatches", tp_fail + mp_fail);
-    if (tp_pass == 0 || mp_pass == 0)
+    $display("  dse_s1_winner  : %0d pass, %0d fail, %0d skipped",
+             s1_pass, s1_fail, s1_skip);
+    // Report through the marker hardware/scripts/return_status.sh parses, so
+    // this gate's exit status works like every other simulation's. Without it
+    // a PASSING replay still returned non-zero ("Simulation did not finish"),
+    // which would have made it useless in CI.
+    if (tp_fail != 0 || mp_fail != 0 || s1_fail != 0) begin
+      $display("[EOC] Simulation ended at %t (retval = %0d).", $time,
+               tp_fail + mp_fail + s1_fail);
+      $fatal(1, "VC REPLAY FAILED: %0d mismatches",
+             tp_fail + mp_fail + s1_fail);
+    end
+    if (tp_pass == 0 || mp_pass == 0 || s1_pass == 0) begin
+      $display("[EOC] Simulation ended at %t (retval = 1).", $time);
       $fatal(1, "VC REPLAY VACUOUS: a geometry contributed no passing vectors");
+    end
     $display("VC REPLAY PASSED");
+    $display("[EOC] Simulation ended at %t (retval = 0).", $time);
     $finish(0);
   end
 

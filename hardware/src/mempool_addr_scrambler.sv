@@ -55,6 +55,12 @@ module mempool_addr_scrambler
   parameter int unsigned          NumX                     = 1,
   parameter int unsigned          NumY                     = 1,
   parameter bit                   EnableVirtualCluster            = 1'b0,
+  // ONLY the standalone replay testbench may set this. The S9 branch-ordering
+  // regression has to instantiate the VC branch together with the tile-id
+  // remap -- that is the one configuration in which a VC branch appended last
+  // would be swallowed. In a SYSTEM the pair is unsafe (see the fatal below):
+  // a bare permuter has no global twin for the VC address to disagree with.
+  parameter bit                   VcTileRemapTbOnly               = 1'b0,
   // End of the whole VC region as computed by config/config.mk. The module
   // derives the window map independently below; a mismatch means the Make
   // arithmetic and the RTL arithmetic have drifted, which would put software's
@@ -136,32 +142,27 @@ module mempool_addr_scrambler
       input logic [AddrWidth-1:0] offset,
       input logic [GroupIdWidth-1:0] group_id
   );
-    automatic logic [AddrWidth-1:0] side  = 1 << k;
-    automatic logic [AddrWidth-1:0] smask = side - 1;
-    automatic int unsigned o_vcgy = VcGyPos;          // == VcGyPos by design
-    automatic int unsigned o_vcgx = VcGyPos + k;
-    automatic int unsigned o_row  = VcGyPos + 2*k;
-    automatic logic [AddrWidth-1:0] gx_i, gy_i, vc_gx, vc_gy, row;
-    automatic logic [AddrWidth-1:0] out_gx, out_gy;
-    // group_id is {gx, gy} with gy in the low half.
-    gy_i   = group_id & ((1 << VcGyBits) - 1);
-    gx_i   = (group_id >> VcGyBits) & ((1 << VcGxBits) - 1);
-    vc_gy  = (offset >> o_vcgy) & smask;
-    vc_gx  = (offset >> o_vcgx) & smask;
-    row    = (offset >> o_row)  & ((1 << VcWordBits) - 1);
-    // INVARIANT #4: the base mask is PER AXIS. Masking the flat group id
-    // instead selects a strip, not a square (Track A finding S4) — and one
-    // of the two wrong readings collides WITHOUT escaping the bounding box,
-    // so only the bijection replay catches it.
-    out_gx = (gx_i & ~smask) | vc_gx;
-    out_gy = (gy_i & ~smask) | vc_gy;
+    // Morton (Z-order) group ids: the rectangle is a CONTIGUOUS id range, so
+    // the per-axis base mask of INVARIANT #4 collapses into one flat mask and
+    // the two k-bit vc_gy/vc_gx fields of the offset merge into one 2k-bit
+    // group field. The strip-instead-of-square failure mode that invariant
+    // guarded against is not expressible here: there is no per-axis step to
+    // get wrong. mempool_pkg::MortonGroupId is the encoding, gid_of_xy and
+    // group_xy_of are the two directions.
+    automatic logic [AddrWidth-1:0] ngroups = 1 << (2*k);
+    automatic logic [AddrWidth-1:0] gmask   = ngroups - 1;
+    automatic int unsigned o_vcg = VcGyPos;   // the group field's base
+    automatic int unsigned o_row = VcGyPos + 2*k;
+    automatic logic [AddrWidth-1:0] vc_g, row, out_gid;
+    vc_g    = (offset >> o_vcg) & gmask;
+    row     = (offset >> o_row) & ((1 << VcWordBits) - 1);
+    out_gid = (group_id & ~gmask) | vc_g;
     // byte|bank|tile occupy the same bits in the offset and in the physical
     // address, so they pass straight through.
     vc_permute = TCDMBaseAddr
                | (offset & ((1 << VcGyPos) - 1))
-               | (out_gy << VcGyPos)
-               | (out_gx << VcGxPos)
-               | (row    << VcWordPos);
+               | (out_gid << VcGyPos)
+               | (row     << VcWordPos);
   endfunction
 
   // ---- Region decode ----------------------------------------------------
@@ -217,6 +218,9 @@ module mempool_addr_scrambler
       logic [TileIdBitsPerDma-1:0] data_in,
       logic [TileIdBitsPerDma-1:0] idx_i
   );
+    if (NumX != NumY)
+      $fatal(1, "virtual_cluster needs a square mesh (NumX=%0d, NumY=%0d): the top level is only the identity, and the Morton group id is only defined, when the axes match.",
+             NumX, NumY);
     if (EnableTileIdRemap) begin
       spm_tile_id_remap = data_in + idx_i;
     end else begin
@@ -288,7 +292,7 @@ module mempool_addr_scrambler
     // Falling through into the remap is NOT the fix: that stage reads
     // address_i, the pre-permute window address, so it would remap the wrong
     // value. Forbid the pair instead.
-    if (EnableTileIdRemap)
+    if (EnableTileIdRemap && !VcTileRemapTbOnly)
       $fatal(1, "virtual_cluster and tile_id_remap cannot both be enabled: the VC branch bypasses the tile-id remap that the same words receive through their global alias.");
     if (NumTilesPerGroup * NumX * NumY != NumTiles)
       $fatal(1, "NumTilesPerGroup*NumX*NumY (%0d) != NumTiles (%0d); the VC geometry disagrees with the cluster.",
