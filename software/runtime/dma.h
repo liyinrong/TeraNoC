@@ -48,7 +48,8 @@ static inline void dma_wait() {
     ;
 }
 
-static inline void dma_memcpy_nonblocking(void *dest, const void *src, size_t len) {
+static inline void dma_memcpy_nonblocking(void *dest, const void *src,
+                                          size_t len) {
   volatile uint32_t *_dma_src_reg =
       (volatile uint32_t *)(DMA_BASE +
                             MEMPOOL_DMA_FRONTEND_SRC_ADDR_REG_OFFSET);
@@ -72,7 +73,8 @@ static inline void dma_memcpy_nonblocking(void *dest, const void *src, size_t le
   __sync_synchronize();
 }
 
-static inline void dma_memcpy_blocking(void *dest, const void *src, size_t len) {
+static inline void dma_memcpy_blocking(void *dest, const void *src,
+                                       size_t len) {
   dma_memcpy_nonblocking(dest, src, len);
   dma_wait();
 }
