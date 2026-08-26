@@ -33,6 +33,8 @@ rc=0
 for n in 4 8 16; do
   case $n in 4) lvl=4;; 8) lvl=6;; 16) lvl=8;; esac   # 2*log2(n)
   cc -O1 -Wall -Wextra -I"$OUT" -I"$(dirname "$0")" \
+     -I"$ROOT/software/runtime" \
+     -DNUM_TILES_PER_GROUP=4 -DNUM_X=4 \
      -D__FSYNC_N_CU_X__="$n" -D__FSYNC_N_CU_Y__="$n" -D__FSYNC_N_LVL__="$lvl" \
      -o "$OUT/oracle_$n" "$(dirname "$0")/fsync_reqs_oracle.c" \
      "$OUT/fractal_sync_req_gen.c"

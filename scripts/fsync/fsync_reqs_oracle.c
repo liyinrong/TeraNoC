@@ -20,16 +20,12 @@
 
 #include "fractal_sync_req_gen.h"
 
-#define N __FSYNC_N_CU_X__
+// The RUNTIME's own implementation, not a copy of it. Checking a duplicated
+// formula would only prove the duplicate is self-consistent; this makes the
+// reference generator the oracle for the code that actually ships.
+#include "fsync.h"
 
-// A complete SxS subtree activates every level it climbs, and a 2-D fractal
-// tree alternates h/v, so it climbs 2*log2(S) of them.
-static unsigned closed_form_aggr(unsigned side) {
-  unsigned levels = 0;
-  for (unsigned s = side; s > 1; s >>= 1)
-    levels += 2;
-  return (1u << levels) - 1u;
-}
+#define N __FSYNC_N_CU_X__
 
 int main(void) {
   unsigned checked = 0, bad = 0;
@@ -56,7 +52,7 @@ int main(void) {
           continue;
         }
 
-        const unsigned want = closed_form_aggr(side);
+        const unsigned want = (unsigned)fsync_aggr_of_side(side);
         // Every member must agree, or a single per-scope value cannot exist.
         for (unsigned k = 0; k < n; k++) {
           const unsigned a = cus[k].fsync_req.fs_req_aggr;

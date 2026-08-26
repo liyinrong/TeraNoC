@@ -22,6 +22,20 @@
 // the tree (RF/CAM overflow) is latched and released rather than dropped -- a
 // silently swallowed error would wedge every core in the scope, which is the
 // hardest failure to diagnose from a frozen trace.
+//
+// The register map is deliberately MAGIA-compatible (its obi_slave_fsync and
+// sw/utils/fsync_mm_utils.h), because that costs nothing and keeps their
+// software directly readable against ours:
+//
+//   +0x00 AGGR    W   aggregate bitmask for the next barrier
+//   +0x04 ID      W   scope id, bit 0 selects h (even) or v (odd)
+//   +0x08 CONTROL W   bit0 = trigger, bit1 = clear sticky error
+//   +0x0C STATUS  R   {rsp_id, lvl, error, BUSY(bit2), done}
+//
+// BUSY deliberately sits at bit 2, matching MAGIA's FSYNC_MM_STATUS_BUSY_MASK.
+// The bus port is intentionally generic (req/we/addr/wdata/rdata) rather than
+// OBI: our tile speaks the snitch reqrsp dialect, so the adapter belongs in
+// the tile, not in the barrier engine.
 
 module fsync_shim #(
   parameter int unsigned AggrWidth   = 1,
@@ -32,7 +46,14 @@ module fsync_shim #(
 ) (
   input  logic                 clk_i,
   input  logic                 rst_ni,
-  // Software trigger: one write per barrier, from the tile leader.
+  // Register port. Bus-agnostic on purpose; the tile adapts its own dialect.
+  input  logic                 reg_req_i,
+  input  logic                 reg_we_i,
+  input  logic [3:0]           reg_addr_i,   // byte offset inside the region
+  input  logic [31:0]          reg_wdata_i,
+  output logic [31:0]          reg_rdata_o,
+  // Direct trigger, kept for the unit test and for a future in-tile requester
+  // that has no bus in front of it.
   input  logic                 trig_valid_i,
   input  logic [AggrWidth-1:0] trig_aggr_i,
   input  logic [IdWidth-1:0]   trig_id_i,
@@ -63,8 +84,53 @@ module fsync_shim #(
   assign wake = h_rsp_i.wake  | v_rsp_i.wake;
   assign err  = h_rsp_i.error | v_rsp_i.error;
 
+  // Register file, MAGIA-compatible offsets.
+  localparam logic [3:0] REG_AGGR    = 4'h0;
+  localparam logic [3:0] REG_ID      = 4'h4;
+  localparam logic [3:0] REG_CONTROL = 4'h8;
+  localparam logic [3:0] REG_STATUS  = 4'hC;
+
+  logic [AggrWidth-1:0] reg_aggr_q;
+  logic [IdWidth-1:0]   reg_id_q;
+  logic                 reg_wr;
+  logic                 reg_trigger, reg_clear;
+
+  assign reg_wr      = reg_req_i & reg_we_i;
+  assign reg_trigger = reg_wr & (reg_addr_i == REG_CONTROL) & reg_wdata_i[0];
+  assign reg_clear   = reg_wr & (reg_addr_i == REG_CONTROL) & reg_wdata_i[1];
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      reg_aggr_q <= '0;
+      reg_id_q   <= '0;
+    end else if (reg_wr) begin
+      if (reg_addr_i == REG_AGGR) reg_aggr_q <= reg_wdata_i[AggrWidth-1:0];
+      if (reg_addr_i == REG_ID)   reg_id_q   <= reg_wdata_i[IdWidth-1:0];
+    end
+  end
+
+  // STATUS: BUSY at bit 2 to match MAGIA's mask, so their polling loop works.
+  always_comb begin
+    reg_rdata_o = '0;
+    if (reg_req_i && !reg_we_i && reg_addr_i == REG_STATUS) begin
+      reg_rdata_o[0]  = ~busy_q;    // done: idle means the last barrier resolved
+      reg_rdata_o[1]  = error_q;
+      reg_rdata_o[2]  = busy_q;     // FSYNC_MM_STATUS_BUSY_MASK
+      reg_rdata_o[7:4]                 = lvl_q;
+      reg_rdata_o[8+IdWidth-1 -: IdWidth] = rsp_id_q;
+    end
+  end
+
   logic accept;
-  assign accept       = trig_valid_i & ~busy_q;
+  // Either source may arm a barrier; the register path is what software uses.
+  logic                 src_valid;
+  logic [AggrWidth-1:0] src_aggr;
+  logic [IdWidth-1:0]   src_id;
+  assign src_valid = reg_trigger | trig_valid_i;
+  assign src_aggr  = reg_trigger ? reg_aggr_q : trig_aggr_i;
+  assign src_id    = reg_trigger ? reg_id_q   : trig_id_i;
+
+  assign accept       = src_valid & ~busy_q;
   assign trig_ready_o = ~busy_q;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -79,8 +145,8 @@ module fsync_shim #(
       sync_q <= accept;
       if (accept) begin
         busy_q <= 1'b1;
-        aggr_q <= trig_aggr_i;
-        id_q   <= trig_id_i;
+        aggr_q <= src_aggr;
+        id_q   <= src_id;
       end else if (wake || err) begin
         // Release on an error too. Holding busy would deadlock the tile with
         // no way back, and the trap is what tells software the barrier failed.
@@ -96,7 +162,8 @@ module fsync_shim #(
       lvl_q    <= '0;
       rsp_id_q <= '0;
     end else begin
-      if (err) error_q <= 1'b1;
+      if (err)            error_q <= 1'b1;
+      else if (reg_clear) error_q <= 1'b0;
       if (wake || err) begin
         lvl_q    <= h_rsp_i.wake ? h_rsp_i.sig.lvl : v_rsp_i.sig.lvl;
         rsp_id_q <= h_rsp_i.wake ? h_rsp_i.sig.id  : v_rsp_i.sig.id;

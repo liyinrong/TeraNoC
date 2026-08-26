@@ -37,6 +37,11 @@ module tb_fsync_shim;
     return (({{(IN_AGGR_WIDTH){1'b0}}, 1'b1}) << lv) - 1;
   endfunction
 
+  logic        reg_req   [NCU];
+  logic        reg_we    [NCU];
+  logic [3:0]  reg_addr  [NCU];
+  logic [31:0] reg_wdata [NCU];
+  logic [31:0] reg_rdata [NCU];
   logic                      trig_valid [NCU];
   logic [IN_AGGR_WIDTH-1:0]  trig_aggr  [NCU];
   logic [ID_WIDTH-1:0]       trig_id    [NCU];
@@ -73,6 +78,11 @@ module tb_fsync_shim;
     ) i_shim (
       .clk_i        (clk           ),
       .rst_ni       (rst_n         ),
+      .reg_req_i    (reg_req[c]    ),
+      .reg_we_i     (reg_we[c]     ),
+      .reg_addr_i   (reg_addr[c]   ),
+      .reg_wdata_i  (reg_wdata[c]  ),
+      .reg_rdata_o  (reg_rdata[c]  ),
       .trig_valid_i (trig_valid[c] ),
       .trig_aggr_i  (trig_aggr[c]  ),
       .trig_id_i    (trig_id[c]    ),
@@ -149,6 +159,23 @@ module tb_fsync_shim;
     trig_valid[c] = 1'b0;
   endtask
 
+  // Exactly the software sequence: write AGGR, write ID, write CONTROL=1.
+  task automatic reg_write(input int unsigned c, input logic [3:0] a,
+                           input logic [31:0] d);
+    @(negedge clk);
+    reg_req[c] = 1'b1; reg_we[c] = 1'b1; reg_addr[c] = a; reg_wdata[c] = d;
+    @(negedge clk);
+    reg_req[c] = 1'b0; reg_we[c] = 1'b0;
+  endtask
+
+  task automatic trigger_mm(input int unsigned x, input int unsigned y,
+                            input logic [31:0] aggr, input logic [31:0] id);
+    int unsigned c = leaf_idx(x, y);
+    reg_write(c, 4'h0, aggr);
+    reg_write(c, 4'h4, id);
+    reg_write(c, 4'h8, 32'h1);
+  endtask
+
   task automatic expect_woke(input logic [NCU-1:0] mask, input string what);
     if (woke !== mask) begin
       errors++;
@@ -173,6 +200,8 @@ module tb_fsync_shim;
     clr_woke = 1'b0;
     for (int unsigned c = 0; c < NCU; c++) begin
       trig_valid[c] = 1'b0; trig_aggr[c] = '0; trig_id[c] = '0;
+      reg_req[c] = 1'b0; reg_we[c] = 1'b0; reg_addr[c] = '0;
+      reg_wdata[c] = '0;
     end
     for (int unsigned p = 0; p < N_NBR_H_PORTS; p++) h_nbr_req[p] = '0;
     for (int unsigned p = 0; p < N_NBR_V_PORTS; p++) v_nbr_req[p] = '0;
@@ -230,6 +259,36 @@ module tb_fsync_shim;
     if (!trig_ready[leaf_idx(0, 0)]) begin
       errors++; $display("[tb_fsync_shim] FAIL: 3: not ready again after wake");
     end
+
+    // ------------------------------------------------------------- 4
+    // The REGISTER path, i.e. what software actually does: AGGR, ID, then
+    // CONTROL=1. Also checks STATUS.BUSY (bit 2, MAGIA-compatible) so the
+    // polling loop a driver would write is known to work.
+    reset_dut(); clear_woke();
+    trigger_mm(0, 0, aggr_of(2), 0);
+    @(negedge clk);
+    reg_req[leaf_idx(0,0)] = 1'b1; reg_we[leaf_idx(0,0)] = 1'b0;
+    reg_addr[leaf_idx(0,0)] = 4'hC;
+    @(negedge clk);
+    if (!(reg_rdata[leaf_idx(0,0)] & 32'h4)) begin
+      errors++;
+      $display("[tb_fsync_shim] FAIL: 4: STATUS.BUSY clear while barrier in flight");
+    end
+    reg_req[leaf_idx(0,0)] = 1'b0;
+    trigger_mm(1, 0, aggr_of(2), 0);
+    trigger_mm(0, 1, aggr_of(2), 0);
+    trigger_mm(1, 1, aggr_of(2), 0);
+    repeat (20) @(posedge clk);
+    expect_woke(rect_mask(0, 0, 2), "4: completion driven purely by register writes");
+    @(negedge clk);
+    reg_req[leaf_idx(0,0)] = 1'b1; reg_we[leaf_idx(0,0)] = 1'b0;
+    reg_addr[leaf_idx(0,0)] = 4'hC;
+    @(negedge clk);
+    if (reg_rdata[leaf_idx(0,0)] & 32'h4) begin
+      errors++;
+      $display("[tb_fsync_shim] FAIL: 4: STATUS.BUSY still set after wake");
+    end
+    reg_req[leaf_idx(0,0)] = 1'b0;
 
     $display("[tb_fsync_shim] %0d errors", errors);
     if (errors == 0) $display("[EOC] Simulation ended at %t (retval = 0).", $time);
