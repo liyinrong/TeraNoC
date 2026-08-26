@@ -57,8 +57,11 @@
 #define WARMUP 4
 #define ITERS 32
 
-// `.l1` is NOBITS with an empty bss range, so nothing zeroes it.
-static uint32_t tile_cnt[NUM_TILES] __attribute__((section(".l1")));
+// `.l1` is NOBITS with an empty bss range, so nothing zeroes it. Each padded
+// entry advances to the same bank in the next tile; full-bank-striping
+// alignment makes entry zero local to tile zero.
+static fsync_tile_counter_t tile_cnt[NUM_TILES]
+    __attribute__((aligned(FSYNC_TILE_COUNTER_ALIGNMENT), section(".l1")));
 static uint32_t sw_bar __attribute__((section(".l1")));
 static uint32_t mech_done __attribute__((section(".l1")));
 static uint32_t c_log __attribute__((section(".l1")));
@@ -76,7 +79,7 @@ int main() {
 
   mempool_barrier_init(core_id);
   for (uint32_t t = core_id; t < NUM_TILES; t += num_cores) {
-    tile_cnt[t] = 0;
+    tile_cnt[t].count = 0;
   }
   if (core_id == 0) {
     sw_bar = 0;

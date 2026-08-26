@@ -205,26 +205,37 @@ static inline void fsync_clear_error(void) {
 //
 // The core that arrives LAST triggers the tree and then waits with the rest;
 // the tree's wake releases the whole tile at once. Nobody polls and nobody
-// spins. `tile_cnt` is one counter per tile in L1 and MUST be zeroed before
-// first use (`.l1` is NOBITS and powers up X).
+// spins. Each tile counter occupies one full tile-bank stripe: address bits
+// immediately above the bank select encode the tile, so adjacent words would
+// all live in the first tile instead of beside their users. The array base must
+// also be aligned to a complete all-tile bank stripe so entry zero maps to tile
+// zero. Counters MUST be zeroed before first use (`.l1` is NOBITS and powers up
+// X).
 //
 // These do not return a status: nobody polls, so an error is observed with
 // fsync_status() afterwards rather than per barrier.
 // ---------------------------------------------------------------------------
 
-static inline void fsync_barrier(volatile uint32_t *tile_cnt, uint32_t tile,
-                                 uint32_t id, uint32_t aggr) {
-  if (__atomic_fetch_add(&tile_cnt[tile], 1, __ATOMIC_RELAXED) ==
+typedef struct {
+  uint32_t count;
+  uint32_t padding[NUM_BANKS_PER_TILE - 1];
+} fsync_tile_counter_t;
+
+#define FSYNC_TILE_COUNTER_ALIGNMENT (NUM_BANKS * sizeof(uint32_t))
+
+static inline void fsync_barrier(volatile fsync_tile_counter_t *tile_cnt,
+                                 uint32_t tile, uint32_t id, uint32_t aggr) {
+  if (__atomic_fetch_add(&tile_cnt[tile].count, 1, __ATOMIC_RELAXED) ==
       (uint32_t)(NUM_CORES_PER_TILE - 1)) {
-    __atomic_store_n(&tile_cnt[tile], 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&tile_cnt[tile].count, 0, __ATOMIC_RELAXED);
     __sync_synchronize();
     fsync_trigger(id, aggr);
   }
   mempool_wfi();
 }
 
-static inline void fsync_barrier_vc(volatile uint32_t *tile_cnt, uint32_t tile,
-                                    uint32_t k) {
+static inline void fsync_barrier_vc(volatile fsync_tile_counter_t *tile_cnt,
+                                    uint32_t tile, uint32_t k) {
   fsync_barrier(tile_cnt, tile, FSYNC_ID_H, fsync_aggr_of_vc_level(k));
 }
 
@@ -232,21 +243,21 @@ static inline void fsync_barrier_vc(volatile uint32_t *tile_cnt, uint32_t tile,
 // pattern: every VC reduces internally, then the row combines. Note the id is
 // NOT always FSYNC_ID_H -- a taller-than-wide scope enters the vertical
 // network -- so it is taken from the helper.
-static inline void fsync_barrier_vc_row(volatile uint32_t *tile_cnt,
+static inline void fsync_barrier_vc_row(volatile fsync_tile_counter_t *tile_cnt,
                                         uint32_t tile, uint32_t k) {
   uint32_t id;
   const uint32_t aggr = fsync_aggr_of_vc_row(k, &id);
   fsync_barrier(tile_cnt, tile, id, aggr);
 }
 
-static inline void fsync_barrier_vc_col(volatile uint32_t *tile_cnt,
+static inline void fsync_barrier_vc_col(volatile fsync_tile_counter_t *tile_cnt,
                                         uint32_t tile, uint32_t k) {
   uint32_t id;
   const uint32_t aggr = fsync_aggr_of_vc_col(k, &id);
   fsync_barrier(tile_cnt, tile, id, aggr);
 }
 
-static inline void fsync_barrier_all(volatile uint32_t *tile_cnt,
+static inline void fsync_barrier_all(volatile fsync_tile_counter_t *tile_cnt,
                                      uint32_t tile) {
   fsync_barrier(tile_cnt, tile, FSYNC_ID_H, fsync_aggr_global());
 }
