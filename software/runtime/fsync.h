@@ -119,6 +119,31 @@ static inline uint32_t fsync_aggr_of_vc_level(uint32_t k) {
   return fsync_aggr_of_side((1u << k) * (uint32_t)FSYNC_TPG_SIDE);
 }
 
+// Distinct id for one of several CONCURRENT rectangular scopes.
+//
+// Required, not optional. A rectangle thinner than square has ZERO bits in its
+// aggregate: it PROPAGATES through the levels it skips rather than aggregating
+// there, so two such scopes meet at a shared node. With equal ids that node
+// pairs them and completes a barrier that does not exist -- demonstrated in
+// hardware/tb/tb_fractal_sync.sv test F, where row 0's left half and row 1's
+// right half woke together despite neither row being complete.
+//
+// SQUARE scopes do not need this: their aggregate is contiguous all-ones, so
+// they aggregate at every level up to their own root and never pass through a
+// node another scope could match at. Disjoint square VCs may all use id 0.
+//
+// `index` is the scope's position along the axis it is stacked on (which row
+// of VCs this is). Bit 0 must keep encoding the direction, so ids step by two.
+// The id field is finite, so this wraps like MAGIA's row_id_lookup_mm: only
+// scopes that can actually meet need to differ, and ones far enough apart
+// resolve below any shared node and may reuse.
+static inline uint32_t fsync_rect_id(uint32_t index, uint32_t vertical,
+                                     uint32_t n_concurrent) {
+  const uint32_t half = n_concurrent > 1 ? n_concurrent / 2 : 1;
+  const uint32_t i = (index < half) ? index : (index - half);
+  return (i << 1) | (vertical ? 1u : 0u);
+}
+
 // One VC-row: every virtual cluster sitting in the same row of VCs at level k.
 // Full mesh width by one VC height -- the second half of a
 // "reduce inside each VC, then combine across the row" pattern.

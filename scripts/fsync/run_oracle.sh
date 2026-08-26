@@ -30,8 +30,8 @@ sed -E 's/^#define (__FSYNC_N_CU_X__|__FSYNC_N_CU_Y__|__FSYNC_N_LVL__)( *)\(([0-
 cp "$DEP/fractal_sync_req_gen.c" "$OUT/fractal_sync_req_gen.c"
 
 rc=0
-for n in 4 8 16; do
-  case $n in 4) lvl=4;; 8) lvl=6;; 16) lvl=8;; esac   # 2*log2(n)
+for n in 4 8 16 32; do
+  case $n in 4) lvl=4;; 8) lvl=6;; 16) lvl=8;; 32) lvl=10;; esac   # 2*log2(n)
   cc -O1 -Wall -Wextra -I"$OUT" -I"$(dirname "$0")" \
      -I"$ROOT/software/runtime" \
      -DNUM_TILES_PER_GROUP=4 -DNUM_X=4 \

@@ -161,6 +161,18 @@ module tb_fractal_sync;
     v_req[c][0] = '0;
   endtask
 
+  task automatic arrive_id(input int unsigned x, input int unsigned y,
+                           input logic [IN_AGGR_WIDTH-1:0] aggr,
+                           input logic [ID_WIDTH-1:0] id);
+    int unsigned c = leaf_idx(x, y);
+    @(negedge clk);
+    h_req[c][0].sync     = 1'b1;
+    h_req[c][0].sig.aggr = aggr;
+    h_req[c][0].sig.id   = id;
+    @(negedge clk);
+    h_req[c][0] = '0;
+  endtask
+
   task automatic check(input logic cond, input string what);
     if (!cond) begin
       errors++;
@@ -283,6 +295,33 @@ module tb_fractal_sync;
       m[leaf_idx(0, 1)] = 1'b1;
       expect_woke(m, "E: v-pair completion");
     end
+
+    // ---------------------------------------------------------------- F
+    // CONCURRENT RECTANGULAR SCOPES need distinct ids.
+    //
+    // A scope whose aggr has ZERO bits (any rectangle thinner than square)
+    // PROPAGATES through the levels it skips instead of aggregating there, so
+    // two such scopes meet at a shared node above. With equal ids that node
+    // pairs them: driving row 0's LEFT half and row 1's RIGHT half -- neither
+    // row complete -- wakes exactly those four tiles, a barrier that does not
+    // exist. Measured, id=0 on both: woke=0000000011000011.
+    //
+    // Square scopes are immune: their aggr is contiguous all-ones, so they
+    // aggregate at every level up to their own root and never pass through a
+    // node another scope could match at. That is why test B passes with a
+    // shared id and this one does not.
+    //
+    // Asserted here in its CORRECT form -- distinct ids -- because that is the
+    // contract software must honour (software/runtime/fsync.h, fsync_rect_id).
+    reset_dut(); clear_woke();
+    arrive_id(0, 0, 5, 0); arrive_id(1, 0, 5, 0);   // row 0, left,  id 0
+    arrive_id(2, 1, 5, 2); arrive_id(3, 1, 5, 2);   // row 1, right, id 2
+    repeat (40) @(posedge clk);
+    expect_woke('0, "F: distinct-id rows cross-matched on half sets");
+    arrive_id(2, 0, 5, 0); arrive_id(3, 0, 5, 0);
+    arrive_id(0, 1, 5, 2); arrive_id(1, 1, 5, 2);
+    repeat (40) @(posedge clk);
+    expect_woke(16'h00ff, "F: both rows complete under distinct ids");
 
     $display("[tb_fractal_sync] %0d errors", errors);
     if (errors == 0) $display("[EOC] Simulation ended at %t (retval = 0).", $time);
