@@ -33,6 +33,8 @@
 
 #include <stdint.h>
 
+#include "addrmap.h"
+
 #define FSYNC_AGGR_REG_OFFSET (0x00)
 #define FSYNC_ID_REG_OFFSET (0x04)
 #define FSYNC_CONTROL_REG_OFFSET (0x08)

@@ -659,6 +659,14 @@ package mempool_pkg;
   `FSYNC_TYPEDEF_ALL(fsync, logic [FSyncAggrWidth-1:0],
                      logic [FSyncLvlWidth-1:0], logic [FSyncIdWidth-1:0])
 
+  // Root escape and neighbour-link payloads. Their widths are identical in
+  // every generated tree (OUT_AGGR 1, NBR_AGGR 1, NBR_LVL 1, NBR_ID 2), so
+  // they are constants rather than derived from the tile grid. fsync_req_t
+  // above IS the tree's leaf (in-req) type -- same aggr and id widths -- so no
+  // separate fsync_in_* is needed.
+  `FSYNC_TYPEDEF_REQ_ALL(fsync_out, logic [0:0], logic [FSyncIdWidth-1:0])
+  `FSYNC_TYPEDEF_ALL(fsync_nbr, logic [0:0], logic [0:0], logic [1:0])
+
   localparam integer unsigned NocTopology = `ifdef NOC_TOPOLOGY `NOC_TOPOLOGY `else 0 `endif;
   localparam integer unsigned NocRoutingAlgorithm = `ifdef NOC_ROUTING_ALGORITHM `NOC_ROUTING_ALGORITHM `else 0 `endif;
   localparam integer unsigned NocRouterRemapping = `ifdef NOC_ROUTER_REMAPPING `NOC_ROUTER_REMAPPING `else 0 `endif;

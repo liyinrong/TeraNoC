@@ -59,18 +59,125 @@ module mempool_cluster_floonoc_wrapper
   logic [NumCores-1:0]            wake_up_q;
   `FF(wake_up_q, wake_up_i, '0, clk_i, rst_ni);
 
-  // fractal_sync leaves, gathered per group for the cluster tree. Responses are
-  // driven to a DEFINED value until the tree is instantiated: the tile shim ORs
-  // the response wake into every core's wake_up, so an undriven input puts X on
-  // the wake of every core and the cluster never boots.
+  // fractal_sync leaves, gathered per group for the cluster tree.
   fsync_req_t [NumGroups-1:0][NumTilesPerGroup-1:0] fsync_h_req, fsync_v_req;
   fsync_rsp_t [NumGroups-1:0][NumTilesPerGroup-1:0] fsync_h_rsp, fsync_v_rsp;
-  for (genvar g = 0; unsigned'(g) < NumGroups; g++) begin : gen_fsync_tieoff
+
+  /*****************************
+   *  fractal_sync barrier     *
+   *****************************/
+  // Leaf = TILE. A group's tiles occupy a FSyncTpgSide-square block of the leaf
+  // grid, so a level-k VC (2^k groups per axis) is exactly a
+  // (2^k * FSyncTpgSide)-square block of leaves -- invariant #9. Verified for
+  // every flavour and every level before this was written, WITH the negative
+  // control that matters: under RASTER group ids a level-1 VC degenerates to a
+  // 2x8 strip instead of a 4x4 block, so Morton is load-bearing here and not
+  // merely a memory-map convenience.
+  //
+  // GROUP ids are Morton; LEAF ports are ROW-MAJOR (the tree computes
+  // offset = global_row*NET_COLS + global_col). Mixing the two is the WP3 trap
+  // one level down, so the bijection is asserted rather than trusted.
+  localparam int unsigned FSyncLeaves = FSyncTileSide * FSyncTileSide;
+
+  function automatic int unsigned fsync_leaf_of(input int unsigned gid,
+                                                input int unsigned t);
+    group_xy_id_t xy;
+    int unsigned  tx, ty;
+    xy = group_xy_of(group_id_t'(gid));
+    tx = unsigned'(xy.x) * FSyncTpgSide + (t % FSyncTpgSide);
+    ty = unsigned'(xy.y) * FSyncTpgSide + (t / FSyncTpgSide);
+    return ty * FSyncTileSide + tx;
+  endfunction
+
+  fsync_req_t     fsync_h_leaf     [FSyncLeaves][1];
+  fsync_rsp_t     fsync_h_leaf_rsp [FSyncLeaves][1];
+  fsync_req_t     fsync_v_leaf     [FSyncLeaves][1];
+  fsync_rsp_t     fsync_v_leaf_rsp [FSyncLeaves][1];
+  fsync_nbr_req_t fsync_h_nbr_req  [FSyncLeaves];
+  fsync_nbr_rsp_t fsync_h_nbr_rsp  [FSyncLeaves];
+  fsync_nbr_req_t fsync_v_nbr_req  [FSyncLeaves];
+  fsync_nbr_rsp_t fsync_v_nbr_rsp  [FSyncLeaves];
+  fsync_out_req_t fsync_h_root_req [1][1];
+  fsync_rsp_t     fsync_h_root_rsp [1][1];
+  fsync_out_req_t fsync_v_root_req [1][1];
+  fsync_rsp_t     fsync_v_root_rsp [1][1];
+
+  for (genvar g = 0; unsigned'(g) < NumGroups; g++) begin : gen_fsync_leaf_map
     for (genvar t = 0; unsigned'(t) < NumTilesPerGroup; t++) begin
-      assign fsync_h_rsp[g][t] = '0;
-      assign fsync_v_rsp[g][t] = '0;
+      localparam int unsigned L = fsync_leaf_of(g, t);
+      assign fsync_h_leaf[L][0] = fsync_h_req[g][t];
+      assign fsync_v_leaf[L][0] = fsync_v_req[g][t];
+      assign fsync_h_rsp[g][t]  = fsync_h_leaf_rsp[L][0];
+      assign fsync_v_rsp[g][t]  = fsync_v_leaf_rsp[L][0];
     end
   end
+
+  // Root and neighbour ports tied off: this tree is the whole barrier domain.
+  // The neighbour links carry id 2/3 (adjacent tiles under DIFFERENT sibling
+  // nodes), which software does not request yet. Tying them off is safe --
+  // an unmatched request never completes rather than mis-routing.
+  for (genvar l = 0; unsigned'(l) < FSyncLeaves; l++) begin : gen_fsync_nbr_tie
+    assign fsync_h_nbr_req[l] = '0;
+    assign fsync_v_nbr_req[l] = '0;
+  end
+  assign fsync_h_root_rsp[0][0] = '0;
+  assign fsync_v_root_rsp[0][0] = '0;
+
+  if (FSyncTileSide == 4) begin : gen_fsync_4x4
+    fractal_sync_4x4 i_fsync_tree (
+      .clk_i, .rst_ni,
+      .h_1d_fsync_req_i (fsync_h_leaf    ), .h_1d_fsync_rsp_o (fsync_h_leaf_rsp),
+      .v_1d_fsync_req_i (fsync_v_leaf    ), .v_1d_fsync_rsp_o (fsync_v_leaf_rsp),
+      .h_nbr_fsycn_req_i(fsync_h_nbr_req ), .h_nbr_fsycn_rsp_o(fsync_h_nbr_rsp ),
+      .v_nbr_fsycn_req_i(fsync_v_nbr_req ), .v_nbr_fsycn_rsp_o(fsync_v_nbr_rsp ),
+      .h_2d_fsync_req_o (fsync_h_root_req), .h_2d_fsync_rsp_i (fsync_h_root_rsp),
+      .v_2d_fsync_req_o (fsync_v_root_req), .v_2d_fsync_rsp_i (fsync_v_root_rsp)
+    );
+  end else if (FSyncTileSide == 8) begin : gen_fsync_8x8
+    fractal_sync_8x8 i_fsync_tree (
+      .clk_i, .rst_ni,
+      .h_1d_fsync_req_i (fsync_h_leaf    ), .h_1d_fsync_rsp_o (fsync_h_leaf_rsp),
+      .v_1d_fsync_req_i (fsync_v_leaf    ), .v_1d_fsync_rsp_o (fsync_v_leaf_rsp),
+      .h_nbr_fsycn_req_i(fsync_h_nbr_req ), .h_nbr_fsycn_rsp_o(fsync_h_nbr_rsp ),
+      .v_nbr_fsycn_req_i(fsync_v_nbr_req ), .v_nbr_fsycn_rsp_o(fsync_v_nbr_rsp ),
+      .h_2d_fsync_req_o (fsync_h_root_req), .h_2d_fsync_rsp_i (fsync_h_root_rsp),
+      .v_2d_fsync_req_o (fsync_v_root_req), .v_2d_fsync_rsp_i (fsync_v_root_rsp)
+    );
+  end else if (FSyncTileSide == 16) begin : gen_fsync_16x16
+    fractal_sync_16x16 i_fsync_tree (
+      .clk_i, .rst_ni,
+      .h_1d_fsync_req_i (fsync_h_leaf    ), .h_1d_fsync_rsp_o (fsync_h_leaf_rsp),
+      .v_1d_fsync_req_i (fsync_v_leaf    ), .v_1d_fsync_rsp_o (fsync_v_leaf_rsp),
+      .h_nbr_fsycn_req_i(fsync_h_nbr_req ), .h_nbr_fsycn_rsp_o(fsync_h_nbr_rsp ),
+      .v_nbr_fsycn_req_i(fsync_v_nbr_req ), .v_nbr_fsycn_rsp_o(fsync_v_nbr_rsp ),
+      .h_2d_fsync_req_o (fsync_h_root_req), .h_2d_fsync_rsp_i (fsync_h_root_rsp),
+      .v_2d_fsync_req_o (fsync_v_root_req), .v_2d_fsync_rsp_i (fsync_v_root_rsp)
+    );
+  end else begin : gen_fsync_no_tree
+    // The library ships only 2x2/4x4/8x8/16x16/32x32 and has NO generator, so
+    // an unsupported geometry must fail loudly at elaboration rather than
+    // leave every barrier silently unanswered.
+    $fatal(1, "fractal_sync: no hand-written tree for a %0dx%0d tile grid",
+           FSyncTileSide, FSyncTileSide);
+  end
+
+  // The leaf map must be a BIJECTION. A collision makes two tiles share a leaf
+  // (barriers silently merge); a gap leaves a leaf unconnected (its scope never
+  // completes). Both are far cheaper to catch here than from a frozen trace.
+  `ifndef SYNTHESIS
+  initial begin : check_fsync_leaf_bijection
+    automatic int unsigned seen[] = new[FSyncLeaves];
+    for (int unsigned l = 0; l < FSyncLeaves; l++) seen[l] = 0;
+    for (int unsigned g = 0; g < NumGroups; g++)
+      for (int unsigned t = 0; t < NumTilesPerGroup; t++)
+        seen[fsync_leaf_of(g, t)]++;
+    for (int unsigned l = 0; l < FSyncLeaves; l++)
+      if (seen[l] != 1)
+        $fatal(1, "fsync leaf %0d claimed %0d times (expected exactly 1)", l,
+               seen[l]);
+  end
+  `endif
+
 
   ro_cache_ctrl_t [NumGroups-1:0] ro_cache_ctrl_q;
   for (genvar g = 0; unsigned'(g) < NumGroups; g++) begin : gen_ro_cache_ctrl_q
