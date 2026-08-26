@@ -26,7 +26,14 @@ module mempool_tile
   // Dependent parameters. DO NOT CHANGE.
   parameter int unsigned NumCaches    = NumCoresPerTile / NumCoresPerCache,
   // If NumDivsqrtPerTile is set, otherwise the parameter defaults to 1.
-  parameter int unsigned NumCoresPerDivsqrt = |NumDivsqrtPerTile ? (NumCoresPerTile/NumDivsqrtPerTile) : NumCoresPerTile
+  parameter int unsigned NumCoresPerDivsqrt = |NumDivsqrtPerTile ? (NumCoresPerTile/NumDivsqrtPerTile) : NumCoresPerTile,
+  // fractal_sync leaf payload types, supplied by the cluster that owns the tree
+  // instance and therefore the aggregate/id widths.
+  parameter int unsigned FSyncAggrWidth = mempool_pkg::FSyncAggrWidth,
+  parameter int unsigned FSyncIdWidth   = mempool_pkg::FSyncIdWidth,
+  parameter int unsigned FSyncLvlWidth  = mempool_pkg::FSyncLvlWidth,
+  parameter type         fsync_req_t    = mempool_pkg::fsync_req_t,
+  parameter type         fsync_rsp_t    = mempool_pkg::fsync_rsp_t
 ) (
   // Clock and reset
   input  logic                                                                    clk_i,
@@ -78,7 +85,12 @@ module mempool_tile
   output `STRUCT_PORT(axi_tile_req_t)                                             axi_mst_req_o,
   input  `STRUCT_PORT(axi_tile_resp_t)                                            axi_mst_resp_i,
   // Wake up interface
-  input  logic                            [NumCoresPerTile-1:0]                   wake_up_i
+  input  logic                            [NumCoresPerTile-1:0]                   wake_up_i,
+  // fractal_sync leaf: one pair per TILE, h and v, selected by id[0]
+  output fsync_req_t                                                              fsync_h_req_o,
+  input  fsync_rsp_t                                                              fsync_h_rsp_i,
+  output fsync_req_t                                                              fsync_v_req_o,
+  input  fsync_rsp_t                                                              fsync_v_rsp_i
 );
 
   /****************
@@ -1290,6 +1302,17 @@ module mempool_tile
   logic   [NumSoCPorts-1:0] soc_data_pvalid;
   logic   [NumSoCPorts-1:0] soc_data_pready;
   // Post-demux SoC channels (gen_redmule may divert core 0's to redmule_rmcfg).
+  // Post-fsync remainder: everything that is NOT a tile-local barrier access.
+  // The fsync window is split off BEFORE the RedMulE/passthrough logic so that
+  // EVERY core reaches it, not just core 0 -- which core is the tile leader is
+  // a software choice and must not be wired in.
+  dreq_t  [NumSoCPorts-1:0] soc_nofs_q;
+  logic   [NumSoCPorts-1:0] soc_nofs_qvalid;
+  logic   [NumSoCPorts-1:0] soc_nofs_qready;
+  dresp_t [NumSoCPorts-1:0] soc_nofs_p;
+  logic   [NumSoCPorts-1:0] soc_nofs_pvalid;
+  logic   [NumSoCPorts-1:0] soc_nofs_pready;
+
   dreq_t  [NumSoCPorts-1:0] soc_mux_q;
   logic   [NumSoCPorts-1:0] soc_mux_qvalid;
   logic   [NumSoCPorts-1:0] soc_mux_qready;
@@ -1918,6 +1941,142 @@ module mempool_tile
   );
 
   /*****************************
+   *  fractal_sync tile shim   *
+   *****************************/
+  // Carve the tile-local barrier window off EVERY SoC port. MAGIA reaches its
+  // per-tile peripherals from every manager via an OBI crossbar rule table;
+  // this is the same idea in the dialect we have -- a per-port address demux
+  // feeding one arbiter. It deliberately does NOT extend the RedMulE demux,
+  // which only ever saw core 0: which core is the tile leader is a software
+  // choice and must not be wired in.
+  dreq_t  [NumSoCPorts-1:0] fs_q;
+  logic   [NumSoCPorts-1:0] fs_qvalid, fs_qready;
+  dresp_t [NumSoCPorts-1:0] fs_p;
+  logic   [NumSoCPorts-1:0] fs_pvalid, fs_pready;
+
+  for (genvar c = 0; c < NumSoCPorts; c++) begin: gen_fsync_demux
+    address_map_t [1:0] fs_map;
+    assign fs_map = '{
+      '{slave_idx: 32'd1, mask: '0,                  value: '0                     },
+      '{slave_idx: 32'd0, mask: addr_t'(FSyncMask),  value: addr_t'(FSyncBaseAddr) }
+    };
+
+    snitch_addr_demux #(
+      .NrOutput     (2                   ),
+      .AddressWidth (AddrWidth           ),
+      .NumRules     (2                   ),
+      .req_t        (snitch_pkg::dreq_t  ),
+      .resp_t       (snitch_pkg::dresp_t )
+    ) i_fsync_demux (
+      .clk_i,
+      .rst_ni,
+      .req_addr_i     (soc_data_q[c].addr                  ),
+      .req_payload_i  (soc_data_q[c]                       ),
+      .req_valid_i    (soc_data_qvalid[c]                  ),
+      .req_ready_o    (soc_data_qready[c]                  ),
+      .resp_payload_o (soc_data_p[c]                       ),
+      .resp_valid_o   (soc_data_pvalid[c]                  ),
+      .resp_ready_i   (soc_data_pready[c]                  ),
+      .req_payload_o  ({soc_nofs_q[c],      fs_q[c]      } ),
+      .req_valid_o    ({soc_nofs_qvalid[c], fs_qvalid[c] } ),
+      .req_ready_i    ({soc_nofs_qready[c], fs_qready[c] } ),
+      .resp_payload_i ({soc_nofs_p[c],      fs_p[c]      } ),
+      .resp_valid_i   ({soc_nofs_pvalid[c], fs_pvalid[c] } ),
+      .resp_ready_o   ({soc_nofs_pready[c], fs_pready[c] } ),
+      .address_map_i  (fs_map                              )
+    );
+  end
+
+  dreq_t                             fs_arb_q;
+  logic                              fs_arb_valid;
+  logic [idx_width(NumSoCPorts)-1:0] fs_arb_idx;
+  logic [31:0]                       fs_rdata;
+  logic                              fs_wake;
+
+  rr_arb_tree #(
+    .NumIn     (NumSoCPorts        ),
+    .DataType  (snitch_pkg::dreq_t ),
+    .AxiVldRdy (1'b1               )
+  ) i_fsync_arb (
+    .clk_i,
+    .rst_ni,
+    .flush_i (1'b0         ),
+    .rr_i    ('0           ),
+    .req_i   (fs_qvalid    ),
+    .gnt_o   (fs_qready    ),
+    .data_i  (fs_q         ),
+    .req_o   (fs_arb_valid ),
+    // A register access retires in the cycle it is granted, so the shim never
+    // backpressures the bus. Its one-outstanding rule governs BARRIERS, not bus
+    // accesses: a trigger arriving while busy is ignored, and STATUS.BUSY is
+    // how software sees that.
+    .gnt_i   (1'b1         ),
+    .data_o  (fs_arb_q     ),
+    .idx_o   (fs_arb_idx   )
+  );
+
+  logic                              fs_resp_valid_q;
+  logic [idx_width(NumSoCPorts)-1:0] fs_resp_idx_q;
+  logic [31:0]                       fs_resp_data_q;
+  logic                              fs_resp_write_q;
+  meta_id_t                          fs_resp_id_q;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      fs_resp_valid_q <= 1'b0;
+      fs_resp_idx_q   <= '0;
+      fs_resp_data_q  <= '0;
+      fs_resp_write_q <= 1'b0;
+      fs_resp_id_q    <= '0;
+    end else begin
+      fs_resp_valid_q <= fs_arb_valid;
+      fs_resp_idx_q   <= fs_arb_idx;
+      fs_resp_data_q  <= fs_rdata;
+      fs_resp_write_q <= fs_arb_q.write;
+      fs_resp_id_q    <= fs_arb_q.id;
+    end
+  end
+
+  for (genvar c = 0; c < NumSoCPorts; c++) begin: gen_fsync_resp
+    assign fs_pvalid[c] = fs_resp_valid_q & (fs_resp_idx_q == c);
+    assign fs_p[c]      = '{data  : fs_resp_data_q,
+                            id    : fs_resp_id_q,
+                            write : fs_resp_write_q,
+                            error : 1'b0};
+  end
+
+  fsync_shim #(
+    .AggrWidth   (FSyncAggrWidth ),
+    .IdWidth     (FSyncIdWidth   ),
+    .LvlWidth    (FSyncLvlWidth  ),
+    .fsync_req_t (fsync_req_t    ),
+    .fsync_rsp_t (fsync_rsp_t    )
+  ) i_fsync_shim (
+    .clk_i,
+    .rst_ni,
+    .reg_req_i    (fs_arb_valid        ),
+    .reg_we_i     (fs_arb_q.write      ),
+    .reg_addr_i   (fs_arb_q.addr[3:0]  ),
+    .reg_wdata_i  (fs_arb_q.data[31:0] ),
+    .reg_rdata_o  (fs_rdata            ),
+    // Unused: the bus is the only requester today. Kept so an in-tile
+    // requester with no bus in front of it can arm a barrier later.
+    .trig_valid_i (1'b0                ),
+    .trig_aggr_i  ('0                  ),
+    .trig_id_i    ('0                  ),
+    .trig_ready_o (                    ),
+    .h_req_o      (fsync_h_req_o       ),
+    .h_rsp_i      (fsync_h_rsp_i       ),
+    .v_req_o      (fsync_v_req_o       ),
+    .v_rsp_i      (fsync_v_rsp_i       ),
+    .wake_o       (fs_wake             ),
+    .error_o      (                    ),
+    .busy_o       (                    ),
+    .lvl_o        (                    ),
+    .rsp_id_o     (                    )
+  );
+
+  /*****************************
    *   RedMulE Tensor Core     *
    *****************************/
   // RedMulE on local slots [NumCoresPerTile..NumLocalPorts-1]; core 0 owns the
@@ -1982,7 +2141,8 @@ module mempool_tile
       .target             (redmule_rmcfg             )
     );
 
-    assign wake_up = wake_up_q | {{(NumCoresPerTile-1){1'b0}}, redmule_evt};
+    assign wake_up = wake_up_q | {{(NumCoresPerTile-1){1'b0}}, redmule_evt} |
+                     {NumCoresPerTile{fs_wake}};
 
     // ----------------------------------------------------------------------
     // WP2 wide source path: issue each RedMulE HCI beat as one raw wide access.
@@ -2424,13 +2584,13 @@ module mempool_tile
     ) i_snitch_addr_demux (
       .clk_i,
       .rst_ni,
-      .req_addr_i     (soc_data_q[0].addr                              ),
-      .req_payload_i  (soc_data_q[0]                                   ),
-      .req_valid_i    (soc_data_qvalid[0]                              ),
-      .req_ready_o    (soc_data_qready[0]                              ),
-      .resp_payload_o (soc_data_p[0]                                   ),
-      .resp_valid_o   (soc_data_pvalid[0]                              ),
-      .resp_ready_i   (soc_data_pready[0]                              ),
+      .req_addr_i     (soc_nofs_q[0].addr                              ),
+      .req_payload_i  (soc_nofs_q[0]                                   ),
+      .req_valid_i    (soc_nofs_qvalid[0]                              ),
+      .req_ready_o    (soc_nofs_qready[0]                              ),
+      .resp_payload_o (soc_nofs_p[0]                                   ),
+      .resp_valid_o   (soc_nofs_pvalid[0]                              ),
+      .resp_ready_i   (soc_nofs_pready[0]                              ),
       // {port1, port0} = {soc_mux, rmcfg}
       .req_payload_o  ({soc_mux_q[0],      snitch_rmcfg_q            } ),
       .req_valid_o    ({soc_mux_qvalid[0], snitch_rmcfg_qvalid       } ),
@@ -2446,12 +2606,12 @@ module mempool_tile
     // config region. For Spatz this also covers the per-core vector ports, whose
     // SoC channels stay idle (the vector LSU only targets TCDM) but must be driven.
     for (genvar c = 1; c < NumSoCPorts; c++) begin: gen_redmule_soc_bypass
-      assign soc_mux_q[c]       = soc_data_q[c];
-      assign soc_mux_qvalid[c]  = soc_data_qvalid[c];
-      assign soc_data_qready[c] = soc_mux_qready[c];
-      assign soc_data_p[c]      = soc_mux_p[c];
-      assign soc_data_pvalid[c] = soc_mux_pvalid[c];
-      assign soc_mux_pready[c]  = soc_data_pready[c];
+      assign soc_mux_q[c]       = soc_nofs_q[c];
+      assign soc_mux_qvalid[c]  = soc_nofs_qvalid[c];
+      assign soc_nofs_qready[c] = soc_mux_qready[c];
+      assign soc_nofs_p[c]      = soc_mux_p[c];
+      assign soc_nofs_pvalid[c] = soc_mux_pvalid[c];
+      assign soc_mux_pready[c]  = soc_nofs_pready[c];
     end : gen_redmule_soc_bypass
 
     snitch_hwpe_cfg_adapter #(
@@ -2471,7 +2631,9 @@ module mempool_tile
 
   end else begin: gen_redmule_tieoff
 
-    assign wake_up = wake_up_q;
+    // The barrier wake releases EVERY core of the tile, which is what makes one
+    // arrival per tile sufficient.
+    assign wake_up = wake_up_q | {NumCoresPerTile{fs_wake}};
 
     // No RedMulE here: this tile never sources a wide access from the RedMulE SLOT.
     // It still accepts raw wide slave requests through the module-scope B2 path, and
@@ -2492,12 +2654,12 @@ module mempool_tile
     `endif
 
     for (genvar c = 0; c < NumSoCPorts; c++) begin: gen_redmule_soc_passthrough
-      assign soc_mux_q[c]       = soc_data_q[c];
-      assign soc_mux_qvalid[c]  = soc_data_qvalid[c];
-      assign soc_data_qready[c] = soc_mux_qready[c];
-      assign soc_data_p[c]      = soc_mux_p[c];
-      assign soc_data_pvalid[c] = soc_mux_pvalid[c];
-      assign soc_mux_pready[c]  = soc_data_pready[c];
+      assign soc_mux_q[c]       = soc_nofs_q[c];
+      assign soc_mux_qvalid[c]  = soc_nofs_qvalid[c];
+      assign soc_nofs_qready[c] = soc_mux_qready[c];
+      assign soc_nofs_p[c]      = soc_mux_p[c];
+      assign soc_nofs_pvalid[c] = soc_mux_pvalid[c];
+      assign soc_mux_pready[c]  = soc_nofs_pready[c];
     end : gen_redmule_soc_passthrough
 
   end : gen_redmule_tieoff

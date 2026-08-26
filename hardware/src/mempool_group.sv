@@ -229,7 +229,15 @@ module mempool_group
       .axi_mst_req_o           (axi_tile_req[t]                                ),
       .axi_mst_resp_i          (axi_tile_resp[t]                               ),
       // Wake up interface
-      .wake_up_i               (wake_up_q[t*NumCoresPerTile +: NumCoresPerTile])
+      .wake_up_i               (wake_up_q[t*NumCoresPerTile +: NumCoresPerTile]),
+      // fractal_sync leaf. Tied off here for now: the tree lives at cluster
+      // level, so threading these tile -> group -> cluster is the next step.
+      // Tying the RESPONSE to zero is safe -- no wake, no error -- and a
+      // barrier simply never completes, which is loud rather than silent.
+      .fsync_h_req_o           (                                              ),
+      .fsync_h_rsp_i           ('0                                            ),
+      .fsync_v_req_o           (                                              ),
+      .fsync_v_rsp_i           ('0                                            )
     );
 
     // Transpose the group requests

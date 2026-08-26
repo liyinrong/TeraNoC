@@ -12,6 +12,7 @@ package mempool_pkg;
 
   `include "axi/assign.svh"
   `include "axi/typedef.svh"
+  `include "fractal_sync/typedef.svh"
 
   localparam integer unsigned NumCores                = `ifdef NUM_CORES `NUM_CORES `else 0 `endif;
   localparam integer unsigned NumCoresPerTile         = `ifdef NUM_CORES_PER_TILE `NUM_CORES_PER_TILE `else 0 `endif;
@@ -367,6 +368,20 @@ package mempool_pkg;
       (`ifdef PERIPH_BASE `PERIPH_BASE `else 32'h7000_0000 `endif) + 32'h0002_0000;
   localparam integer unsigned RMMask     = ~((1 << idx_width(RMRegSize)) - 1);
 
+  // Per-tile fractal_sync shim (roadmap T3.1). A tile-local MMIO window like
+  // the RedMulE one, but reachable from EVERY core of the tile rather than
+  // core 0 alone: the tile leader issues the barrier, and which core that is
+  // is a software choice, not a wiring one. 256 B mirrors MAGIA's
+  // FSYNC_CTRL_SIZE; only four registers are used today.
+  localparam integer unsigned FSyncRegSize  = 256;
+  // DERIVED from RMBaseAddr, never hardcoded: RMBaseAddr follows PERIPH_BASE, so
+  // this window moves with the peripheral map (0x7003_0000 at the default).
+  // The 64 KiB step matches the granularity the other windows use
+  // (CtrlRegisters and DMA are 0x1_0000 apart).
+  localparam integer unsigned FSyncBaseAddr = RMBaseAddr + 32'h0001_0000;
+  localparam integer unsigned FSyncMask     =
+      ~((1 << idx_width(FSyncRegSize)) - 1);
+
   // Per-tile local TCDM master ports: the (Spatz-scaled) core data ports plus
   // the RedMulE narrow slots when present. Degrades to NumCoresPerTile for the
   // scalar case (NumDataPortsPerCore = 1, NumRMTiles = 0).
@@ -626,6 +641,24 @@ package mempool_pkg;
   localparam integer unsigned NumDirections = `ifdef NUM_DIRECTIONS `NUM_DIRECTIONS `else 5 `endif;
   localparam integer unsigned NumX = `ifdef NUM_X `NUM_X `else 2 `endif;
   localparam integer unsigned NumY = NumGroups/NumX;
+
+  // Leaf payload geometry, derived from the TILE grid because leaf = tile.
+  // Mirrors the tree's own arithmetic (fractal_sync_<N>x<N>.sv): a side-N grid
+  // has 2*log2(N) levels, of which N_ITL_LEVELS = 2*log2(N)-1 are internal;
+  // IN_AGGR_WIDTH = OUT(1) + N_ITL_LEVELS + 1 and ID_WIDTH = N_ITL_LEVELS.
+  // Checked against the 4x4 tree: levels 4, itl 3, aggr 5, id 3, lvl 2.
+  localparam integer unsigned FSyncTpgSide  = 1 << ($clog2(NumTilesPerGroup) / 2);
+  localparam integer unsigned FSyncTileSide = NumX * FSyncTpgSide;
+  localparam integer unsigned FSyncItlLevels = 2 * $clog2(FSyncTileSide) - 1;
+  localparam integer unsigned FSyncAggrWidth = FSyncItlLevels + 2;
+  localparam integer unsigned FSyncIdWidth   = FSyncItlLevels;
+  localparam integer unsigned FSyncLvlWidth  = $clog2(FSyncAggrWidth - 1);
+
+  // Built from the dependency's own macro rather than retyped, so the layout
+  // cannot drift from the tree we connect to.
+  `FSYNC_TYPEDEF_ALL(fsync, logic [FSyncAggrWidth-1:0],
+                     logic [FSyncLvlWidth-1:0], logic [FSyncIdWidth-1:0])
+
   localparam integer unsigned NocTopology = `ifdef NOC_TOPOLOGY `NOC_TOPOLOGY `else 0 `endif;
   localparam integer unsigned NocRoutingAlgorithm = `ifdef NOC_ROUTING_ALGORITHM `NOC_ROUTING_ALGORITHM `else 0 `endif;
   localparam integer unsigned NocRouterRemapping = `ifdef NOC_ROUTER_REMAPPING `NOC_ROUTER_REMAPPING `else 0 `endif;

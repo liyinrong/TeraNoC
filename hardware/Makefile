@@ -628,9 +628,15 @@ fsync-shim-gate:
 	$(MAKE) simc top_level=tb_fsync_shim config=$(config) \
 	  questa_simc_args="-c"
 
+# `quit -f` is not optional. Without it vsim drops to an interactive
+# `QuestaSim>` prompt when elaboration fails, so the run never terminates, the
+# runner keeps its flock, and every subsequent run is silently REFUSED -- while
+# the stale log keeps reporting errors from a tree that has already been fixed.
+# Cost on 2026-08-26: several turns spent debugging line numbers that no longer
+# existed.
 simc: clean-dasm compile_questa_opt
 	cd $(buildpath) && \
-	$(questa_cmd) vsim $(questa_simc_args) $(questa_args) $(library).$(top_level)_opt -do "run -a"
+	$(questa_cmd) vsim $(questa_simc_args) $(questa_args) $(library).$(top_level)_opt -do "run -a; quit -f"
 	./scripts/return_status.sh $(buildpath)/transcript
 
 # DPIs
