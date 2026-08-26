@@ -62,6 +62,12 @@ module mempool_group
 
   // Wake up interface
   input  logic                            [NumCoresPerGroup-1:0]                                 wake_up_i,
+  // fractal_sync leaves, one pair per tile. The tree itself lives at cluster
+  // level, so the group only carries these through.
+  output fsync_req_t                      [NumTilesPerGroup-1:0]                                 fsync_h_req_o,
+  input  fsync_rsp_t                      [NumTilesPerGroup-1:0]                                 fsync_h_rsp_i,
+  output fsync_req_t                      [NumTilesPerGroup-1:0]                                 fsync_v_req_o,
+  input  fsync_rsp_t                      [NumTilesPerGroup-1:0]                                 fsync_v_rsp_i,
   // RO-Cache configuration
   input  `STRUCT_PORT(ro_cache_ctrl_t)                                                           ro_cache_ctrl_i,
   // DMA request
@@ -230,14 +236,11 @@ module mempool_group
       .axi_mst_resp_i          (axi_tile_resp[t]                               ),
       // Wake up interface
       .wake_up_i               (wake_up_q[t*NumCoresPerTile +: NumCoresPerTile]),
-      // fractal_sync leaf. Tied off here for now: the tree lives at cluster
-      // level, so threading these tile -> group -> cluster is the next step.
-      // Tying the RESPONSE to zero is safe -- no wake, no error -- and a
-      // barrier simply never completes, which is loud rather than silent.
-      .fsync_h_req_o           (                                              ),
-      .fsync_h_rsp_i           ('0                                            ),
-      .fsync_v_req_o           (                                              ),
-      .fsync_v_rsp_i           ('0                                            )
+      // fractal_sync leaf, carried straight out to the cluster tree.
+      .fsync_h_req_o           (fsync_h_req_o[t]                              ),
+      .fsync_h_rsp_i           (fsync_h_rsp_i[t]                              ),
+      .fsync_v_req_o           (fsync_v_req_o[t]                              ),
+      .fsync_v_rsp_i           (fsync_v_rsp_i[t]                              )
     );
 
     // Transpose the group requests

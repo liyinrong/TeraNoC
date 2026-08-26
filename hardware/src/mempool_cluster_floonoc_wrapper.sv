@@ -59,6 +59,19 @@ module mempool_cluster_floonoc_wrapper
   logic [NumCores-1:0]            wake_up_q;
   `FF(wake_up_q, wake_up_i, '0, clk_i, rst_ni);
 
+  // fractal_sync leaves, gathered per group for the cluster tree. Responses are
+  // driven to a DEFINED value until the tree is instantiated: the tile shim ORs
+  // the response wake into every core's wake_up, so an undriven input puts X on
+  // the wake of every core and the cluster never boots.
+  fsync_req_t [NumGroups-1:0][NumTilesPerGroup-1:0] fsync_h_req, fsync_v_req;
+  fsync_rsp_t [NumGroups-1:0][NumTilesPerGroup-1:0] fsync_h_rsp, fsync_v_rsp;
+  for (genvar g = 0; unsigned'(g) < NumGroups; g++) begin : gen_fsync_tieoff
+    for (genvar t = 0; unsigned'(t) < NumTilesPerGroup; t++) begin
+      assign fsync_h_rsp[g][t] = '0;
+      assign fsync_v_rsp[g][t] = '0;
+    end
+  end
+
   ro_cache_ctrl_t [NumGroups-1:0] ro_cache_ctrl_q;
   for (genvar g = 0; unsigned'(g) < NumGroups; g++) begin : gen_ro_cache_ctrl_q
     `FF(ro_cache_ctrl_q[g], ro_cache_ctrl_i, ro_cache_ctrl_default, clk_i, rst_ni);
@@ -114,6 +127,11 @@ module mempool_cluster_floonoc_wrapper
     for (genvar y = 0; y < NumY; y++) begin : gen_groups_y
       group_xy_id_t group_id;
       assign group_id = '{x: x, y: y, port_id: 1'b0};
+      // Elaboration-time group id for this mesh position. A localparam, not the
+      // group_id signal: indexing per-group arrays with a signal would build a
+      // NumGroups-way mux per group instead of a static wire.
+      localparam int unsigned GId =
+          gid_of_xy(group_x_id_t'(x), group_y_id_t'(y));
 
       if (x == 0) begin : gen_hbm_chimney_west
         // TCDM West
@@ -253,15 +271,25 @@ module mempool_cluster_floonoc_wrapper
           .floo_tcdm_rsp_o            (floo_tcdm_rsp_out[x][y]),
           .floo_tcdm_req_i            (floo_tcdm_req_in[x][y]),
           .floo_tcdm_rsp_i            (floo_tcdm_rsp_in[x][y]),
-          .wake_up_i                  (wake_up_q[(NumY*x+y)*NumCoresPerGroup +: NumCoresPerGroup]),
-          .ro_cache_ctrl_i            (ro_cache_ctrl_q[NumY*x+y]),
+      // Indexed by GROUP ID, not by mesh position. mempool_group.sv:153 builds
+      // tile ids from group_id_i (= gid_of_xy, Morton) and mempool_tile.sv:260
+      // builds hart_id from those, so a raster index here permutes which
+      // physical group receives which group's signals. Invisible while wake is
+      // a broadcast and every group gets the same DMA descriptor; a wrong-group
+      // fault the moment P3 gives each group its own.
+          .wake_up_i                  (wake_up_q[GId*NumCoresPerGroup +: NumCoresPerGroup]),
+          .fsync_h_req_o              (fsync_h_req[GId]),
+          .fsync_h_rsp_i              (fsync_h_rsp[GId]),
+          .fsync_v_req_o              (fsync_v_req[GId]),
+          .fsync_v_rsp_i              (fsync_v_rsp[GId]),
+          .ro_cache_ctrl_i            (ro_cache_ctrl_q[GId]),
           // DMA request
-          .dma_req_i                  (dma_req_group_q[NumY*x+y]),
-          .dma_req_valid_i            (dma_req_group_q_valid[NumY*x+y]),
-          .dma_req_ready_o            (dma_req_group_q_ready[NumY*x+y]),
+          .dma_req_i                  (dma_req_group_q[GId]),
+          .dma_req_valid_i            (dma_req_group_q_valid[GId]),
+          .dma_req_ready_o            (dma_req_group_q_ready[GId]),
           // DMA status
-          .dma_meta_o_backend_idle_   (dma_meta[NumY*x+y][1]),
-          .dma_meta_o_trans_complete_ (dma_meta[NumY*x+y][0]),
+          .dma_meta_o_backend_idle_   (dma_meta[GId][1]),
+          .dma_meta_o_trans_complete_ (dma_meta[GId][0]),
           // AXI Router interfac
           .floo_axi_req_o             (floo_axi_req_out[x][y]),
           .floo_axi_rsp_o             (floo_axi_rsp_out[x][y]),
@@ -288,14 +316,18 @@ module mempool_cluster_floonoc_wrapper
           .floo_tcdm_rsp_o            (floo_tcdm_rsp_out[x][y]),
           .floo_tcdm_req_i            (floo_tcdm_req_in[x][y]),
           .floo_tcdm_rsp_i            (floo_tcdm_rsp_in[x][y]),
-          .wake_up_i                  (wake_up_q[(NumY*x+y)*NumCoresPerGroup +: NumCoresPerGroup]),
-          .ro_cache_ctrl_i            (ro_cache_ctrl_q[NumY*x+y]),
+          .wake_up_i                  (wake_up_q[GId*NumCoresPerGroup +: NumCoresPerGroup]),
+          .fsync_h_req_o              (fsync_h_req[GId]),
+          .fsync_h_rsp_i              (fsync_h_rsp[GId]),
+          .fsync_v_req_o              (fsync_v_req[GId]),
+          .fsync_v_rsp_i              (fsync_v_rsp[GId]),
+          .ro_cache_ctrl_i            (ro_cache_ctrl_q[GId]),
           // DMA request
-          .dma_req_i                  (dma_req_group_q[NumY*x+y]),
-          .dma_req_valid_i            (dma_req_group_q_valid[NumY*x+y]),
-          .dma_req_ready_o            (dma_req_group_q_ready[NumY*x+y]),
+          .dma_req_i                  (dma_req_group_q[GId]),
+          .dma_req_valid_i            (dma_req_group_q_valid[GId]),
+          .dma_req_ready_o            (dma_req_group_q_ready[GId]),
           // DMA status
-          .dma_meta_o                 (dma_meta[NumY*x+y]),
+          .dma_meta_o                 (dma_meta[GId]),
           // AXI Router interfac
           .floo_axi_req_o             (floo_axi_req_out[x][y]),
           .floo_axi_rsp_o             (floo_axi_rsp_out[x][y]),

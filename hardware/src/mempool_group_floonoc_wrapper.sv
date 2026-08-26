@@ -47,6 +47,15 @@ module mempool_group_floonoc_wrapper
   // Wake up interface
   input  logic              [NumCoresPerGroup-1:0]      wake_up_i,
 
+  // fractal_sync leaves, one pair per tile, carried through to the cluster
+  // tree. These MUST be driven: the shim ORs the response's wake into every
+  // core's wake_up, so leaving the inputs unconnected propagates X into the
+  // wake of every core in the tile and nothing ever boots.
+  output fsync_req_t        [NumTilesPerGroup-1:0]      fsync_h_req_o,
+  input  fsync_rsp_t        [NumTilesPerGroup-1:0]      fsync_h_rsp_i,
+  output fsync_req_t        [NumTilesPerGroup-1:0]      fsync_v_req_o,
+  input  fsync_rsp_t        [NumTilesPerGroup-1:0]      fsync_v_rsp_i,
+
   // RO-Cache configuration
   input  `STRUCT_PORT(ro_cache_ctrl_t)                  ro_cache_ctrl_i,
 
@@ -196,6 +205,10 @@ mempool_group #(
   .tcdm_slave_resp_valid_o  (tcdm_slave_resp_valid          ),
   .tcdm_slave_resp_ready_i  (tcdm_slave_resp_ready          ),
   .wake_up_i                (wake_up_i                      ),
+  .fsync_h_req_o            (fsync_h_req_o                  ),
+  .fsync_h_rsp_i            (fsync_h_rsp_i                  ),
+  .fsync_v_req_o            (fsync_v_req_o                  ),
+  .fsync_v_rsp_i            (fsync_v_rsp_i                  ),
   .ro_cache_ctrl_i          (ro_cache_ctrl_i                ),
   .dma_req_i                (dma_req_i                      ),
   .dma_req_valid_i          (dma_req_valid_i                ),
