@@ -81,11 +81,58 @@ static inline uint32_t fsync_aggr_of_side(uint32_t side) {
   return (1u << levels) - 1u;
 }
 
+// General pow2-aligned RECTANGLE of tiles, w wide by h tall. This is what
+// makes broadcast/reduce patterns expressible: "every VC in this row of VCs"
+// is a rectangle, not a square.
+//
+// The tree alternates h and v levels STARTING WITH THE NETWORK ENTERED, and a
+// w x h region aggregates at log2(w) horizontal levels and log2(h) vertical
+// ones. Entering on the axis that needs MORE levels keeps the set bits
+// contiguous from the LSB. Verified against the reference generator for every
+// pow2-aligned rectangle at every position (scripts/fsync/).
+//
+// Returns the aggregate and writes the scope id, which selects the entry
+// network -- so the caller must pass BOTH to the hardware.
+static inline uint32_t fsync_aggr_of_rect(uint32_t w, uint32_t h,
+                                          uint32_t *id) {
+  uint32_t lw = 0, lh = 0;
+  for (uint32_t t = w; t > 1; t >>= 1)
+    lw++;
+  for (uint32_t t = h; t > 1; t >>= 1)
+    lh++;
+  const uint32_t vertical = (lh > lw);
+  const uint32_t n_entry = vertical ? lh : lw;
+  const uint32_t n_other = vertical ? lw : lh;
+  uint32_t aggr = 0;
+  for (uint32_t i = 0; i < n_entry; i++)
+    aggr |= 1u << (2 * i);
+  for (uint32_t j = 0; j < n_other; j++)
+    aggr |= 1u << (2 * j + 1);
+  *id = vertical ? FSYNC_ID_V : FSYNC_ID_H;
+  return aggr;
+}
+
 // A virtual-cluster level k spans 2^k GROUPS per axis, hence 2^k * tiles per
 // group along each axis. This is invariant #9: a memory-side group level maps
 // to a barrier-side TILE level one log2(tiles-per-group-side) higher.
 static inline uint32_t fsync_aggr_of_vc_level(uint32_t k) {
   return fsync_aggr_of_side((1u << k) * (uint32_t)FSYNC_TPG_SIDE);
+}
+
+// One VC-row: every virtual cluster sitting in the same row of VCs at level k.
+// Full mesh width by one VC height -- the second half of a
+// "reduce inside each VC, then combine across the row" pattern.
+static inline uint32_t fsync_aggr_of_vc_row(uint32_t k, uint32_t *id) {
+  return fsync_aggr_of_rect((uint32_t)FSYNC_TILE_SIDE,
+                            (1u << k) * (uint32_t)FSYNC_TPG_SIDE, id);
+}
+
+// The column equivalent. Note it comes back with id = FSYNC_ID_V: a taller
+// than wide region enters the VERTICAL network, so the id must be passed to
+// the hardware along with the aggregate, not assumed to be 0.
+static inline uint32_t fsync_aggr_of_vc_col(uint32_t k, uint32_t *id) {
+  return fsync_aggr_of_rect((1u << k) * (uint32_t)FSYNC_TPG_SIDE,
+                            (uint32_t)FSYNC_TILE_SIDE, id);
 }
 
 // Every tile of the machine.
@@ -130,6 +177,22 @@ static inline void fsync_clear_error(void) {
 // tile leader only, after the intra-tile software barrier.
 static inline uint32_t fsync_barrier_vc(uint32_t k) {
   fsync_trigger(FSYNC_ID_H, fsync_aggr_of_vc_level(k));
+  return fsync_wait();
+}
+
+// Combine across a row of VCs. Pair with fsync_barrier_vc() for the two-phase
+// pattern: every VC reduces internally, then the row combines.
+static inline uint32_t fsync_barrier_vc_row(uint32_t k) {
+  uint32_t id;
+  const uint32_t aggr = fsync_aggr_of_vc_row(k, &id);
+  fsync_trigger(id, aggr);
+  return fsync_wait();
+}
+
+static inline uint32_t fsync_barrier_vc_col(uint32_t k) {
+  uint32_t id;
+  const uint32_t aggr = fsync_aggr_of_vc_col(k, &id);
+  fsync_trigger(id, aggr);
   return fsync_wait();
 }
 

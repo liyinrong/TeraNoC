@@ -30,46 +30,63 @@
 int main(void) {
   unsigned checked = 0, bad = 0;
 
-  for (unsigned side = 2; side <= N; side <<= 1) {
-    for (unsigned by = 0; by < N; by += side) {
-      for (unsigned bx = 0; bx < N; bx += side) {
-        static fsync_cu_t cus[N * N];
-        unsigned n = 0;
-        for (unsigned y = by; y < by + side; y++)
-          for (unsigned x = bx; x < bx + side; x++) {
-            cus[n].cu_id = y * N + x;
-            cus[n].x_pos = x;
-            cus[n].y_pos = y;
-            n++;
+  // Every pow2-aligned RECTANGLE, not only squares: rows and columns of
+  // virtual clusters are rectangles, and broadcast/reduce needs them.
+  for (unsigned w = 1; w <= N; w <<= 1) {
+    for (unsigned h = 1; h <= N; h <<= 1) {
+      if (w * h < 2)
+        continue; // a single CU is not a barrier
+      for (unsigned by = 0; by < N; by += h) {
+        for (unsigned bx = 0; bx < N; bx += w) {
+          static fsync_cu_t cus[N * N];
+          unsigned n = 0;
+          for (unsigned y = by; y < by + h; y++)
+            for (unsigned x = bx; x < bx + w; x++) {
+              cus[n].cu_id = y * N + x;
+              cus[n].x_pos = x;
+              cus[n].y_pos = y;
+              n++;
+            }
+
+          fsync_init_reqs(cus, n);
+          if (!fsync_gen_reqs(cus, n, h_fs_dir)) {
+            printf("FAIL %ux%u base=(%u,%u): generator refused a legal "
+                   "rectangle\n",
+                   w, h, bx, by);
+            bad++;
+            continue;
           }
 
-        fsync_init_reqs(cus, n);
-        if (!fsync_gen_reqs(cus, n, h_fs_dir)) {
-          printf("FAIL side=%u base=(%u,%u): generator refused a legal "
-                 "rectangle\n",
-                 side, bx, by);
-          bad++;
-          continue;
-        }
-
-        const unsigned want = (unsigned)fsync_aggr_of_side(side);
-        // Every member must agree, or a single per-scope value cannot exist.
-        for (unsigned k = 0; k < n; k++) {
-          const unsigned a = cus[k].fsync_req.fs_req_aggr;
-          const unsigned i = cus[k].fsync_req.fs_req_id;
-          checked++;
-          if (a != want) {
-            if (bad < 8)
-              printf("FAIL side=%u base=(%u,%u) cu=%u: aggr=0x%x want=0x%x\n",
-                     side, bx, by, cus[k].cu_id, a, want);
-            bad++;
-          }
-          if (i != cus[0].fsync_req.fs_req_id) {
-            if (bad < 8)
-              printf("FAIL side=%u base=(%u,%u) cu=%u: id=%u differs from %u "
-                     "within one rectangle\n",
-                     side, bx, by, cus[k].cu_id, i, cus[0].fsync_req.fs_req_id);
-            bad++;
+          uint32_t want_id = 0;
+          const unsigned want = (unsigned)fsync_aggr_of_rect(w, h, &want_id);
+          // Every member must agree, or a single per-scope value cannot exist.
+          for (unsigned k = 0; k < n; k++) {
+            const unsigned a = cus[k].fsync_req.fs_req_aggr;
+            const unsigned i = cus[k].fsync_req.fs_req_id;
+            checked++;
+            if (a != want) {
+              if (bad < 8)
+                printf("FAIL %ux%u base=(%u,%u) cu=%u: aggr=0x%x want=0x%x\n",
+                       w, h, bx, by, cus[k].cu_id, a, want);
+              bad++;
+            }
+            // Only the 1D ids are predicted; a pair that straddles two sibling
+            // nodes uses the NEIGHBOUR links (id 2/3), which the closed form
+            // deliberately does not model.
+            if (i != cus[0].fsync_req.fs_req_id) {
+              if (bad < 8)
+                printf("FAIL %ux%u base=(%u,%u) cu=%u: id=%u differs from %u "
+                       "within one rectangle\n",
+                       w, h, bx, by, cus[k].cu_id, i,
+                       cus[0].fsync_req.fs_req_id);
+              bad++;
+            }
+            if (i < 2 && i != want_id) {
+              if (bad < 8)
+                printf("FAIL %ux%u base=(%u,%u): id=%u want=%u\n", w, h, bx, by,
+                       i, want_id);
+              bad++;
+            }
           }
         }
       }
