@@ -1993,23 +1993,28 @@ module mempool_tile
   logic [31:0]                       fs_rdata;
   logic                              fs_wake;
 
-  // fs_wake is NOT routed into wake_up yet, and that is deliberate.
+  // The barrier wake releases EVERY core of the tile, which is what makes one
+  // arrival per tile sufficient: only the ARRIVAL rendezvous stays in
+  // software, the release is the tree's response.
   //
-  // mempool_barrier (software/runtime/synchronization.c:45-55) ends with a
-  // single unconditional mempool_wfi() and no re-check loop, so ANY wake
-  // releases a core from a software barrier. wake_up_sync_i is the only wake
-  // path a Snitch has (no meip/mtip/msip), so the barrier wake and the fsync
-  // wake would share one channel: an fsync completion in one tile would
-  // spuriously release cores sitting in an unrelated software barrier.
-  // Measured: fsync_bar released a core early, it returned from main, and
-  // crt0.S:141 (_eoc runs on EVERY core after `call main`) ended the run with
-  // a misleading retval=0 before the check had executed.
+  // wake_up_sync_i is the only wake path a Snitch has (no meip/mtip/msip), so
+  // this necessarily shares a channel with the software barrier's wake. That
+  // is safe under one rule, which software must honour:
   //
-  // Bring-up polls STATUS.BUSY instead, which needs no wake at all. Enabling
-  // the broadcast is the interrupt-mode step and REQUIRES making the software
-  // barrier tolerate spurious wakes first (re-check the condition around the
-  // wfi) -- that is a shared-runtime change, not a local one.
-  localparam bit FSyncWakeEnable = 1'b0;
+  //   DO NOT MIX hardware and software barriers in the same phase.
+  //
+  // mempool_barrier ends with a single unconditional mempool_wfi() and no
+  // re-check loop (software/runtime/synchronization.c:45-55), so it treats ANY
+  // wake as its own. With an fsync completion in flight it can release a core
+  // early -- measured: a core escaped both software barriers, returned from
+  // main, and crt0.S:141 (_eoc runs on EVERY core) ended the run with a
+  // misleading retval=0 before the check had executed. Keeping the two
+  // mechanisms in disjoint phases avoids that without touching shared runtime;
+  // the long-term intent is to retire the software barrier once the hardware
+  // one is shown faster and stable.
+  //
+  // Snitch's 8-deep OutstandingWfi absorbs a wake that arrives before the core
+  // reaches its wfi, so a late-arriving core still sees the release.
 
 
   rr_arb_tree #(
@@ -2161,7 +2166,7 @@ module mempool_tile
     );
 
     assign wake_up = wake_up_q | {{(NumCoresPerTile-1){1'b0}}, redmule_evt} |
-                     {NumCoresPerTile{fs_wake & FSyncWakeEnable}};
+                     {NumCoresPerTile{fs_wake}};
 
     // ----------------------------------------------------------------------
     // WP2 wide source path: issue each RedMulE HCI beat as one raw wide access.
@@ -2650,7 +2655,7 @@ module mempool_tile
 
   end else begin: gen_redmule_tieoff
 
-    assign wake_up = wake_up_q | {NumCoresPerTile{fs_wake & FSyncWakeEnable}};
+    assign wake_up = wake_up_q | {NumCoresPerTile{fs_wake}};
 
     // No RedMulE here: this tile never sources a wide access from the RedMulE SLOT.
     // It still accepts raw wide slave requests through the module-scope B2 path, and

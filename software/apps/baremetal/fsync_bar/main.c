@@ -25,10 +25,14 @@
 #include <stdint.h>
 
 #include "encoding.h"
-#include "fsync.h"
 #include "printf.h"
 #include "runtime.h"
 #include "synchronization.h"
+
+// Separate block on purpose: clang-format sorts within a block, and
+// fsync.h must come AFTER runtime.h (it calls mempool_wfi, which
+// runtime.h defines static while synchronization.h declares non-static).
+#include "fsync.h"
 
 #define NUM_TILES (NUM_CORES / NUM_CORES_PER_TILE)
 

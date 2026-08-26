@@ -200,29 +200,60 @@ static inline void fsync_clear_error(void) {
       FSYNC_CONTROL_CLEAR;
 }
 
-// One arrival for this tile at a virtual-cluster level-k scope. Call from the
-// tile leader only, after the intra-tile software barrier.
-static inline uint32_t fsync_barrier_vc(uint32_t k) {
-  fsync_trigger(FSYNC_ID_H, fsync_aggr_of_vc_level(k));
-  return fsync_wait();
+// ---------------------------------------------------------------------------
+// Two-level barrier. EVERY core of the tile calls these.
+//
+// The core that arrives LAST triggers the tree and then waits with the rest;
+// the tree's wake releases the whole tile at once. Nobody polls and nobody
+// spins. `tile_cnt` is one counter per tile in L1 and MUST be zeroed before
+// first use (`.l1` is NOBITS and powers up X).
+//
+// These do not return a status: nobody polls, so an error is observed with
+// fsync_status() afterwards rather than per barrier.
+// ---------------------------------------------------------------------------
+
+static inline void fsync_barrier(volatile uint32_t *tile_cnt, uint32_t tile,
+                                 uint32_t id, uint32_t aggr) {
+  if (__atomic_fetch_add(&tile_cnt[tile], 1, __ATOMIC_RELAXED) ==
+      (uint32_t)(NUM_CORES_PER_TILE - 1)) {
+    __atomic_store_n(&tile_cnt[tile], 0, __ATOMIC_RELAXED);
+    __sync_synchronize();
+    fsync_trigger(id, aggr);
+  }
+  mempool_wfi();
+}
+
+static inline void fsync_barrier_vc(volatile uint32_t *tile_cnt, uint32_t tile,
+                                    uint32_t k) {
+  fsync_barrier(tile_cnt, tile, FSYNC_ID_H, fsync_aggr_of_vc_level(k));
 }
 
 // Combine across a row of VCs. Pair with fsync_barrier_vc() for the two-phase
-// pattern: every VC reduces internally, then the row combines.
-static inline uint32_t fsync_barrier_vc_row(uint32_t k) {
+// pattern: every VC reduces internally, then the row combines. Note the id is
+// NOT always FSYNC_ID_H -- a taller-than-wide scope enters the vertical
+// network -- so it is taken from the helper.
+static inline void fsync_barrier_vc_row(volatile uint32_t *tile_cnt,
+                                        uint32_t tile, uint32_t k) {
   uint32_t id;
   const uint32_t aggr = fsync_aggr_of_vc_row(k, &id);
-  fsync_trigger(id, aggr);
-  return fsync_wait();
+  fsync_barrier(tile_cnt, tile, id, aggr);
 }
 
-static inline uint32_t fsync_barrier_vc_col(uint32_t k) {
+static inline void fsync_barrier_vc_col(volatile uint32_t *tile_cnt,
+                                        uint32_t tile, uint32_t k) {
   uint32_t id;
   const uint32_t aggr = fsync_aggr_of_vc_col(k, &id);
-  fsync_trigger(id, aggr);
-  return fsync_wait();
+  fsync_barrier(tile_cnt, tile, id, aggr);
 }
 
+static inline void fsync_barrier_all(volatile uint32_t *tile_cnt,
+                                     uint32_t tile) {
+  fsync_barrier(tile_cnt, tile, FSYNC_ID_H, fsync_aggr_global());
+}
+
+// Single-arrival form, for a caller that has ALREADY established that exactly
+// one core per tile reaches it. Polls, so it must not be used while tile-mates
+// sit in WFI -- they would consume the wake.
 static inline uint32_t fsync_barrier_global(void) {
   fsync_trigger(FSYNC_ID_H, fsync_aggr_global());
   return fsync_wait();
