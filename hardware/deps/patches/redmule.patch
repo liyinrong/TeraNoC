@@ -12,7 +12,7 @@ index 6d20fcd..4db3ca9 100644
    tech_cells_generic: { git: "https://github.com/pulp-platform/tech_cells_generic.git", version: 0.2.11                               }
  
 diff --git a/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv b/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
-index e407b3a..8d8fa67 100644
+index e407b3a..e5729f1 100644
 --- a/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
 +++ b/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
 @@ -242,6 +242,7 @@ module redmule_memory_scheduler
@@ -23,36 +23,56 @@ index e407b3a..8d8fa67 100644
    always_comb begin : address_gen_signals
      // Here we initialize the streamer source signals
      // for the X stream source
-@@ -273,8 +274,15 @@ module redmule_memory_scheduler
+@@ -255,6 +256,7 @@ module redmule_memory_scheduler
+     cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.d2_stride = '0;
+     cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.d2_len = '0;
+     cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.d3_stride = '0;
++    cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.d0_len_last = '0;
+     cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.dim_enable_1h = 3'b011;
+     // Here we initialize the streamer source signals
+     // for the W stream source
+@@ -268,20 +270,26 @@ module redmule_memory_scheduler
+     cntrl_streamer_o.w_stream_source_ctrl.addressgen_ctrl.d2_stride = 'd0;
+     cntrl_streamer_o.w_stream_source_ctrl.addressgen_ctrl.d2_len = '0;
+     cntrl_streamer_o.w_stream_source_ctrl.addressgen_ctrl.d3_stride = '0;
++    cntrl_streamer_o.w_stream_source_ctrl.addressgen_ctrl.d0_len_last = '0;
+     cntrl_streamer_o.w_stream_source_ctrl.addressgen_ctrl.dim_enable_1h = 3'b011;
+ 
      // Here we initialize the streamer source signals
      // for the Y stream source
      cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.base_addr = y_config.y_addr;
--    cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.tot_len = y_config.yz_tot_len;
--    cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_len = W;
-+    // Y/Z walk the M dimension on d0 (d0_len columns) over the K tiles on d1, with the
-+    // M tiles carried by d2. In the trailing M tile only x_rows_lftovr of the Width d0
-+    // columns are real M rows, so a fixed d0_len = W over-runs into the next output row
-+    // and clobbers the neighbouring tile's Z whenever m_size % Width != 0. The address
-+    // generator samples ctrl_i live, so tracking num_x_reads gives the per-M-tile count;
-+    // tot_len only needs the clamp when the whole job is one (partial) M tile.
-+    cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.tot_len = y_config.x_rows_iter == 'd1 ?
-+        32'(num_x_reads) * 32'(y_config.w_cols_iter) : y_config.yz_tot_len;
-+    cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_len = num_x_reads;
++    // Y/Z walk the M dimension on d0 (Width rows per M tile) over the K tiles on d1,
++    // with the M tiles carried by d2. d0_len stays Width: yz_tot_len now counts real M
++    // rows (see redmule_tiler.sv), so the stream simply stops part-way through the
++    // trailing tile instead of running past the end of Z.
+     cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.tot_len = y_config.yz_tot_len;
+     cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_len = W;
      cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_stride = y_config.yz_d0_stride;
      cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d1_len = y_config.w_cols_iter;
      cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d1_stride = JMP;
-@@ -286,8 +294,9 @@ module redmule_memory_scheduler
+     cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d2_stride = y_config.yz_d2_stride;
+-    cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d2_len = '0;
++    cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d2_len = y_config.x_rows_iter;
+     cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d3_stride = '0;
+-    cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.dim_enable_1h = 3'b011;
++    cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_len_last = y_config.x_rows_lftovr;
++    cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.dim_enable_1h = 4'b0111;
+ 
      // Here we initialize the streamer sink signals for
      // the Z stream sink
-     cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.base_addr = z_config.z_addr;
--    cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.tot_len = z_config.yz_tot_len;
--    cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_len = W;
-+    cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.tot_len = z_config.x_rows_iter == 'd1 ?
-+        32'(num_x_reads) * 32'(z_config.w_cols_iter) : z_config.yz_tot_len;
-+    cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_len = num_x_reads;
-     cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_stride = z_config.yz_d0_stride;
+@@ -292,9 +300,10 @@ module redmule_memory_scheduler
      cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_len = z_config.w_cols_iter;
      cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_stride = JMP;
+     cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d2_stride = z_config.yz_d2_stride;
+-    cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d2_len = '0;
++    cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d2_len = z_config.x_rows_iter;
+     cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d3_stride = '0;
+-    cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.dim_enable_1h = 3'b011;
++    cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_len_last = z_config.x_rows_lftovr;
++    cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.dim_enable_1h = 4'b0111;
+   end
+ 
+   assign start_x_streamer = (~x_config_empty && ~x_config_full && ~x_done_o) || x_config_full;
 diff --git a/hardware/deps/redmule/rtl/redmule_pkg.sv b/hardware/deps/redmule/rtl/redmule_pkg.sv
 index c9565f4..f5a6f45 100644
 --- a/hardware/deps/redmule/rtl/redmule_pkg.sv
@@ -97,6 +117,47 @@ index 601c785..8618183 100644
    assign z_height_next = z_cols_iter_q == z_config_fast.w_cols_iter-1 && z_config_fast.w_cols_lftovr != '0 ? z_config_fast.w_cols_lftovr : D;
  
    always_ff @(posedge clk_i or negedge rst_ni) begin : z_width_register
+diff --git a/hardware/deps/redmule/rtl/redmule_streamer.sv b/hardware/deps/redmule/rtl/redmule_streamer.sv
+index e1fc30c..4039d9e 100644
+--- a/hardware/deps/redmule/rtl/redmule_streamer.sv
++++ b/hardware/deps/redmule/rtl/redmule_streamer.sv
+@@ -284,6 +284,9 @@ end
+ `HCI_INTF_EXPLICIT_PARAM(zstream2cast, clk_i, `HCI_SIZE_PARAM(ldst_tcdm));
+ hci_core_sink         #(
+   .MISALIGNED_ACCESSES ( MisalignedAccessSupport ),
++  // Same as the Y source: d2 carries the M tiles, and the trailing one is ragged
++  // whenever m_size % Width != 0.
++  .DIM_ENABLE_1H       ( 4'b0111 ),
+   .`HCI_SIZE_PARAM(tcdm) ( `HCI_SIZE_PARAM(ldst_tcdm) )
+ ) i_stream_sink        (
+   .clk_i               ( clk_i                       ),
+@@ -527,6 +530,9 @@ for (genvar i = 0; i < NumStreamSources; i++) begin: gen_tcdm2stream
+ 
+   hci_core_source       #(
+     .MISALIGNED_ACCESSES   ( MisalignedAccessSupport ),
++    // d2 must be bounded on the Y load so the address generator can tell which M
++    // tile it is on and shorten d0 for a ragged trailing tile (d0_len_last).
++    .DIM_ENABLE_1H         ( (i == YsourceStreamId) ? 4'b0111 : 4'b0011 ),
+     .`HCI_SIZE_PARAM(tcdm) ( `HCI_SIZE_PARAM(ldst_tcdm) ),
+     .RESP_FIFO_DEPTH       ( EnableReordering ? Height*(NumPipeRegs+1) : 2 )
+   ) i_stream_source      (
+diff --git a/hardware/deps/redmule/rtl/redmule_tiler.sv b/hardware/deps/redmule/rtl/redmule_tiler.sv
+index 44f9843..3f46161 100644
+--- a/hardware/deps/redmule/rtl/redmule_tiler.sv
++++ b/hardware/deps/redmule/rtl/redmule_tiler.sv
+@@ -302,7 +302,11 @@ assign config_d.x_d1_stride = ((4*FpWidth)/AddrWidth)*(((DataW/FpWidth)*x_cols_i
+ assign config_d.x_rows_offs = Width*config_d.x_d1_stride;
+ assign config_d.w_tot_len   = x_rows_by_w_cols_by_w_rows_iter_q[31:0];
+ assign config_d.w_d0_stride = ((4*FpWidth)/AddrWidth)*((DataW/FpWidth) * (config_d.k_size)/(Height*(PipeRegs + 1)));
+-assign config_d.yz_tot_len  = Width*x_rows_by_w_cols_iter_q[15:0];
++// Y/Z move one access per (M row, K tile), so the length is m_size*w_cols_iter.
++// Width*x_rows_iter*w_cols_iter counts the trailing M tile as full, which makes the
++// store run past the end of Z by (Width - x_rows_lftovr)*w_cols_iter accesses
++// whenever m_size % Width != 0.
++assign config_d.yz_tot_len  = 32'(config_d.m_size) * 32'(config_d.w_cols_iter);
+ assign config_d.yz_d0_stride = config_d.w_d0_stride;
+ assign config_d.yz_d2_stride = Width*config_d.w_d0_stride;
+ assign config_d.tot_x_read   = x_rows_by_w_cols_by_x_cols_iter_q[31:0];
 diff --git a/hardware/deps/redmule/rtl/x_buffer/redmule_x_buffer.sv b/hardware/deps/redmule/rtl/x_buffer/redmule_x_buffer.sv
 index 15bd1b4..4cf9d20 100644
 --- a/hardware/deps/redmule/rtl/x_buffer/redmule_x_buffer.sv

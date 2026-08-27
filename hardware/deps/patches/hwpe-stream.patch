@@ -1,5 +1,5 @@
 diff --git a/hardware/deps/hwpe-stream/rtl/hwpe_stream_package.sv b/hardware/deps/hwpe-stream/rtl/hwpe_stream_package.sv
-index a42fcc2..a1ea8cc 100644
+index 82b132d..d12592d 100644
 --- a/hardware/deps/hwpe-stream/rtl/hwpe_stream_package.sv
 +++ b/hardware/deps/hwpe-stream/rtl/hwpe_stream_package.sv
 @@ -62,6 +62,13 @@ package hwpe_stream_package;
@@ -14,6 +14,19 @@ index a42fcc2..a1ea8cc 100644
 +    logic        [31:0] d0_offset;
 +    logic        [31:0] d0_wrap_cnt;
    } ctrl_addressgen_v3_t;
+ 
+   typedef struct packed {
+@@ -77,6 +84,12 @@ package hwpe_stream_package;
+     logic signed [31:0] d3_stride;
+     logic signed [31:0] d4_stride;
+     logic         [3:0] dim_enable_1h;
++    // Length of d0 on the LAST d2 iteration, for a stream whose outer dimension is
++    // ragged: d2 walks tiles of d0_len, and the trailing tile carries only
++    // d0_len_last of them. Zero disables it (every d2 step uses d0_len), which is
++    // the legacy behaviour. Requires d2 to be bounded, i.e. dim_enable_1h[2] and
++    // the DIM_ENABLE_1H parameter bit both set and d2_len programmed.
++    logic        [31:0] d0_len_last;
+   } ctrl_addressgen_v4_t;
  
    typedef struct packed {
 diff --git a/hardware/deps/hwpe-stream/rtl/streamer/hwpe_stream_addressgen_v3.sv b/hardware/deps/hwpe-stream/rtl/streamer/hwpe_stream_addressgen_v3.sv
@@ -72,3 +85,30 @@ index 2162f71..bb43824 100644
      end
      else if (enable_i) begin
        d0_addr_q <= d0_addr_d;
+diff --git a/hardware/deps/hwpe-stream/rtl/streamer/hwpe_stream_addressgen_v4.sv b/hardware/deps/hwpe-stream/rtl/streamer/hwpe_stream_addressgen_v4.sv
+index d03f2d0..f55c472 100644
+--- a/hardware/deps/hwpe-stream/rtl/streamer/hwpe_stream_addressgen_v4.sv
++++ b/hardware/deps/hwpe-stream/rtl/streamer/hwpe_stream_addressgen_v4.sv
+@@ -218,6 +218,13 @@ module hwpe_stream_addressgen_v4
+ 
+   logic        addr_valid_d, addr_valid_q;
+ 
++  // On the final d2 tile of a ragged stream, d0 runs for d0_len_last instead of
++  // d0_len. d2_counter_q is 1 on the first tile, so the last one is d2_len.
++  logic [31:0] d0_len_eff;
++  assign d0_len_eff = (ctrl_i.d0_len_last != '0 && ctrl_i.dim_enable_1h[2] &&
++                       DIM_ENABLE_1H[2] && d2_counter_q >= ctrl_i.d2_len)
++                    ? ctrl_i.d0_len_last : ctrl_i.d0_len;
++
+   assign d0_stride   = $signed(ctrl_i.d0_stride);
+   assign d1_stride   = $signed(ctrl_i.d1_stride);
+   assign d2_stride   = $signed(ctrl_i.d2_stride);
+@@ -243,7 +250,7 @@ module hwpe_stream_addressgen_v4
+     if(addr_o.ready) begin
+       if(overall_counter_q < ctrl_i.tot_len) begin
+         addr_valid_d = 1'b1;
+-        if((d0_counter_q < ctrl_i.d0_len) || (ctrl_i.dim_enable_1h[0] == 1'b0) || (DIM_ENABLE_1H[0] == 1'b0)) begin
++        if((d0_counter_q < d0_len_eff) || (ctrl_i.dim_enable_1h[0] == 1'b0) || (DIM_ENABLE_1H[0] == 1'b0)) begin
+           d0_addr_d    = d0_addr_q + d0_stride;
+           d0_counter_d = d0_counter_q + 1;
+         end
