@@ -129,6 +129,12 @@ endif
 # ============================================================================
 vlog_args += -suppress vlog-2583 -suppress vlog-13314 -suppress vlog-13233
 vlog_args += -work $(library)
+# Give modules that declare no timeunit/timeprecision a default, the way VCS
+# already does with -override_timescale above. Without it any RedMulE config
+# fails to simulate under Questa: hci_core_intf (via the hci dep) has no
+# timescale directive, and vsim-3009 [TSCALE] is an error, not a warning. The
+# RedMulE-free flavors never hit this because hci is not in their compile.
+vlog_args += -timescale 1ns/1ps
 
 # General Configuration
 vlog_defs += -D$(config)
@@ -519,6 +525,22 @@ floo_noc_cfg ?= floo_noc_$(config).yml
 .PHONY: update-floogen
 update-floogen: update-l2map
 	$(MAKE) -C .. FLOO_CFG=./config/$(floo_noc_cfg) update-floonoc config=$(config)
+	@# floogen names the emitted package after the yml's `name:` field, but the
+	@# RTL imports floo_terapool_noc_pkg unconditionally. A yml whose name does
+	@# not match therefore leaves a STALE package in place and the design
+	@# elaborates against the wrong topology -- silently, because an
+	@# out-of-range constant index is not an elaboration error. Check the
+	@# endpoint count instead of trusting the filename.
+	@ep=$$(grep -oE 'NumEndpoints = [0-9]+' \
+		$(MEMPOOL_DIR)/hardware/generated/floo_terapool_noc_pkg.sv \
+		| grep -oE '[0-9]+'); \
+	want=$$(( $(num_groups) + $(l2_banks) )); \
+	if [ "$$ep" != "$$want" ]; then \
+		echo "ERROR: floo_terapool_noc_pkg has NumEndpoints=$$ep, expected $$want"; \
+		echo "       ($(num_groups) groups + $(l2_banks) L2 banks)."; \
+		echo "       Does config/$(floo_noc_cfg) still say 'name: terapool'?"; \
+		exit 1; \
+	fi
 
 # L2/HBM bank -> mesh perimeter port map.
 # The wrapper indexes the generated package; the floogen yml decides where the
@@ -838,7 +860,7 @@ perfetto_sif := $(perfetto_dir)/ubuntu2404.sif
 #   core=G,T,C         restrict dump= to one core
 .PHONY: perf-report spatz-perf redmule-perf interco-perf
 # Engine trace: $(buildpath)/spatz_profiling (always on). Per-request memory
-# trace: $(buildpath)/noc_profiling, beside the pe_/rm_ port traces and under
+# trace: $(buildpath)/noc_profiling, beside the core_/rm_ port traces and under
 # the same noc_profiling=1 gate. The script picks both out of the build dir.
 spatz-perf:
 	@test -d $(buildpath)/spatz_profiling || \
@@ -846,7 +868,8 @@ spatz-perf:
 	$(python) $(ROOT_DIR)/scripts/spatz_perf.py $(buildpath) \
 		$(if $(win_start),--cycle-start $(win_start),) \
 		$(if $(win_end),--cycle-end $(win_end),) \
-		--per-group $(if $(filter 1,$(percore)),--per-core,) \
+		--per-group --tiles-per-group $(shell echo $$(( $(num_cores) / $(num_cores_per_tile) / $(num_groups) ))) \
+		$(if $(filter 1,$(percore)),--per-core,) \
 		$(if $(filter 1,$(hist)),--hist,) $(if $(csv),--csv $(csv),) \
 		$(if $(dump),--dump $(dump),) $(if $(core),--core $(core),) \
 		| tee $(buildpath)/spatz_perf.txt
@@ -877,15 +900,24 @@ perf-report:
 	@$(if $(wildcard $(buildpath)/noc_profiling),$(MAKE) --no-print-directory interco-perf,true)
 
 .PHONY: perfetto-view
+# realpath, NOT abspath: `results` is a symlink, and abspath keeps it. Binding
+# a symlinked path leaves its target unmounted, so the trace is unreachable
+# inside the container ("Could not open trace file") even though it exists.
+perfetto_view_dir = $(shell realpath $(buildpath))
+perfetto_view_lib = $(shell realpath $(perfetto_dir))
+# Port knob: a GVSoC trace server on the same host also defaults to 9001, so an
+# RTL-vs-model comparison needs the two on different ports (port=9002).
+perfetto_port ?= 9001
 perfetto-view:
 	@test -f $(tp_shell) -a -f $(perfetto_sif) || \
 		{ echo "ERROR: trace_processor not installed -- run 'make perfetto' in the repo root"; exit 1; }
 	@test -f $(buildpath)/perf.perfetto-trace || \
 		{ echo "ERROR: $(buildpath)/perf.perfetto-trace not found -- run 'make perfetto-gen' first"; exit 1; }
-	@echo ">> Serving $(abspath $(buildpath))/perf.perfetto-trace on 127.0.0.1:9001"
+	@echo ">> Serving $(perfetto_view_dir)/perf.perfetto-trace on 127.0.0.1:$(perfetto_port)"
 	@echo ">> Reload https://ui.perfetto.dev and click YES on 'Trace Processor native acceleration'"
-	singularity exec -B $(abspath $(buildpath)) -B $(perfetto_dir) $(perfetto_sif) \
-		$(tp_shell) --httpd $(abspath $(buildpath))/perf.perfetto-trace
+	singularity exec -B $(perfetto_view_dir) -B $(perfetto_view_lib) $(perfetto_sif) \
+		$(perfetto_view_lib)/trace_processor_shell --httpd \
+		--http-port $(perfetto_port) $(perfetto_view_dir)/perf.perfetto-trace
 
 ############################
 # Unit tests simulation    #
