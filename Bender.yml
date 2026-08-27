@@ -19,8 +19,8 @@ dependencies:
   fpnew:                { git: "https://github.com/pulp-platform/cvfpu.git",                rev: pulp-v0.3.0 }
   floo_noc:             { git: "https://github.com/pulp-platform/FlooNoC.git",              version: 0.8.1   }
   scm:                  { path: "hardware/deps/scm"                                                          }
-  redmule:              { git: "https://github.com/pulp-platform/redmule.git",              rev: mbertuletti/outstanding   }
-  hci:                  { git: "https://github.com/pulp-platform/hci.git",                  version: 2.5.0   }
+  redmule:              { git: "https://github.com/pulp-platform/redmule.git",              rev: mbertuletti/devel   }
+  hci:                  { git: "https://github.com/pulp-platform/hci.git",                  version: 2.6.1   }
 
 workspace:
   checkout_dir: "./hardware/deps"

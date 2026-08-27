@@ -1344,7 +1344,7 @@ module mempool_tile
   // HWPE control path (MMIO [RMBaseAddr, +RMRegSize)) and the EOC wake-up.
   if (RedMulE) begin: gen_redmule
 
-    logic [1:0] redmule_evt; // bit 0 = end-of-computation (wakes core 0)
+    logic redmule_evt; // end-of-computation (wakes core 0)
 
     // ID_WIDTH must be non-zero (VCS rejects the [ID_WIDTH-1:0] underflow); match redmule_top's 8.
     hwpe_ctrl_intf_periph #( .ID_WIDTH(8) ) redmule_rmcfg ( .clk( clk_i ) );
@@ -1365,36 +1365,44 @@ module mempool_tile
       EW:  0,
       EHW: 0
     };
-    hci_variablelatency_intf #(
+    // The engine speaks classic HCI (req/gnt + r_valid/r_ready). The TCDM side of
+    // this tile is variable-latency and reorders responses; the streamer's
+    // per-channel hci_core_rob (`user`) plus hci_core_mux_ooo (`id`) absorb both,
+    // so `EnableReordering` is mandatory here.
+    hci_core_intf #(
       .DW (RMDataWidth                         ),
       .UW (idx_width(RMOutstandingTransactions)),
       .IW (idx_width(RMNumStreams)             )
     ) tcdm ( .clk ( clk_i ) );
 
-    // RISC-V XIF: required by the signature but unused (control is via HWPE).
-    cv32e40x_if_xif core_xif ();
+    // No ECC on this path (EW = EHW = 0); tie the target-driven side off.
+    assign tcdm.egnt     = '0;
+    assign tcdm.r_evalid = '0;
+    assign tcdm.r_ecc    = '0;
+    assign tcdm.r_opc    = '0;
 
-    redmule_top #(
-      .N_CORES(1                                   ),
-      .DW     (RMDataWidth                         ),
-      .UW     (idx_width(RMOutstandingTransactions)),
-      .X_EXT  (0                                   ),
+    redmule_mm_wrap #(
+      .DataW                   (RMDataWidth                         ),
+      .MisalignedAccessSupport (0                                   ),
+      .EnableReordering        (1'b1                                ),
+      .FpFormat                (fpnew_pkg::FP16                     ),
+      .Height                  (ARRAY_HEIGHT                        ),
+      .Width                   (ARRAY_WIDTH                         ),
+      .NumPipeRegs             (PIPE_REGS                           ),
       .`HCI_SIZE_PARAM(tcdm) (`HCI_SIZE_PARAM(tcdm))
-    ) i_redmule_top (
+    ) i_redmule_wrap (
       .clk_i              (clk_i                     ),
       .rst_ni             (rst_ni                    ),
       .test_mode_i        ('0                        ),
       .evt_o              (redmule_evt               ),
       .busy_o             (/* Unused */              ),
+      .sync_o             (/* Unused */              ),
+      .sync_i             (1'b0                      ),
       .tcdm               (tcdm                      ),
-      .xif_issue_if_i     (core_xif.coproc_issue     ),
-      .xif_result_if_o    (core_xif.coproc_result    ),
-      .xif_compressed_if_i(core_xif.coproc_compressed),
-      .xif_mem_if_o       (core_xif.coproc_mem       ),
-      .periph             (redmule_rmcfg             )
+      .target             (redmule_rmcfg             )
     );
 
-    assign wake_up = wake_up_q | {{(NumCoresPerTile-1){1'b0}}, redmule_evt[0]};
+    assign wake_up = wake_up_q | {{(NumCoresPerTile-1){1'b0}}, redmule_evt};
 
     // ----------------------------------------------------------------------
     // WP2 wide source path: issue each RedMulE HCI beat as one raw wide access.
@@ -1430,28 +1438,28 @@ module mempool_tile
       .EnableSeqInterleaveSwap (1'b1             ),
       .EnableTileIdRemap       (TileIdRemap      )
     ) i_rm_wide_scrambler (
-      .address_i (tcdm.req_add        ),
+      .address_i (tcdm.add            ),
       .address_o (tcdm_wide_rm_req.addr)
     );
 
     // ----- RedMulE HCI <-> wide shim, the ONLY translation point -----
-    // HCI convention: req_wen==1 is a read, so write is its inverse. meta_id
+    // HCI convention: wen==1 is a read, so write is its inverse. meta_id
     // packs the stream id + ROB id exactly as the narrow unpack does, so
     // RedMulE's hci_core_rob still matches responses by id.
-    assign tcdm_wide_rm_req.write                  = ~tcdm.req_wen;
+    assign tcdm_wide_rm_req.write                  = ~tcdm.wen;
     assign tcdm_wide_rm_req.amo                    = '0;
-    assign tcdm_wide_rm_req.data                   = tcdm.req_data;
-    assign tcdm_wide_rm_req.strb                   = tcdm.req_be;
-    assign tcdm_wide_rm_req.id[MetaIdWidth-1:RobW] = tcdm.req_id;
-    assign tcdm_wide_rm_req.id[RobW-1:0]           = tcdm.req_user;
-    assign tcdm_wide_rm_req_valid                  = tcdm.req_valid;
-    assign tcdm.req_ready                          = tcdm_wide_rm_req_ready;
+    assign tcdm_wide_rm_req.data                   = tcdm.data;
+    assign tcdm_wide_rm_req.strb                   = tcdm.be;
+    assign tcdm_wide_rm_req.id[MetaIdWidth-1:RobW] = tcdm.id;
+    assign tcdm_wide_rm_req.id[RobW-1:0]           = tcdm.user;
+    assign tcdm_wide_rm_req_valid                  = tcdm.req;
+    assign tcdm.gnt                                = tcdm_wide_rm_req_ready;
 
-    assign tcdm.resp_data          = tcdm_wide_rm_resp.data;
-    assign tcdm.resp_id            = tcdm_wide_rm_resp.id[MetaIdWidth-1:RobW];
-    assign tcdm.resp_user          = tcdm_wide_rm_resp.id[RobW-1:0];
-    assign tcdm.resp_valid         = tcdm_wide_rm_resp_valid;
-    assign tcdm_wide_rm_resp_ready = tcdm.resp_ready;
+    assign tcdm.r_data             = tcdm_wide_rm_resp.data;
+    assign tcdm.r_id               = tcdm_wide_rm_resp.id[MetaIdWidth-1:RobW];
+    assign tcdm.r_user             = tcdm_wide_rm_resp.id[RobW-1:0];
+    assign tcdm.r_valid            = tcdm_wide_rm_resp_valid;
+    assign tcdm_wide_rm_resp_ready = tcdm.r_ready;
 
     // The shim splits own-tile from every other tile; the same-group /
     // other-group decision is made by i_mempool_tile_remote_req_router, which
@@ -1634,21 +1642,21 @@ module mempool_tile
     `else
     // Unpack the wide HCI tcdm port into RMMasterPorts narrow ports.
     for (genvar p = 0; p < RMMasterPorts; p++) begin: gen_redmule_tcdm_unpack
-      assign redmule_req[p].addr  = tcdm.req_add + p*4;
-      assign redmule_req[p].write = ~tcdm.req_wen;
-      assign redmule_req[p].strb  = tcdm.req_be[(p+1)*4-1:p*4];
-      assign redmule_req[p].data  = tcdm.req_data[(p+1)*DataWidth-1:p*DataWidth];
+      assign redmule_req[p].addr  = tcdm.add + p*4;
+      assign redmule_req[p].write = ~tcdm.wen;
+      assign redmule_req[p].strb  = tcdm.be[(p+1)*4-1:p*4];
+      assign redmule_req[p].data  = tcdm.data[(p+1)*DataWidth-1:p*DataWidth];
       assign redmule_req[p].amo   = '0;
-      assign redmule_req[p].id[mempool_pkg::MetaIdWidth-1:idx_width(RMOutstandingTransactions)] = tcdm.req_id;
-      assign redmule_req[p].id[idx_width(RMOutstandingTransactions)-1:0] = tcdm.req_user;
-      assign tcdm.resp_data[(p+1)*DataWidth-1:p*DataWidth] = redmule_resp[p].data;
+      assign redmule_req[p].id[mempool_pkg::MetaIdWidth-1:idx_width(RMOutstandingTransactions)] = tcdm.id;
+      assign redmule_req[p].id[idx_width(RMOutstandingTransactions)-1:0] = tcdm.user;
+      assign tcdm.r_data[(p+1)*DataWidth-1:p*DataWidth] = redmule_resp[p].data;
     end : gen_redmule_tcdm_unpack
-    assign redmule_req_valid  = {RMMasterPorts{tcdm.req_valid}};
-    assign tcdm.req_ready     = &(redmule_req_ready);
-    assign tcdm.resp_valid    = &(redmule_resp_valid);
-    assign redmule_resp_ready = {RMMasterPorts{tcdm.resp_ready}};
-    assign tcdm.resp_id       = redmule_resp[0].id[mempool_pkg::MetaIdWidth-1:idx_width(RMOutstandingTransactions)];
-    assign tcdm.resp_user     = redmule_resp[0].id[idx_width(RMOutstandingTransactions)-1:0];
+    assign redmule_req_valid  = {RMMasterPorts{tcdm.req}};
+    assign tcdm.gnt           = &(redmule_req_ready);
+    assign tcdm.r_valid       = &(redmule_resp_valid);
+    assign redmule_resp_ready = {RMMasterPorts{tcdm.r_ready}};
+    assign tcdm.r_id          = redmule_resp[0].id[mempool_pkg::MetaIdWidth-1:idx_width(RMOutstandingTransactions)];
+    assign tcdm.r_user        = redmule_resp[0].id[idx_width(RMOutstandingTransactions)-1:0];
 
     /************************************
      *  Handshake glue (stream regs)    *

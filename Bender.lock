@@ -105,8 +105,8 @@ packages:
     dependencies:
     - common_cells
   hci:
-    revision: 8ed2c83871dbe13a8f3ef5ef6c148b6259b7f1c3
-    version: 2.5.0
+    revision: a8d8132b7f7839fd55f92df65cdc3e361ea80a6b
+    version: 2.6.1
     source:
       Git: https://github.com/pulp-platform/hci.git
     dependencies:
@@ -117,15 +117,16 @@ packages:
     - redundancy_cells
     - register_interface
   hwpe-ctrl:
-    revision: 3690a3c648f120546d8de2bc583d5170c36d2f20
-    version: 2.0.0
+    revision: dfcf1cb746709de206377388bbcb4a3571e24f7b
+    version: 3.1.1
     source:
       Git: https://github.com/pulp-platform/hwpe-ctrl.git
     dependencies:
+    - common_cells
     - tech_cells_generic
   hwpe-stream:
-    revision: b3d33afdd27e79bcda1348d0ab5f4afd52c03106
-    version: 1.9.0
+    revision: 05cb8303693065812e9d6bfe10976220fb455666
+    version: 1.10.0
     source:
       Git: https://github.com/pulp-platform/hwpe-stream.git
     dependencies:
@@ -153,16 +154,8 @@ packages:
     source:
       Git: https://github.com/pulp-platform/L2_tcdm_hybrid_interco.git
     dependencies: []
-  obi:
-    revision: 8097928cf1b43712f93d5356f336397879b4ad2c
-    version: 0.1.6
-    source:
-      Git: https://github.com/pulp-platform/obi.git
-    dependencies:
-    - common_cells
-    - common_verification
   redmule:
-    revision: 449b2c33ce4fa9f3aec8a33114f8c7aaac659288
+    revision: 8608ec01f91fdab0cc232d533cfa172a94274275
     version: null
     source:
       Git: https://github.com/pulp-platform/redmule.git
@@ -175,8 +168,6 @@ packages:
     - hwpe-ctrl
     - hwpe-stream
     - ibex
-    - obi
-    - register_interface
     - tech_cells_generic
   redundancy_cells:
     revision: c37bdb47339bf70e8323de8df14ea8bbeafb6583

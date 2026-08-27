@@ -1,514 +1,120 @@
-diff --git a/hardware/deps/redmule/rtl/redmule_complex.sv b/hardware/deps/redmule/rtl/redmule_complex.sv
-index 8354bf4..752257e 100644
---- a/hardware/deps/redmule/rtl/redmule_complex.sv
-+++ b/hardware/deps/redmule/rtl/redmule_complex.sv
-@@ -78,7 +78,7 @@ module redmule_complex
-   output core_inst_req_t               core_inst_req_o   ,
-   input  core_data_rsp_t               core_data_rsp_i   ,
-   output core_data_req_t               core_data_req_o   ,
--  hci_outstanding_intf.initiator              tcdm
-+  hci_variablelatency_intf.initiator          tcdm
- );
+diff --git a/hardware/deps/redmule/Bender.yml b/hardware/deps/redmule/Bender.yml
+index 6d20fcd..4db3ca9 100644
+--- a/hardware/deps/redmule/Bender.yml
++++ b/hardware/deps/redmule/Bender.yml
+@@ -18,7 +18,7 @@ dependencies:
+   hwpe-stream       : { git: "https://github.com/pulp-platform/hwpe-stream.git"       , version: 1.9.2                                }
+   hwpe-ctrl         : { git: "https://github.com/pulp-platform/hwpe-ctrl.git"         , version: 3.1.1                                } 
+   hci               : { git: "https://github.com/pulp-platform/hci.git"               , version: 2.6.1                                }
+-  fpnew             : { git: "https://github.com/pulp-platform/cvfpu.git"             , rev: "pulp-v0.1.3"                            }
++  fpnew             : { git: "https://github.com/pulp-platform/cvfpu.git"             , rev: "pulp-v0.2.3"                            }
+   common_cells      : { git: "https://github.com/pulp-platform/common_cells.git"      , version: 1.38.0                               }
+   tech_cells_generic: { git: "https://github.com/pulp-platform/tech_cells_generic.git", version: 0.2.11                               }
  
- localparam int unsigned XExt = (CoreType == CV32X) ? 1 : 0;
 diff --git a/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv b/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
-index d6d00ae..c751ab7 100644
+index e407b3a..8d8fa67 100644
 --- a/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
 +++ b/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
-@@ -26,6 +26,10 @@ module redmule_memory_scheduler
-   output cntrl_streamer_t       cntrl_streamer_o
- );
-   localparam int unsigned JMP = NumByte*(DATA_W/MemDw);
-+  // Elements in one TCDM access, and their size in bytes. Both compile-time:
-+  // JMP is the byte stride of one access and an access is PortWidthElems wide.
-+  localparam int unsigned PortWidthElems = ARRAY_HEIGHT*(PIPE_REGS+1);
-+  localparam int unsigned ElemBytes      = JMP/PortWidthElems;
+@@ -242,6 +242,7 @@ module redmule_memory_scheduler
  
-   logic [31:0]        x_cols_offs_d, x_cols_offs_q;
-   logic [31:0]        x_rows_offs_d, x_rows_offs_q;
-@@ -39,6 +43,31 @@ module redmule_memory_scheduler
+   assign num_x_reads = x_rows_iters_q == x_config.x_rows_iter-1 && x_config.x_rows_lftovr != '0 ? x_config.x_rows_lftovr : W;
  
-   logic [$clog2(W):0] num_x_reads;
- 
-+  // --- X contraction-start offset (REDMULE_XSHIFT) --------------------------
-+  // redmule_tiler republishes the EFFECTIVE shift at X_SHIFT, so zero here means
-+  // "no rotation" and nothing else has to re-validate it.
-+  //
-+  // X rotates by adding the shift to the natural column offset and wrapping
-+  // inside the X row; x_cols_offs_q itself keeps its plain 0..(iters-1)
-+  // progression, so no iteration counter or reset value changes and a zero shift
-+  // is bit-identical to an unrotated build. W rotates inside its own address
-+  // generator, which walks the contraction on d0 -- see the d0_offset /
-+  // d0_wrap_cnt control further down. The two must move together: X chunk c
-+  // pairs with W rows [c*PortWidthElems, (c+1)*PortWidthElems).
-+  //
-+  // X_D1_STRIDE is the X row length in bytes, which is the wrap span: the tiler
-+  // only lets the shift through when the X columns have no leftover tile, and
-+  // then the row is exactly x_cols_iter whole accesses.
-+  logic [31:0] x_shift_bytes;
-+  logic [31:0] x_cols_offs_sum;
-+  logic [31:0] x_cols_offs_shifted;
 +
-+  assign x_shift_bytes   = reg_file_i.hwpe_params[X_SHIFT]*ElemBytes;
-+  assign x_cols_offs_sum = x_cols_offs_q + x_shift_bytes;
-+  assign x_cols_offs_shifted =
-+      (x_cols_offs_sum >= reg_file_i.hwpe_params[X_D1_STRIDE]) ?
-+      x_cols_offs_sum - reg_file_i.hwpe_params[X_D1_STRIDE] : x_cols_offs_sum;
-+
-   always_ff @(posedge clk_i or negedge rst_ni) begin : x_cols_iters_register
-     if (~rst_ni) begin
-         x_cols_iters_q <= '0;
-@@ -130,7 +159,7 @@ module redmule_memory_scheduler
-   assign cntrl_streamer_o.x_stream_source_ctrl.req_start = !cntrl_flags_i.idle && flgs_streamer_i.x_stream_source_flags.ready_start &&
-                                                            (cntrl_scheduler_i.first_load || tot_x_read_q < reg_file_i.hwpe_params[TOT_X_READ]);
-   assign cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.base_addr = reg_file_i.hwpe_params[X_ADDR]
--                                                                    + x_rows_offs_q + x_cols_offs_q;
-+                                                                    + x_rows_offs_q + x_cols_offs_shifted;
-   assign cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.tot_len = num_x_reads;
-   assign cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.d0_len = 'd1;
-   assign cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.d0_stride = 'd0;
-@@ -138,6 +167,11 @@ module redmule_memory_scheduler
-   assign cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.d1_stride = reg_file_i.hwpe_params[X_D1_STRIDE];
-   assign cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.d2_stride = '0;
-   assign cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.dim_enable_1h = 2'b11;
-+  // X rotates through base_addr (x_cols_offs_shifted), not through the
-+  // address generator: its d0 is a single beat and the contraction chunk is
-+  // selected per stream restart.
-+  assign cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.d0_offset = '0;
-+  assign cntrl_streamer_o.x_stream_source_ctrl.addressgen_ctrl.d0_wrap_cnt = '0;
- 
-   // Here we initialize the streamer source signals
-   // for the W stream source
-@@ -150,30 +184,47 @@ module redmule_memory_scheduler
-   assign cntrl_streamer_o.w_stream_source_ctrl.addressgen_ctrl.d1_stride = JMP;
-   assign cntrl_streamer_o.w_stream_source_ctrl.addressgen_ctrl.d2_stride = 'd0;
-   assign cntrl_streamer_o.w_stream_source_ctrl.addressgen_ctrl.dim_enable_1h = 2'b11;
-+  // W is issued once for the whole job and walks the contraction on d0, so
-+  // its rotation has to happen inside the address generator: start at
-+  // d0_offset and wrap back to the base after d0_wrap_cnt rows. One W row is
-+  // one contraction element, so the row offset is the shift itself.
-+  assign cntrl_streamer_o.w_stream_source_ctrl.addressgen_ctrl.d0_offset =
-+      reg_file_i.hwpe_params[X_SHIFT_W_OFFS];
-+  assign cntrl_streamer_o.w_stream_source_ctrl.addressgen_ctrl.d0_wrap_cnt =
-+      (reg_file_i.hwpe_params[X_SHIFT] == '0) ? '0 :
-+      reg_file_i.hwpe_params[W_ITERS][31:16] - reg_file_i.hwpe_params[X_SHIFT];
- 
-   // Here we initialize the streamer source signals
-   // for the Y stream source
-   assign cntrl_streamer_o.y_stream_source_ctrl.req_start = cntrl_scheduler_i.first_load && reg_file_i.hwpe_params[OP_SELECTION][0] && flgs_streamer_i.y_stream_source_flags.ready_start;
-   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.base_addr = reg_file_i.hwpe_params[Z_ADDR];
--  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.tot_len = reg_file_i.hwpe_params[Z_TOT_LEN];
--  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_len = W;
-+  // Y/Z move the M dimension on d0 (d0_len columns) over the K tiles on d1. For a single
-+  // M-tile (x_rows_iter==1) only num_x_reads of the W columns are real M rows, so clamp
-+  // d0_len and tot_len to the valid count; multi-M-tile keeps the full tiled length.
-+  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.tot_len = (reg_file_i.hwpe_params[X_ITERS][31:16] == 'd1) ? num_x_reads * reg_file_i.hwpe_params[W_ITERS][15:0] : reg_file_i.hwpe_params[Z_TOT_LEN];
-+  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_len = num_x_reads;
-   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_stride = reg_file_i.hwpe_params[Z_D0_STRIDE];
-   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d1_len = reg_file_i.hwpe_params[W_ITERS][15:0];
-   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d1_stride = JMP;
-   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d2_stride = reg_file_i.hwpe_params[Z_D2_STRIDE];
-   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.dim_enable_1h = 2'b11;
-+  // Y/Z address the OUTPUT, which the contraction order does not move.
-+  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_offset = '0;
-+  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_wrap_cnt = '0;
- 
-   // Here we initialize the streamer sink signals for
-   // the Z stream sink
-   assign cntrl_streamer_o.z_stream_sink_ctrl.req_start = cntrl_scheduler_i.first_load && flgs_streamer_i.z_stream_sink_flags.ready_start;
-   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.base_addr = reg_file_i.hwpe_params[Z_ADDR];
--  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.tot_len = reg_file_i.hwpe_params[Z_TOT_LEN];
--  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_len = W;
-+  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.tot_len = (reg_file_i.hwpe_params[X_ITERS][31:16] == 'd1) ? num_x_reads * reg_file_i.hwpe_params[W_ITERS][15:0] : reg_file_i.hwpe_params[Z_TOT_LEN];
-+  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_len = num_x_reads;
-   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_stride = reg_file_i.hwpe_params[Z_D0_STRIDE];
-   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_len = reg_file_i.hwpe_params[W_ITERS][15:0];
-   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_stride = JMP;
-   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d2_stride = reg_file_i.hwpe_params[Z_D2_STRIDE];
-   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.dim_enable_1h = 2'b11;
-+  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_offset = '0;
-+  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_wrap_cnt = '0;
- 
-   assign cntrl_streamer_o.input_cast_src_fmt  = fpnew_pkg::fp_format_e'(reg_file_i.hwpe_params[OP_SELECTION][15:13]);
-   assign cntrl_streamer_o.input_cast_dst_fmt  = fpnew_pkg::fp_format_e'(reg_file_i.hwpe_params[OP_SELECTION][12:10]);
+   always_comb begin : address_gen_signals
+     // Here we initialize the streamer source signals
+     // for the X stream source
+@@ -273,8 +274,15 @@ module redmule_memory_scheduler
+     // Here we initialize the streamer source signals
+     // for the Y stream source
+     cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.base_addr = y_config.y_addr;
+-    cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.tot_len = y_config.yz_tot_len;
+-    cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_len = W;
++    // Y/Z walk the M dimension on d0 (d0_len columns) over the K tiles on d1, with the
++    // M tiles carried by d2. In the trailing M tile only x_rows_lftovr of the Width d0
++    // columns are real M rows, so a fixed d0_len = W over-runs into the next output row
++    // and clobbers the neighbouring tile's Z whenever m_size % Width != 0. The address
++    // generator samples ctrl_i live, so tracking num_x_reads gives the per-M-tile count;
++    // tot_len only needs the clamp when the whole job is one (partial) M tile.
++    cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.tot_len = y_config.x_rows_iter == 'd1 ?
++        32'(num_x_reads) * 32'(y_config.w_cols_iter) : y_config.yz_tot_len;
++    cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_len = num_x_reads;
+     cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_stride = y_config.yz_d0_stride;
+     cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d1_len = y_config.w_cols_iter;
+     cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d1_stride = JMP;
+@@ -286,8 +294,9 @@ module redmule_memory_scheduler
+     // Here we initialize the streamer sink signals for
+     // the Z stream sink
+     cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.base_addr = z_config.z_addr;
+-    cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.tot_len = z_config.yz_tot_len;
+-    cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_len = W;
++    cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.tot_len = z_config.x_rows_iter == 'd1 ?
++        32'(num_x_reads) * 32'(z_config.w_cols_iter) : z_config.yz_tot_len;
++    cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_len = num_x_reads;
+     cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_stride = z_config.yz_d0_stride;
+     cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_len = z_config.w_cols_iter;
+     cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_stride = JMP;
 diff --git a/hardware/deps/redmule/rtl/redmule_pkg.sv b/hardware/deps/redmule/rtl/redmule_pkg.sv
-index 68ae4c7..4bd4153 100644
+index c9565f4..f5a6f45 100644
 --- a/hardware/deps/redmule/rtl/redmule_pkg.sv
 +++ b/hardware/deps/redmule/rtl/redmule_pkg.sv
-@@ -85,6 +85,20 @@ package redmule_pkg;
-   // [12:10] -> computing format
-   // [0:0]   -> GEMM selection
-   parameter int unsigned OP_SELECTION = 17; // 0x44
-+  // X contraction-start offset, in elements along N. Software writes the raw
-+  // request here; the tiler validates it and republishes the EFFECTIVE value at
-+  // the same index (0 when the job cannot be rotated safely), so one place
-+  // decides and the memory scheduler can trust what it reads.
-+  //
-+  // 0x18 -- what the software header used to name -- is LEFT_PARAMS, which
-+  // redmule_tiler.sv drives across all 32 bits from tot_stores, so a write
-+  // there was silently discarded. 0x48/0x4C are the first free slots below the
-+  // ECC island at 0x90. Keep archi_redmule.h and the GVSoC model in step.
-+  parameter int unsigned X_SHIFT        = 18; // 0x48
-+  // Tiler-derived: X_SHIFT (in W rows) times W_D0_STRIDE, i.e. the W address
-+  // generator's d0 byte offset. Derived here because the tiler is the config
-+  // block that already carries the wide multiplies.
-+  parameter int unsigned X_SHIFT_W_OFFS = 19; // 0x4C
+@@ -11,7 +11,14 @@ import hci_package::*;
+ import hwpe_stream_package::*;
  
-   parameter int unsigned HCI_ECC_MASK = 4'b1001; // 0x90-0x9C
- 
-@@ -258,6 +272,8 @@ package redmule_pkg;
-     logic [31:0] x_rows_offs;
-     logic [31:0] x_buffer_slots;
-     logic [31:0] x_tot_len;
-+    logic [31:0] x_shift;
-+    logic [31:0] x_shift_w_offs;
-     rnd_mode_e stage_1_rnd_mode;
-     rnd_mode_e stage_2_rnd_mode;
-     fpu_op_e stage_1_op;
+ package redmule_pkg;
+-  parameter int unsigned MaxDim               = 32;
++  // MaxDim sizes every control field that carries an array coordinate, so it has to
++  // cover the largest configured dimension. Upstream fixes it at 32, which silently
++  // truncates a build with Width or Height above that; TeraNoC drives the geometry
++  // from ARRAY_WIDTH/ARRAY_HEIGHT, so raise the ceiling to match when they are set.
++  localparam int unsigned CfgWidth  = `ifdef ARRAY_WIDTH `ARRAY_WIDTH `else 32 `endif;
++  localparam int unsigned CfgHeight = `ifdef ARRAY_HEIGHT `ARRAY_HEIGHT `else 32 `endif;
++  localparam int unsigned CfgMaxDim = CfgWidth > CfgHeight ? CfgWidth : CfgHeight;
++  parameter int unsigned MaxDim               = CfgMaxDim > 32 ? CfgMaxDim : 32;
+   parameter int unsigned MaxPipeRegs          = 4;
+   parameter int unsigned MaxDepth             = MaxDim * MaxPipeRegs;
+   parameter int unsigned MaxDataW             = MaxDepth * 16;
 diff --git a/hardware/deps/redmule/rtl/redmule_scheduler.sv b/hardware/deps/redmule/rtl/redmule_scheduler.sv
-index f028c90..efc7a44 100644
+index 601c785..8618183 100644
 --- a/hardware/deps/redmule/rtl/redmule_scheduler.sv
 +++ b/hardware/deps/redmule/rtl/redmule_scheduler.sv
-@@ -417,7 +417,11 @@ module redmule_scheduler
-   assign y_push_counter_d = y_push_counter_q == y_height-1 ? '0 : y_push_counter_q + 1;
-   assign y_push_clr       = y_push_en && ~stall_engine && y_push_counter_q == y_height-1;
+@@ -680,10 +680,17 @@ module redmule_scheduler
+   assign y_push_counter_d = y_push_counter_q == y_push_height-1 ? '0 : y_push_counter_q + 1;
+   assign y_push_clr       = y_push_en && ~stall_engine && y_push_counter_q == y_push_height-1;
  
--  assign y_width  = y_rows_iter_q == reg_file_i.hwpe_params[W_ITERS][31:16]-1 && reg_file_i.hwpe_params[LEFTOVERS][15:8] != '0 ? reg_file_i.hwpe_params[LEFTOVERS][15:8] : W;
-+  // y_width/z_width count Z STORE columns = the M dimension (M -> ARRAY_WIDTH), so they
-+  // must clamp on the X-rows (M) leftover like cntrl_x_buffer_o.width does (line 149),
-+  // NOT on the w_rows (N) leftover. Clamping on N left the Z store streaming W columns
-+  // of which only x_rows_lftovr were valid, clobbering the neighbouring tile's Z.
-+  assign y_width  = x_rows_iter_q == reg_file_i.hwpe_params[X_ITERS][31:16]-1 && reg_file_i.hwpe_params[LEFTOVERS][31:24] != '0 ? reg_file_i.hwpe_params[LEFTOVERS][31:24] : W;
-   assign y_height = y_cols_iter_q == reg_file_i.hwpe_params[W_ITERS][15:0]-1 && reg_file_i.hwpe_params[LEFTOVERS][7:0] != '0 ? reg_file_i.hwpe_params[LEFTOVERS][7:0] : D;
+-  assign y_width  = y_rows_iter_q == y_config_fast.w_rows_iter-1 && y_config_fast.w_rows_lftovr != '0 ? y_config_fast.w_rows_lftovr : W;
++  // y_width/z_width count Z STORE columns, i.e. the M dimension mapped onto Width,
++  // so they must clamp on the X-rows (M) leftover exactly like cntrl_x_buffer_o.width
++  // above -- NOT on the w_rows (N) leftover. y_rows_iter_q/z_rows_iter_q already wrap
++  // on x_rows_iter (see their _d assignments), so comparing them against w_rows_iter
++  // mixed two different loops. Clamping on N made the Z store stream Width columns of
++  // which only x_rows_lftovr were valid, clobbering the neighbouring tile's Z whenever
++  // m_size % Width != 0.
++  assign y_width  = y_rows_iter_q == y_config_fast.x_rows_iter-1 && y_config_fast.x_rows_lftovr != '0 ? y_config_fast.x_rows_lftovr : W;
+   assign y_height = y_cols_iter_q == y_config_fast.w_cols_iter-1 && y_config_fast.w_cols_lftovr != '0 ? y_config_fast.w_cols_lftovr : D;
+ 
+-  assign z_width_next  = z_rows_iter_q == z_config_fast.w_rows_iter-1 && z_config_fast.w_rows_lftovr != '0 ? z_config_fast.w_rows_lftovr : W;
++  assign z_width_next  = z_rows_iter_q == z_config_fast.x_rows_iter-1 && z_config_fast.x_rows_lftovr != '0 ? z_config_fast.x_rows_lftovr : W;
+   assign z_height_next = z_cols_iter_q == z_config_fast.w_cols_iter-1 && z_config_fast.w_cols_lftovr != '0 ? z_config_fast.w_cols_lftovr : D;
  
    always_ff @(posedge clk_i or negedge rst_ni) begin : z_width_register
-@@ -559,17 +563,24 @@ module redmule_scheduler
-   // Check if the new Y rows are loaded and ready to be pushed
-   // Only enable this check when the results of an iteration are available
-   assign check_y_loaded    = flgs_z_buffer_i.loaded;
--  assign check_y_loaded_en = z_wait_counter_q == PIPE_REGS && ~w_done;
-+  // Gate on Y actually being used (OP_SELECTION[0]): MATMUL never streams Y, so the
-+  // z-buffer never reaches `loaded` and the engine writes Z directly (EMPTY->PUSHED). Without this
-+  // gate the check races w_done: fast memory finishes W before the check window and skips it, but
-+  // high-latency (mesh) memory trips the window while W is still loading and deadlocks LOAD_W
-+  // waiting for a Y that never comes. Behaviour is unchanged when Y is used.
-+  assign check_y_loaded_en = z_wait_counter_q == PIPE_REGS && ~w_done
-+                          && reg_file_i.hwpe_params[OP_SELECTION][0];
- 
-   /******************************
-    *           FLAGS            *
-    ******************************/
- 
--  assign stall_engine = current_state == LOAD_W && (
-+  assign stall_engine = (current_state == LOAD_W && (
-                           ~check_w_valid  && check_w_valid_en  ||
-                           ~check_x_full   && check_x_full_en   ||
-                           ~check_y_loaded && check_y_loaded_en
--                        );
-+                        ))
-+                        || (z_wait_counter_q == PIPE_REGS && flgs_z_buffer_i.z_priority);
- 
-   always_ff @(posedge clk_i or negedge rst_ni) begin : first_load_register
-     if(~rst_ni) begin
-diff --git a/hardware/deps/redmule/rtl/redmule_streamer.sv b/hardware/deps/redmule/rtl/redmule_streamer.sv
-index f44d741..86f0a66 100644
---- a/hardware/deps/redmule/rtl/redmule_streamer.sv
-+++ b/hardware/deps/redmule/rtl/redmule_streamer.sv
-@@ -135,6 +135,12 @@ hci_core_rob #(
- );
- 
- flags_fifo_t z_fifo_flags;
-+hci_streamer_flags_t z_sink_flags;
-+logic z_sink_done_pending_q;
-+logic z_sink_done;
-+logic [31:0] z_store_outstanding_q;
-+logic z_store_req_fire;
-+logic z_store_rsp_fire;
- logic [NumStreamSources:0][$clog2(NumStreamSources+1)-1:0] priority_encoding;
- assign priority_encoding[0] = 0;
- assign priority_encoding[1] = 1;
-@@ -199,9 +205,61 @@ hci_core_sink #(
-   .tcdm                ( zstream2cast                ),
-   .stream              ( z_stream_i                  ),
-   .ctrl_i              ( ctrl_i.z_stream_sink_ctrl   ),
--  .flags_o             ( flags_o.z_stream_sink_flags )
-+  .flags_o             ( z_sink_flags                 )
- );
- 
-+// The sink's done pulse only means that every Z store has entered i_z_fifo.
-+// Keep the job active until that FIFO drains and all issued stores are
-+// acknowledged; otherwise a following software clear can discard queued stores
-+// or let the next job observe incomplete output.
-+assign z_store_req_fire = virt_tcdm_rob[3].req && virt_tcdm_rob[3].gnt;
-+assign z_store_rsp_fire = virt_tcdm_rob[3].r_valid && virt_tcdm_rob[3].r_ready;
-+
-+always_ff @(posedge clk_i or negedge rst_ni) begin : z_store_outstanding_reg
-+  if (!rst_ni) begin
-+    z_store_outstanding_q <= '0;
-+  end else begin
-+    case ({z_store_req_fire, z_store_rsp_fire})
-+      2'b10: z_store_outstanding_q <= z_store_outstanding_q + 1'b1;
-+      2'b01: begin
-+        if (z_store_outstanding_q != '0) begin
-+          z_store_outstanding_q <= z_store_outstanding_q - 1'b1;
-+        end
-+      end
-+      default: z_store_outstanding_q <= z_store_outstanding_q;
-+    endcase
-+  end
-+end
-+
-+`ifndef SYNTHESIS
-+always_ff @(posedge clk_i) begin : z_store_outstanding_assert
-+  if (rst_ni) begin
-+    assert (!(z_store_rsp_fire && !z_store_req_fire && (z_store_outstanding_q == '0)))
-+      else $error("RedMulE Z-store response arrived with no outstanding store");
-+  end
-+end
-+`endif
-+
-+assign z_sink_done = (z_sink_done_pending_q || z_sink_flags.done) &&
-+                     z_fifo_flags.empty && (z_store_outstanding_q == '0);
-+
-+always_ff @(posedge clk_i or negedge rst_ni) begin : z_sink_done_pending_reg
-+  if (!rst_ni) begin
-+    z_sink_done_pending_q <= 1'b0;
-+  end else if (clear_i) begin
-+    z_sink_done_pending_q <= 1'b0;
-+  end else if (z_sink_done) begin
-+    z_sink_done_pending_q <= 1'b0;
-+  end else if (z_sink_flags.done) begin
-+    z_sink_done_pending_q <= 1'b1;
-+  end
-+end
-+
-+always_comb begin : z_sink_flags_comb
-+  flags_o.z_stream_sink_flags = z_sink_flags;
-+  flags_o.z_stream_sink_flags.done = z_sink_done;
-+end
-+
- // Store interface.
- hci_core_intf #(
-   .WAIVE_RQ4_ASSERT  ( 1'b1 ),
-diff --git a/hardware/deps/redmule/rtl/redmule_tiler.sv b/hardware/deps/redmule/rtl/redmule_tiler.sv
-index cda8fc8..ce700ba 100644
---- a/hardware/deps/redmule/rtl/redmule_tiler.sv
-+++ b/hardware/deps/redmule/rtl/redmule_tiler.sv
-@@ -240,6 +240,47 @@ assign config_d.yz_d2_stride = ARRAY_WIDTH*config_d.w_d0_stride;
- assign config_d.tot_x_read   = x_rows_by_w_cols_by_x_cols_iter[31:0];
- assign config_d.x_tot_len    = '0; // not used
- 
-+// X contraction-start offset (REDMULE_XSHIFT). Every engine otherwise walks the
-+// contraction from element 0, so after a barrier they all address the same L1
-+// tile and drain through it one at a time. Starting each engine elsewhere and
-+// wrapping fixes that: the set of accumulated products is unchanged, only the
-+// summation order, so the result is bit-identical to an unshifted job only if X
-+// and W rotate TOGETHER. X chunk c pairs with W rows
-+// [c*ARRAY_HEIGHT*(PIPE_REGS+1), (c+1)*ARRAY_HEIGHT*(PIPE_REGS+1)), so the
-+// software-supplied shift must be a whole number of accesses; it is a
-+// performance knob and must never change the result, so anything that would
-+// make the wrap land mid-tile disables it here rather than downstream:
-+//   * a leftover X-column or W-row tile, where the trailing tile is partial;
-+//   * a shift at or past the contraction length.
-+// The effective value is republished at X_SHIFT, so redmule_memory_scheduler
-+// only has to test it against zero.
-+// The access width is a power of two for every supported geometry, which makes
-+// the "whole number of accesses" test a mask instead of a modulo. If it ever is
-+// not, the shift disables itself rather than rotating X and W out of step.
-+localparam int unsigned PortWidthElems = ARRAY_HEIGHT*(PIPE_REGS+1);
-+localparam bit          PortWidthPow2  =
-+    ((PortWidthElems & (PortWidthElems-1)) == 0);
-+
-+logic [31:0] x_shift_req;
-+logic        x_shift_ok;
-+assign x_shift_req = reg_file_i.hwpe_params[X_SHIFT];
-+assign x_shift_ok  = PortWidthPow2
-+                  && (x_shift_req != '0)
-+                  && (x_shift_req < {16'd0, config_d.n_size})
-+                  && ((x_shift_req & (PortWidthElems-1)) == '0)
-+                  && (config_d.x_cols_lftovr == '0)
-+                  && (config_d.w_rows_lftovr == '0);
-+assign config_d.x_shift        = x_shift_ok ? x_shift_req : '0;
-+assign config_d.x_shift_w_offs = x_shift_ok ? x_shift_req*config_d.w_d0_stride : '0;
-+
-+// pragma translate_off
-+initial begin : p_x_shift_port_width
-+  assert (PortWidthPow2)
-+    else $warning("[redmule_tiler] ARRAY_HEIGHT*(PIPE_REGS+1)=%0d is not a power of two, so REDMULE_XSHIFT is permanently disabled: the whole-access test would need a modulo.",
-+        PortWidthElems);
-+end
-+// pragma translate_on
-+
- // register configuration to avoid critical paths (maybe removable!)
- always_ff @(posedge clk_int or negedge rst_ni) begin
-   if(~rst_ni)
-@@ -264,6 +305,9 @@ end
- assign reg_file_o.generic_params = '0;
- assign reg_file_o.ext_data = '0;
- assign reg_file_o.hwpe_params[REGFILE_N_MAX_IO_REGS-1:REDMULE_REGS] = '0;
-+// Slots inside REDMULE_REGS that no config field claims. Without this they are
-+// undriven and read as X in simulation.
-+assign reg_file_o.hwpe_params[REDMULE_REGS-1:X_SHIFT_W_OFFS+1] = '0;
- assign reg_file_o.hwpe_params[      X_ADDR]        = config_d.x_addr; // do not register (these are straight from regfile)
- assign reg_file_o.hwpe_params[      Z_ADDR]        = config_q.z_addr;
- assign reg_file_o.hwpe_params[      W_ADDR]        = config_q.w_addr;
-@@ -287,6 +331,8 @@ assign reg_file_o.hwpe_params[ Z_D2_STRIDE]        = config_q.yz_d2_stride;
- assign reg_file_o.hwpe_params[ X_ROWS_OFFS]        = config_q.x_rows_offs;
- assign reg_file_o.hwpe_params[     X_SLOTS]        = config_q.x_buffer_slots;
- assign reg_file_o.hwpe_params[  IN_TOT_LEN]        = config_q.x_tot_len;
-+assign reg_file_o.hwpe_params[     X_SHIFT]        = config_q.x_shift;
-+assign reg_file_o.hwpe_params[X_SHIFT_W_OFFS]      = config_q.x_shift_w_offs;
- assign reg_file_o.hwpe_params[OP_SELECTION][31:29] = config_q.stage_1_rnd_mode;
- assign reg_file_o.hwpe_params[OP_SELECTION][28:26] = config_q.stage_2_rnd_mode;
- assign reg_file_o.hwpe_params[OP_SELECTION][25:21] = config_q.stage_1_op;
-diff --git a/hardware/deps/redmule/rtl/redmule_top.sv b/hardware/deps/redmule/rtl/redmule_top.sv
-index 0cc9072..1579bc2 100644
---- a/hardware/deps/redmule/rtl/redmule_top.sv
-+++ b/hardware/deps/redmule/rtl/redmule_top.sv
-@@ -279,7 +279,7 @@ redmule_w_buffer #(
-   .w_buffer_i  ( w_buffer_fifo.data )
- );
- 
--logic [Width-1:0][BITW-1:0] z_buffer_d, y_bias_q;
-+logic [Width-1:0][BITW-1:0] z_buffer_d, y_bias_q, engine_bias;
- redmule_z_buffer #(
-   .DW            ( DATAW              ),
-   .FpFormat      ( FpFormat           ),
-@@ -298,6 +298,13 @@ redmule_z_buffer #(
-   .z_strb_o      ( z_buffer_q.strb    )
- );
- 
-+// MATMUL does not stream an initial Y/Z addend. The reusable Z buffer still
-+// contains results from the preceding output traversal, so feeding it into the
-+// first FMA would seed later traversals with stale data. GEMM keeps the loaded
-+// addend; MATMUL starts every output traversal from +0 as architecturally
-+// required.
-+assign engine_bias = reg_file.hwpe_params[OP_SELECTION][0] ? y_bias_q : '0;
-+
- /*---------------------------------------------------------------*/
- /* |                          Engine                           | */
- /*---------------------------------------------------------------*/
-@@ -371,7 +378,7 @@ redmule_engine     #(
-   .rst_ni             ( rst_ni           ),
-   .x_input_i          ( x_buffer_q       ),
-   .w_input_i          ( w_buffer_q       ),
--  .y_bias_i           ( y_bias_q         ),
-+  .y_bias_i           ( engine_bias      ),
-   .z_output_o         ( z_buffer_d       ),
-   .fma_is_boxed_i     ( fma_is_boxed     ),
-   .noncomp_is_boxed_i ( noncomp_is_boxed ),
-diff --git a/hardware/deps/redmule/sw/archi_redmule.h b/hardware/deps/redmule/sw/archi_redmule.h
-index 1209f71..ea511c8 100644
---- a/hardware/deps/redmule/sw/archi_redmule.h
-+++ b/hardware/deps/redmule/sw/archi_redmule.h
-@@ -79,6 +79,20 @@
- #define REDMULE_MCFG0_PTR 0x0C
- #define REDMULE_MCFG1_PTR 0x10
- #define REDMULE_ARITH_PTR 0x14
-+// X contraction-start offset, in elements along N. The job runs
-+// [x_shift, n_size) and then wraps to [0, x_shift), so the set of accumulated
-+// products is unchanged -- only the summation order, which lets concurrent
-+// engines begin on different L1 tiles. Must be a multiple of the TCDM access
-+// width in elements (ARRAY_HEIGHT * (PIPE_REGS + 1)); the hardware ignores a
-+// shift it cannot apply exactly, so a value it cannot honour costs performance
-+// but never correctness.
-+//
-+// NOT 0x18. That slot is LEFT_PARAMS in redmule_pkg.sv and redmule_tiler.sv
-+// drives all 32 bits of it from tot_stores, so a write there was overwritten
-+// before use -- inert, but silently so. 0x48 is register index 18, the first
-+// genuinely free slot (0x00-0x44 used by the tiled config, ECC block at 0x90).
-+// redmule_pkg.sv X_SHIFT and the GVSoC light_redmule_v3 model must match.
-+#define REDMULE_XSHIFT_PTR 0x48
- 
- // ECC Registers
- #define REDMULE_ECC_REG_OFFS 0x90
-diff --git a/hardware/deps/redmule/sw/hal_redmule.h b/hardware/deps/redmule/sw/hal_redmule.h
-index b809ed1..11b843f 100644
---- a/hardware/deps/redmule/sw/hal_redmule.h
-+++ b/hardware/deps/redmule/sw/hal_redmule.h
-@@ -8,22 +8,26 @@
- #ifndef __HAL_REDMULE_H__
- #define __HAL_REDMULE_H__
- 
-+#include <stdint.h>
-+
- /* LOW-LEVEL HAL */
- #define REDMULE_ADDR_BASE REDMULE_BASE_ADD
- #define REDMULE_ADDR_SPACE 0x00000100
- 
--#define HWPE_WRITE(value, offset) *(int *)(REDMULE_ADDR_BASE + offset) = value
--#define HWPE_READ(offset) *(int *)(REDMULE_ADDR_BASE + offset)
-+#define HWPE_REG32(offset) \
-+  (*(volatile uint32_t *)((uintptr_t)REDMULE_ADDR_BASE + (uintptr_t)(offset)))
-+#define HWPE_WRITE(value, offset) (HWPE_REG32(offset) = (uint32_t)(value))
-+#define HWPE_READ(offset) HWPE_REG32(offset)
- 
--static inline void redmule_x_add_set(unsigned int value) {
-+static inline void redmule_x_add_set(uint32_t value) {
-   HWPE_WRITE(value, REDMULE_REG_OFFS + REDMULE_REG_X_PTR);
- }
- 
--static inline void redmule_w_add_set(unsigned int value) {
-+static inline void redmule_w_add_set(uint32_t value) {
-   HWPE_WRITE(value, REDMULE_REG_OFFS + REDMULE_REG_W_PTR);
- }
- 
--static inline void redmule_z_add_set(unsigned int value) {
-+static inline void redmule_z_add_set(uint32_t value) {
-   HWPE_WRITE(value, REDMULE_REG_OFFS + REDMULE_REG_Z_PTR);
- }
- 
-@@ -36,6 +40,14 @@ static inline void redmule_arith_set(uint32_t arith) {
-   HWPE_WRITE(arith, REDMULE_REG_OFFS + REDMULE_ARITH_PTR);
- }
- 
-+// Contraction-start offset for this engine, in elements along N. Write it after
-+// redmule_cfg() and before hwpe_trigger_job(). The value is computed by
-+// software: the hardware only applies it. Zero (the reset value) is the
-+// unshifted behaviour, so callers that never write it are unaffected.
-+static inline void redmule_x_shift_set(uint16_t x_shift) {
-+  HWPE_WRITE((uint32_t)x_shift, REDMULE_REG_OFFS + REDMULE_XSHIFT_PTR);
-+}
-+
- static inline unsigned int redmule_get_data_correctable_count() {
-   return HWPE_READ(REDMULE_ECC_REG_OFFS + DATA_CORR_ERR);
- }
-@@ -54,12 +66,11 @@ static inline unsigned int redmule_get_meta_uncorrectable_count() {
- 
- static inline void hwpe_trigger_job() { HWPE_WRITE(0, REDMULE_TRIGGER); }
- 
--static inline int hwpe_acquire_job() { return HWPE_READ(REDMULE_ACQUIRE); }
-+static inline int hwpe_acquire_job() { return (int32_t)HWPE_READ(REDMULE_ACQUIRE); }
- 
- static inline unsigned int hwpe_get_status() { return HWPE_READ(REDMULE_STATUS); }
- 
- static inline void hwpe_soft_clear() {
--  volatile int i;
-   HWPE_WRITE(0, REDMULE_SOFT_CLEAR);
- }
- 
-@@ -74,16 +85,16 @@ void redmule_cfg(unsigned int x, unsigned int w, unsigned int z, uint16_t m_size
-   uint32_t mcfg_reg1 = 0;
-   uint32_t arith_reg = 0;
- 
--  mcfg_reg0 = (k_size << 16) | (m_size << 0);
--  mcfg_reg1 = (w_col_off << 16) | (n_size << 0);
-+  mcfg_reg0 = ((uint32_t)k_size << 16) | (uint32_t)m_size;
-+  mcfg_reg1 = ((uint32_t)w_col_off << 16) | (uint32_t)n_size;
- 
--  arith_reg = (gemm_op << 10) | (gemm_fmt << 7);
-+  arith_reg = ((uint32_t)gemm_op << 10) | ((uint32_t)gemm_fmt << 7);
- 
--  redmule_x_add_set((unsigned int)x);
--  redmule_w_add_set((unsigned int)w);
--  redmule_z_add_set((unsigned int)z);
--  redmule_mcfg_set((unsigned int)mcfg_reg0, (unsigned int)mcfg_reg1);
--  redmule_arith_set((unsigned int)arith_reg);
-+  redmule_x_add_set(x);
-+  redmule_w_add_set(w);
-+  redmule_z_add_set(z);
-+  redmule_mcfg_set(mcfg_reg0, mcfg_reg1);
-+  redmule_arith_set(arith_reg);
- }
- 
- #endif
+diff --git a/hardware/deps/redmule/rtl/x_buffer/redmule_x_buffer.sv b/hardware/deps/redmule/rtl/x_buffer/redmule_x_buffer.sv
+index 15bd1b4..4cf9d20 100644
+--- a/hardware/deps/redmule/rtl/x_buffer/redmule_x_buffer.sv
++++ b/hardware/deps/redmule/rtl/x_buffer/redmule_x_buffer.sv
+@@ -271,7 +271,15 @@ always_ff @(posedge clk_i or negedge rst_ni) begin : buf_write_counter
+       if ((current_state == PAD_EMPTY || current_state == FAST_FILL && ~first_block) && ctrl_i.h_shift)
+         buf_write_cnt <= buf_write_cnt + 1;
+       else if (ctrl_i.pad_setup)
+-        buf_write_cnt <= ctrl_i.slots;
++        // Prime the double-buffer, not the job: buf_write_cnt tracks how many pad
++        // entries have been drained into the 2-row x_buffer_scm, and pad_setup
++        // pre-loads exactly two rows of H -- the same geometry first_block uses
++        // (pad_r_addr_q == 2*H-1 above). ctrl_i.slots is a JOB size
++        // (H*(NumPipeRegs+1) = TOT_DEPTH), which only equals 2*H when
++        // NumPipeRegs == 1; for any deeper array it desynchronises the FAST_FILL
++        // exit against pad_r_addr_q and every X block is assembled from the wrong
++        // pad entries (silently wrong results, unchanged cycle count).
++        buf_write_cnt <= 2*H;
+     end
+   end
+ end
