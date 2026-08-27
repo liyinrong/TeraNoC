@@ -375,35 +375,39 @@ int main() {
     const uint32_t pbytes = QWEN_RND(QWEN_WB, QWEN_VC_W_LEVEL);
     const uint32_t poff = (uint32_t)vw - vc_window_base(plevel);
 #endif
-#define QWEN_VC_PROBE_N 16
+#define QWEN_VC_PROBE_N 8
     const vc_rect_t prect = vc_rect(plevel);
-    const uint32_t step = (pbytes / QWEN_VC_PROBE_N) & ~(uint32_t)1;
-    const uint32_t lead =
-        (prect.base_gid * QWEN_ENG_PER_GROUP) * (NUM_CORES / NUM_REDMULE_TILES);
-    if (core_id == lead) {
-      for (uint32_t i = 0; i < QWEN_VC_PROBE_N; i++)
-        *(volatile uint16_t *)vc_global_addr(&prect, poff + i * step) =
-            (uint16_t)(0xA500u + i);
-      // Read the pattern back through the same view before releasing the
-      // readers. The stores are posted and the fence orders them against each
-      // other, not against their arrival in the bank; without this the barrier
-      // can release while the last ones are still in the NoC.
-      volatile uint16_t sink = 0;
-      for (uint32_t i = 0; i < QWEN_VC_PROBE_N; i++)
-        sink = *(volatile uint16_t *)vc_global_addr(&prect, poff + i * step);
-      (void)sink;
-      __sync_synchronize();
-    }
-    mempool_barrier(num_cores);
+    // Each ENGINE probes its own private slot: it writes the pattern through
+    // the DMA's view (vc_global_addr, plain arithmetic) and reads it back
+    // through the compute view (vc_ptr, the hardware permuter). Two
+    // independent address computations on the same core, so agreement cannot
+    // be accidental AND there is no cross-core visibility to get wrong.
+    //
+    // The earlier form had one core write and every engine read after a
+    // barrier. That tested the same thing but added a store-visibility
+    // dependency the fence does not cover -- the stores are posted, so the
+    // barrier could release while the last were still in the NoC. It failed
+    // intermittently, moved when a printf was added, and the same level triple
+    // appeared in both the passing and failing sets: a race, not an address.
     if (is_eng) {
-      uint32_t bad = 0;
-      for (uint32_t i = 0; i < QWEN_VC_PROBE_N; i++)
-        if (*(volatile uint16_t *)vc_ptr(plevel, poff + i * step) !=
-            (uint16_t)(0xA500u + i))
-          bad++;
-      if (bad) {
-        qwen_vc_alias_bad = bad;
-        __sync_synchronize();
+      const uint32_t slot = pbytes / (uint32_t)QWEN_ACTIVE_ENGINES;
+      const uint32_t mine = (redmule_id % QWEN_ENG_PER_VC(plevel)) * slot;
+      const uint32_t step = (slot / QWEN_VC_PROBE_N) & ~(uint32_t)1;
+      if (step) {
+        uint32_t bad = 0;
+        for (uint32_t i = 0; i < QWEN_VC_PROBE_N; i++) {
+          const uint32_t off = poff + mine + i * step;
+          *(volatile uint16_t *)vc_global_addr(&prect, off) =
+              (uint16_t)(0xA500u + i + redmule_id);
+          __sync_synchronize();
+          if (*(volatile uint16_t *)vc_ptr(plevel, off) !=
+              (uint16_t)(0xA500u + i + redmule_id))
+            bad++;
+        }
+        if (bad) {
+          qwen_vc_alias_bad = bad;
+          __sync_synchronize();
+        }
       }
     }
     mempool_barrier(num_cores);
