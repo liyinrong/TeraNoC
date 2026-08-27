@@ -413,6 +413,19 @@ int main() {
       for (uint32_t i = 0; i < QWEN_VC_PROBE_N; i++)
         *(volatile uint16_t *)vc_global_addr(&myrect, zoff + i * step) =
             (uint16_t)(0xA500u + i);
+      // Read the pattern back through the SAME (global) view before releasing
+      // the readers. The stores are posted and the fence orders them against
+      // each other, not against their arrival in the bank: without this the
+      // barrier can release while the last stores are still in the NoC, and an
+      // engine reading through the VC view sees the old contents. That showed
+      // up as a probe failure only at level 0 -- the shortest path, so the
+      // smallest window -- and disappeared the moment a printf was added to
+      // the reader, which is the signature of a visibility race rather than a
+      // wrong address.
+      volatile uint16_t sink = 0;
+      for (uint32_t i = 0; i < QWEN_VC_PROBE_N; i++)
+        sink = *(volatile uint16_t *)vc_global_addr(&myrect, zoff + i * step);
+      (void)sink;
       __sync_synchronize();
     }
     mempool_barrier(num_cores);
@@ -420,8 +433,23 @@ int main() {
       uint32_t bad = 0;
       for (uint32_t i = 0; i < QWEN_VC_PROBE_N; i++)
         if (*(volatile uint16_t *)vc_ptr(QWEN_VC_LEVEL, zoff + i * step) !=
-            (uint16_t)(0xA500u + i))
+            (uint16_t)(0xA500u + i)) {
           bad++;
+#ifdef QWEN_VC_PROBE_TRACE
+          if (bad == 1)
+            printf(
+                "[probe] eng=%u rect=%u gid=%u base_gid=%u off=%u vcptr=0x%x "
+                "glob=0x%x want=0x%x got=0x%x\n",
+                (unsigned)redmule_id, (unsigned)rect,
+                (unsigned)(mempool_get_core_id() / NUM_CORES_PER_GROUP),
+                (unsigned)myrect.base_gid, (unsigned)(zoff + i * step),
+                (unsigned)(uint32_t)vc_ptr(QWEN_VC_LEVEL, zoff + i * step),
+                (unsigned)vc_global_addr(&myrect, zoff + i * step),
+                (unsigned)(0xA500u + i),
+                (unsigned)*(volatile uint16_t *)vc_ptr(QWEN_VC_LEVEL,
+                                                       zoff + i * step));
+#endif
+        }
       if (bad) {
         qwen_vc_alias_bad = bad;
         __sync_synchronize();
