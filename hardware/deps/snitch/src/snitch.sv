@@ -1843,24 +1843,6 @@ module snitch
           illegal_inst = 1'b1;
         end
       end
-      // Half precision complex
-      riscv_instr::FCDOTPEX_S_H,
-      riscv_instr::FCNDOTPEX_S_H,
-      riscv_instr::FCCDOTPEX_S_H,
-      riscv_instr::FCCNDOTPEX_S_H: begin
-        if (Zfinx && XFVEC && XF16) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          opc_select = RegRd;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-
       ///////////////////////////////////////////
       /* SIMD Quarter Precision Floating-Point */
       riscv_instr::VFADD_B,

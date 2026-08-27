@@ -231,20 +231,6 @@
     ]
   },
 
-  "chest_f16": {
-    "type": "float16",
-    "defines": [
-      ("N_TX",        4)
-      ("N_RX",        4)
-      ("N_SAMPLES", 512)
-    ]
-    "arrays": [
-      ("__fp16", "l2_PilotTX")
-      ("__fp16", "l2_PilotRX")
-      ("__fp16", "l2_HEST")
-    ]
-  },
-
   "chest_q16": {
     "type": "int32",
     "defines": [
@@ -272,18 +258,6 @@
     ]
   },
 
-  "cholesky_f16": {
-    "type": "float16",
-    "defines": [
-      ("matrix_N",    4)
-      ("N_SAMPLES",  32)
-    ]
-    "arrays": [
-      ("__fp16", "l2_GIn")
-      ("__fp16", "l2_LOut")
-    ]
-  },
-
   "cholesky_q32": {
     "type": "int32",
     "defines": [
@@ -295,20 +269,6 @@
       ("int32_t", "l2_A")
       ("int32_t", "l2_L")
       ("int32_t", "l2_y")
-    ]
-  },
-
-  "cmatmul_f16": {
-    "type": "float16",
-    "defines": [
-      ("matrix_M", 32)
-      ("matrix_N", 32)
-      ("matrix_P", 32)
-    ]
-    "arrays": [
-      ("__fp16", "l2_A")
-      ("__fp16", "l2_B")
-      ("__fp16", "l2_C")
     ]
   },
 
@@ -566,22 +526,6 @@
     ]
   }
 
-  "mimo_mmse_f16": {
-    "type": "float16",
-    "defines": [
-      ("N_TX", 4)
-      ("N_RX", 4)
-      ("N_ITR", 32)
-    ]
-    "arrays": [
-      ("__fp16", "l2_H")
-      ("__fp16", "l2_G")
-      ("__fp16", "l2_y")
-      ("__fp16", "l2_S")
-      ("__fp16", "l2_x")
-    ]
-  }
-
   "mimo_mmse_f32": {
     "type": "float32",
     "defines": [
@@ -595,22 +539,6 @@
       ("float", "l2_y")
       ("float", "l2_S")
       ("float", "l2_x")
-    ]
-  }
-
-  "mimo_mmse_f8": {
-    "type": "float16",
-    "defines": [
-      ("N_TX", 4)
-      ("N_RX", 4)
-      ("N_ITR", 32)
-    ]
-    "arrays": [
-      ("__fp8", "l2_H")
-      ("__fp16", "l2_G")
-      ("__fp8", "l2_y")
-      ("__fp8", "l2_S")
-      ("__fp16", "l2_x")
     ]
   }
 
@@ -676,22 +604,6 @@
     "arrays": [
       ("__fp16", "l2_A")
       ("__fp16", "l2_B")
-    ]
-  },
-
-  "ofdm_f16": {
-    "type": "float16",
-    "defines": [
-      ("N_SC", 4096)
-      ("N_RX", 64)
-      ("N_BEAMS", 32)
-    ]
-    "arrays": [
-      ("__fp16", "l2_pFFT_Src")
-      ("__fp16", "l2_pBF_Coef")
-      ("__fp16", "l2_pBF_Dst")
-      ("__fp16", "l2_twiddleCoef_f16")
-      ("__fp16", "l2_BitRevIndexTable")
     ]
   },
 

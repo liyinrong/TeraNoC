@@ -128,6 +128,11 @@ package snitch_pkg;
   localparam bit XF8     = ZQUARTERINX; // Is quarter-precision float extension (Xf8) enabled
   localparam bit XF8ALT  = 0; // Is alt. quarter-precision float extension (Xf8alt) enabled
   localparam bit XFVEC   = 1; // Is vectorial float SIMD extension (Xfvec) enabled
+  // General FPnew v0.2.3 requires an 8-bit format in every merged DOTP instance,
+  // including FP16-to-FP32 expanding dot products. This format stays internal
+  // when Zquarterinx is disabled; the Snitch decoder continues to gate all FP8
+  // instructions with XF8.
+  localparam bit FPU_FP8 = XF8 | (RVF & XF16 & XFVEC);
   // Non-standard extension present
   localparam bit NSX = XF16 | XF16ALT | XF8 | XFVEC;
   // ------------------
@@ -146,7 +151,7 @@ package snitch_pkg;
     Width:         fpnew_pkg::maximum(FLEN, 32),
     EnableVectors: XFVEC,
     EnableNanBox:  1'b0,
-    FpFmtMask:     {RVF, RVD, XF16, XF8, XF16ALT, XF8ALT},
+    FpFmtMask:     {RVF, RVD, XF16, FPU_FP8, XF16ALT, XF8ALT},
     IntFmtMask:    {XFVEC && XF8, XFVEC && (XF16 || XF16ALT), 1'b1, 1'b0}
   };
 

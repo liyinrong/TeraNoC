@@ -76,8 +76,7 @@ module snitch_fpu
     .Implementation             ( FPUImplementation              ),
     .TagType                    ( TagType                        ),
     .StochasticRndImplementation( snitch_pkg::FPU_RSR            ),
-    .PulpDivsqrt                ( 1'b1                           ),
-    .ComplexDotp                ( 1'b1                           )
+    .DivSqrtSel                 ( fpnew_pkg::PULP                 )
   ) i_fpu (
     .clk_i                                    ,
     .rst_ni                                   ,

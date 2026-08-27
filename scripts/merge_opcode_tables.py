@@ -30,6 +30,16 @@ import sys
 # Symbols where the DEFAULT encoding wins over RVV (FLB/FSB; see header).
 DEFAULT_WINS = {'FLB', 'FSB'}
 
+# TeraNoC's old FPnew branch implemented these scalar complex FP16 dot
+# products. General FPnew v0.2.3 has no corresponding operations, so keep the
+# assembler constants and hardware decode package out of generated tables.
+EXCLUDED_OPS = {
+    'FCDOTPEX_S_H',
+    'FCNDOTPEX_S_H',
+    'FCCDOTPEX_S_H',
+    'FCCNDOTPEX_S_H',
+}
+
 LOCALPARAM_RE = re.compile(
     r'^\s*localparam\s+logic\s+\[\d+:\d+\]\s+(\w+)\s*=\s*(.+?);\s*$')
 
@@ -67,8 +77,10 @@ def merge_sv(default_path, rvv_path):
                 table[name] = (value, line, is_csr)
                 resolved_rvv.append(name)
 
-    instr = [table[n][1] for n in order if not table[n][2]]
-    csr = [table[n][1] for n in order if table[n][2]]
+    instr = [table[n][1] for n in order
+             if not table[n][2] and n not in EXCLUDED_OPS]
+    csr = [table[n][1] for n in order
+           if table[n][2] and n not in EXCLUDED_OPS]
     out = ['/* Auto-generated Xpulp+RVV opcode superset, merged by',
            ' * scripts/merge_opcode_tables.py -- see that script for the',
            ' * FLB/FSB scalar-vs-RVV decode contract. Do not edit by hand. */',
@@ -76,7 +88,8 @@ def merge_sv(default_path, rvv_path):
         ['  /* CSR Addresses */'] + csr + ['endpackage']
     sys.stdout.write('\n'.join(out) + '\n')
     log(f'[merge:sv] {len(order)} localparams; {len(resolved_rvv)} '
-        f'conflicts -> RVV; kept default for {sorted(kept_default)}')
+        f'conflicts -> RVV; kept default for {sorted(kept_default)}; '
+        f'excluded {sorted(EXCLUDED_OPS & set(table))}')
 
 
 # ----------------------------------------------------------------- encoding.h
@@ -109,12 +122,17 @@ def merge_h(default_path, rvv_path):
     # replace with RVV value
     to_rvv = {x for x in conflicts if x not in DEFAULT_WINS}
     # add (e.g. the V* ops)
-    rvv_only = sorted(set(rmatch) - set(dmatch))
+    rvv_only = sorted((set(rmatch) - set(dmatch)) - EXCLUDED_OPS)
 
     # rewrite default lines, swapping the MATCH/MASK value for to_rvv ops
     out = []
     for ln in dlines:
         m = DEFINE_RE.match(ln)
+        if m and m.group(2) in EXCLUDED_OPS:
+            continue
+        d = DECL_RE.match(ln)
+        if d and d.group(1).upper() in EXCLUDED_OPS:
+            continue
         if m and m.group(2) in to_rvv:
             kind, name = m.group(1), m.group(2)
             newval = (rmatch if kind == 'MATCH' else rmask)[name]
@@ -138,7 +156,8 @@ def merge_h(default_path, rvv_path):
     sys.stdout.write('\n'.join(out) + '\n')
     log(f'[merge:h] {len(dmatch)} default + {len(rvv_only)} rvv-only ops; '
         f'{len(to_rvv)} conflicts -> RVV; '
-        f'kept default for {sorted(conflicts & DEFAULT_WINS)}')
+        f'kept default for {sorted(conflicts & DEFAULT_WINS)}; '
+        f'excluded {sorted(EXCLUDED_OPS & (set(dmatch) | set(rmatch)))}')
 
 
 def main():

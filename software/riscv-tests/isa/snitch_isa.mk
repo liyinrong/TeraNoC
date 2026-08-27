@@ -128,8 +128,7 @@ ifeq ($(zfinx),1)
 		vfmac_h \
 		vfmin_h \
 		vfsgnj_h \
-		vfdotpex_h \
-		fcdotpex_h
+		vfdotpex_h
 
 ifeq ($(zquarterinx), 1)
 	rv32uzquarterinx_snitch_sc_tests = \
