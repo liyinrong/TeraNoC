@@ -414,6 +414,20 @@ class BenchRunner:
             src_p = self._resolve_src_in_exec_root(src_s)
             dst_p = self._resolve_dst_in_cwd(dst_s)
 
+            if rtype == "glob":
+                # `src` is a pattern, `dst` a directory. Zero matches is a
+                # failure unless the rule is optional: cleanup_steps deletes
+                # the build dir, so a silent miss loses the artifacts for good.
+                matches = sorted(src_p.parent.glob(src_p.name))
+                if not matches and not optional:
+                    raise FileNotFoundError(
+                        f"Required artifact not found: {src_p}"
+                    )
+                dst_p.mkdir(parents=True, exist_ok=True)
+                for m in matches:
+                    shutil.copy2(m, dst_p / m.name)
+                continue
+
             if not src_p.exists():
                 if optional:
                     continue

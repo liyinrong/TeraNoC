@@ -485,6 +485,11 @@ def process_dasm(path, hart, builder, uu, args, a2l, pe_data=None, flows=None):
     # its own req/resp lines, suffixed 's' / 'v<n>' when there is >1 port.
     ppc = max(1, args.ports_per_core)
     for p in range(ppc):
+        # The vector ports belong to the Spatz VLSU and render under its unit
+        # node (process_spatz_mem); emitting them here too would double every
+        # vector port and its flows.
+        if p and getattr(args, "spatz_owns_vports", False):
+            continue
         pe = pe_data.get((g, t, ppc * c + p)) if pe_data else None
         if not pe:
             continue
@@ -659,14 +664,12 @@ def noc_state_name(rr, st):
 ROUTER_LOG_RE = re.compile(r"router_g(\d+)_(req|resp)\.log$")
 TILE_LOG_RE = re.compile(r"tile_g(\d+)_t(\d+)\.log$")
 # merged: one file per tile (core in line)
-PE_LOG_RE = re.compile(r"pe_g(\d+)_t(\d+)\.log$")
+CORE_LOG_RE = re.compile(r"core_g(\d+)_t(\d+)\.log$")
 # merged: one file per tile (port in line)
 RM_LOG_RE = re.compile(r"rm_g(\d+)_t(\d+)\.log$")
-# WP2 wide plane: its own engine-port and router families. `rm_` (32-bit
-# RedMulE master ports) and `rmw_` (one wide port) are mutually exclusive --
-# which one a run emits says which plane carried the engine's traffic.
-RMW_LOG_RE = re.compile(r"rmw_g(\d+)_t(\d+)\.log$")
-WROUTER_LOG_RE = re.compile(r"router_g(\d+)_wide_(req|resp)\.log$")
+# WP2 wide plane keeps the rm_ family (same grammar, one client per tile) and
+# adds its own routers. The record width is in the file's `D <bits>` header.
+WROUTER_LOG_RE = re.compile(r"router_wide_g(\d+)_(req|resp)\.log$")
 # Wide router class names, by net: request = RO (meta-only read) / RW
 # (payload); response = RD (data) / WR (meta-only write ack).
 WROUTER_CLS = {0: ("RO", "RW"), 1: ("RD", "WR")}
@@ -755,7 +758,8 @@ def load_spm_bank_logs(spm_dir):
     return out
 
 
-def load_pe_logs(noc_dir, pattern="pe_g*_t*.log", regex=PE_LOG_RE):
+def load_pe_logs(noc_dir, pattern="core_g*_t*.log",
+                 regex=CORE_LOG_RE):
     """Glob the MERGED per-tile local-port logs -> {(g,t,idx): (runs,
     packets)}. Handles both the Snitch core data ports (pe_g<g>_t<t>.log;
     idx=core) and the RedMulE master ports (rm_g<g>_t<t>.log; idx=port) --
@@ -1537,55 +1541,32 @@ def _ensure_rm_engine(builder, uu, g, t):
     return uu.get(("rm_engine", g, t))
 
 
-def process_rm_ports(noc_dir, builder, uu, args, flows=None, rm_data=None,
-                     rmw_data=None):
+def process_rm_ports(noc_dir, builder, uu, args, flows=None,
+                     rm_data=None):
     """RedMulE master-port traffic, emitted as FLAT req/resp sibling lines (req
     00, resp 00, req 01, ...) directly under each Tile's RedMulE ENGINE node
     (created by process_redmule / _ensure_rm_engine). The rank base (>0) keeps
     the ports below the FSM/CPI children.
 
-    A build carries EITHER the narrow master ports (rm_) or the WP2 wide
-    plane's single engine port (rmw_), never both. The wide one is labelled
-    'wide' -- one of its requests moves a whole WideTcdmDataWidth line, so its
-    count and latency are not comparable with a narrow port's.
+    rm_ is the RedMulE family on either plane: several 32-bit master ports on
+    the narrow one, a single WIDE_TCDM_DATA_WIDTH port on the WP2 wide one.
     Returns #ports emitted."""
     # RedMulE master ports sit after every core DATA PORT on the tile's
     # local-port axis, not after every core (Spatz cores own ppc ports each).
     ncp = args.cores_per_tile * max(1, args.ports_per_core)
     rm = rm_data if rm_data is not None else load_pe_logs(
         noc_dir, "rm_g*_t*.log", RM_LOG_RE)
-    rmw = rmw_data if rmw_data is not None else load_pe_logs(
-        noc_dir, "rmw_g*_t*.log", RMW_LOG_RE)
-    if not rm and not rmw:
+    if not rm:
         return 0
-    nrm = nrmw = 0
-    for wide, data in ((False, rm), (True, rmw)):
-        for (g, t, p), (runs, pkts) in sorted(data.items()):
-            eng = _ensure_rm_engine(builder, uu, g, t)
-            _emit_pe_ports(
-                builder,
-                uu,
-                eng,
-                ("rmwpe" if wide else "rmpe",
-                 g,
-                 t,
-                 p),
-                runs,
-                pkts,
-                args,
-                100 + 2 * p,
-                flows=flows,
-                req_ctx=(
-                    g,
-                    t,
-                    ncp + p),
-                port_label="wide" if wide else f"{p:02d}")
-            nrm += 1
-            nrmw += 1 if wide else 0
-    kind = (f"{nrmw} wide-plane" if nrmw else "narrow")
-    print(
-        f"RedMulE ports: {nrm} flat req/resp port lines ({kind}) under the "
-        f"RedMulE engine node")
+    nrm = 0
+    for (g, t, p), (runs, pkts) in sorted(rm.items()):
+        eng = _ensure_rm_engine(builder, uu, g, t)
+        _emit_pe_ports(builder, uu, eng, ("rmpe", g, t, p), runs, pkts,
+                       args, 100 + 2 * p, flows=flows,
+                       req_ctx=(g, t, ncp + p), port_label=f"{p:02d}")
+        nrm += 1
+    print(f"RedMulE ports: {nrm} flat req/resp port lines under the "
+          f"RedMulE engine node")
     return nrm
 
 
@@ -2025,40 +2006,80 @@ SPATZ_VLSU_STATES = ["LOAD", "STORE"]        # spatz_vlsu.sv state_q
 SPATZ_CPI = ["compute", "mem", "stall", "drain", "idle"]
 
 
+def _spatz_state_rows(rows, nfield):
+    """Clip a change-detected state-run list to the export window. The run that
+    was in force AT the window start lives on the last row BEFORE it, so that
+    row is kept and moved to the window edge -- dropping it would leave the
+    first slice of the window unpainted."""
+    out, pre = [], None
+    for r in rows:
+        if r[0] < WIN_CYC_LO:
+            pre = r
+        elif r[0] < WIN_CYC_HI:
+            out.append(r)
+    if pre is not None:
+        out.insert(0, (WIN_CYC_LO,) + tuple(pre[1:nfield]))
+    return out
+
+
 def load_spatz_logs(sp_dir):
     """Parse the always-on engine logs spatz_g<g>_t<t>_c<c>.log into
-    {(g,t,c): (dims=(VLEN,N_FU,NrMemPorts), rows, end_cyc)}: each row (one
-    ACTIVE cycle) is (cyc, occ, stall, issue, vfu_busy, vfu_st, vlsu_busy,
-    vlsu_st, vsldu_busy, vfu_rsp, vlsu_rsp, vsldu_rsp, memact); end_cyc is the
-    E footer (last sim cycle) so the exporter renders every row-less cycle as
-    the engine sitting IDLE out to the end. Cores that never ran a vector
-    instruction (only D+E, no C rows) are kept so they show as fully idle."""
+    {(g,t,c): (dims, rows, end_cyc, lrows, brows)}.
+
+    dims = (VLEN, N_FU, NrMemPorts, VRFWordBytes, ELENB, RobDepth) -- the last
+    two are 0 on pre-2026-08 logs, which just disables the tracks that need
+    them. rows (one per ACTIVE cycle) is the C record: (cyc, occ, stall, issue,
+    vfu_busy, vfu_st, vlsu_busy, vlsu_st, vsldu_busy, vfu_rsp, vlsu_rsp,
+    vsldu_rsp, memact, lin).
+
+    lrows / brows are the CHANGE-DETECTED state runs, so a row holds until the
+    next one rather than describing a single cycle:
+      lrows = (cyc, vsew, nr_elem_word, elems, (lane0..laneN-1))  VFU
+      brows = (cyc, (pend0..pendN-1))                             VLSU ROB
+    end_cyc is the E footer, so every row-less cycle renders as IDLE out to the
+    end. Cores that never ran a vector instruction are kept, so they show as
+    fully idle rather than vanishing."""
     out = {}
     for path in sorted(glob.glob(os.path.join(sp_dir, "spatz_g*_t*_c*.log"))):
         m = SPATZ_LOG_RE.search(os.path.basename(path))
         if not m:
             continue
         g, t, c = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        dims, rows, end_cyc = (0, 0, 0), [], 0
+        dims, rows, end_cyc = (0, 0, 0, 0, 0, 0), [], 0
+        lrows, brows = [], []
         with open(path) as f:
             for line in f:
                 x = line.split()
                 if not x:
                     continue
-                if x[0] == "D" and len(x) in (4, 5):
-                    # 5th field (VRFWordBytes) = the VFU's per-cycle byte peak
-                    dims = (int(x[1]), int(x[2]), int(x[3]),
-                            int(x[4]) if len(x) == 5 else 0)
-                elif x[0] == "C" and len(x) in (14, 18):
-                    # 18 = the 2026-08 fields (istall, vstall, lin, lout); rows
-                    # keep the first 13 so every consumer below is unchanged,
-                    # with the lane bytes appended for the utilization counter.
+                if x[0] == "D" and 4 <= len(x) <= 7:
+                    # 5th = VRFWordBytes (VFU byte peak), 6th = ELENB (one
+                    # lane), 7th = RobDepth (NrOutstandingLoads)
+                    v = [int(z) for z in x[1:]] + [0, 0, 0]
+                    dims = tuple(v[:6])
+                elif x[0] == "L" and len(x) >= 5:
+                    try:
+                        v = [int(z) for z in x[1:]]
+                    except ValueError:
+                        continue
+                    lrows.append((v[0], v[1], v[2], v[3], tuple(v[4:])))
+                elif x[0] == "B" and len(x) >= 3:
+                    try:
+                        v = [int(z) for z in x[1:]]
+                    except ValueError:
+                        continue
+                    brows.append((v[0], tuple(v[1:])))
+                elif x[0] == "C" and len(x) in (14, 18, 21):
+                    # 18 = the 2026-08 fields (istall, vstall, lin, lout);
+                    # 21 also carries the VLSU ROB state. Rows keep the first
+                    # 13 so every consumer below is unchanged, with the lane
+                    # bytes appended for the utilization counter.
                     try:
                         if not (WIN_CYC_LO <= int(x[1]) < WIN_CYC_HI):
                             continue
                         v = [int(z) for z in x[1:]]
                         rows.append(tuple(v[:13]) +
-                                    ((v[15],) if len(v) == 17 else (0,)))
+                                    ((v[15],) if len(v) >= 17 else (0,)))
                     except ValueError:
                         continue
                 elif x[0] == "E" and len(x) == 2:
@@ -2072,7 +2093,9 @@ def load_spatz_logs(sp_dir):
         if rows and end_cyc < rows[-1][0]:
             end_cyc = rows[-1][0]
         if rows or end_cyc:
-            out[(g, t, c)] = (dims, rows, end_cyc)
+            out[(g, t, c)] = (dims, rows, end_cyc,
+                              _spatz_state_rows(lrows, 5),
+                              _spatz_state_rows(brows, 2))
     return out
 
 
@@ -2212,67 +2235,175 @@ def _ensure_spatz_engine(builder, uu, g, t, c, args):
                   child_order=CHILD_ORDER_EXPLICIT)
         uu._seen.add(("c", hart))
     if ("sp_engine", g, t, c) not in uu._seen:
+        # Rank past the core's own children -- METRICS counters occupy 0..n-1
+        # and each of the ppc port lines takes two more (process_dasm) -- so
+        # the engine lands at the BOTTOM of the Core node instead of sorting
+        # in among IPC/stall_*.
         add_track(builder, uu.get(("sp_engine", g, t, c)), "Spatz",
                   parent=uu.get(("c", hart)),
-                  child_order=CHILD_ORDER_EXPLICIT)
+                  child_order=CHILD_ORDER_EXPLICIT,
+                  order_rank=len(METRICS)
+                  + 2 * max(1, args.ports_per_core) + 1)
         uu._seen.add(("sp_engine", g, t, c))
     return uu.get(("sp_engine", g, t, c))
 
 
+# One expandable item per functional unit, ranked below the CPI stack (0..4).
+SPATZ_UNIT_RANK = {"VFU": 10, "VLSU": 11, "VSLDU": 12}
+
+
+def _ensure_spatz_unit(builder, uu, g, t, c, args, unit):
+    """The per-unit node under the Spatz engine: its own slice line (the unit's
+    FSM) plus whatever detail children that unit has. Created on demand so the
+    memory-port pass can nest under VLSU whether or not the engine pass ran."""
+    key = ("sp_unit", g, t, c, unit)
+    if key not in uu._seen:
+        add_track(builder, uu.get(key), unit,
+                  parent=_ensure_spatz_engine(builder, uu, g, t, c, args),
+                  child_order=CHILD_ORDER_EXPLICIT,
+                  order_rank=SPATZ_UNIT_RANK[unit])
+        uu._seen.add(key)
+    return uu.get(key)
+
+
+def _emit_spatz_lanes(builder, uu, g, t, c, vfu, lrows, nfu, elenb, end_cyc,
+                      win):
+    """VFU detail under the unit node: one exact per-lane occupancy line plus a
+    windowed utilization statistic.
+
+      lane <l>  = result_valid bytes on lane l / ELENB, emitted at each state
+                  change (so it is per-cycle exact, not windowed). The lanes
+                  take slices of the same VRF word, so they move together
+                  except through FU latency, IPU<->FPU switches and drain --
+                  that divergence is the whole point of separate lines.
+      util      = windowed mean of elems / nr_elem_word: throughput as a
+                  fraction of the peak AT THE CURRENT ELEMENT WIDTH. Filling
+                  the lanes with fp8 reads 1.0, the same as filling them with
+                  fp32 -- it does NOT charge a narrow SEW for leaving the byte
+                  width unused (which is what the old vfu_lanes did).
+    Returns #counter series emitted."""
+    if not lrows or not nfu or not elenb:
+        return 0
+    lane_ctr = [add_track(builder, uu.get(("sp_lane", g, t, c, ln)),
+                          f"lane {ln}", parent=vfu, counter=True,
+                          order_rank=10 + ln)
+                for ln in range(nfu)]
+    util_ctr = add_track(builder, uu.get(("sp_util", g, t, c)), "util",
+                         parent=vfu, counter=True, order_rank=0)
+    # exact per-lane series
+    last = {}
+    for (cyc, _sew, _nelem, _elems, lanes) in lrows:
+        ts = cyc * TICK
+        for ln in range(min(nfu, len(lanes))):
+            v = lanes[ln] / elenb
+            if last.get(ln) != v:
+                emit_counter(builder, ts, lane_ctr[ln], v)
+                last[ln] = v
+    # windowed utilization: integrate elems/nr_elem_word over each run
+    acc = collections.defaultdict(float)
+    for i, (cyc, _sew, nelem, elems, _lanes) in enumerate(lrows):
+        if not nelem or not elems:
+            continue
+        nxt = lrows[i + 1][0] if i + 1 < len(lrows) else end_cyc + 1
+        frac = elems / nelem
+        for cy in range(cyc, min(nxt, end_cyc + 1)):
+            acc[cy // win] += frac
+    lastu = None
+    for w in range(WIN_CYC_LO // win, end_cyc // win + 1):
+        v = acc.get(w, 0.0) / win
+        if lastu != v:
+            emit_counter(builder, w * win * TICK, util_ctr, v)
+            lastu = v
+    if lastu:
+        emit_counter(builder, (end_cyc // win + 1) * win * TICK, util_ctr, 0.0)
+    pin_counter_range(builder, lane_ctr + [util_ctr],
+                      (end_cyc // win + 1) * win * TICK + 2 * TICK, TICK)
+    return nfu + 1
+
+
+def _emit_spatz_rob(builder, uu, g, t, c, vlsu, brows, nports, depth, end_cyc):
+    """VLSU detail: the per-port reorder-buffer LEVEL (requests issued and not
+    yet answered / RobDepth), exact at each change. C carries only the sum and
+    the full/empty bitmaps; this is what shows WHICH port saturated and how
+    deep it ran. Returns #series."""
+    if not brows or not nports or not depth:
+        return 0
+    ctr = [add_track(builder, uu.get(("sp_rob", g, t, c, p)), f"rob p{p}",
+                     parent=vlsu, counter=True, order_rank=20 + p)
+           for p in range(nports)]
+    last = {}
+    for (cyc, pend) in brows:
+        ts = cyc * TICK
+        for p in range(min(nports, len(pend))):
+            v = pend[p] / depth
+            if last.get(p) != v:
+                emit_counter(builder, ts, ctr[p], v)
+                last[p] = v
+    pin_counter_range(builder, ctr, (end_cyc + 2) * TICK, TICK)
+    return nports
+
+
 def process_spatz(sp_dir, builder, uu, args):
-    """Always-on Spatz vector-ENGINE trace: a Spatz node under each Core node
-    carrying the VFU busy/sub-state FSM as its slice timeline, with the
-    VLSU FSM (child slice line) and the occupancy/CPI stack (compute / mem
-    / stall / drain / idle) plus a memory-port utilization series as
-    expandable counter children. Returns #engine nodes."""
+    """Always-on Spatz vector-ENGINE trace. Under each Core node a Spatz node
+    holds, in order: the occupancy/CPI stack (compute / mem / stall / drain /
+    idle), then ONE EXPANDABLE ITEM PER FUNCTIONAL UNIT -- VFU, VLSU, VSLDU --
+    each carrying its own FSM as a slice line and its detail as children:
+
+      VFU   IPU/FPU slices  + per-lane occupancy lines + SEW-relative util
+      VLSU  LOAD/STORE      + per-port ROB level + mem-port util
+                              (+ latency counters and the per-request port
+                               lines, added by process_spatz_mem)
+      VSLDU BUSY            (no sub-state)
+
+    Returns #engine nodes."""
     data = load_spatz_logs(sp_dir)
     if not data:
         print(f"  Spatz engine: no spatz_g*_t*_c*.log in {sp_dir}; skipping",
               file=sys.stderr)
         return 0
     win = max(1, int(round(args.window_ns / args.clk_ns)))
-    neng = nsl = 0
+    neng = nsl = nctr = 0
     # row layout: 0=cyc 1=occ 2=stall 3=issue 4=vfu_busy 5=vfu_st 6=vlsu_busy
     #             7=vlsu_st 8=vsldu_busy 9=vfu_rsp 10=vlsu_rsp 11=vsldu_rsp
     #             12=memact 13=lin (VFU bytes fed; 0 in pre-2026-08 logs)
-    for (g, t, c), (dims, rows, end_cyc) in sorted(data.items()):
-        nr_mem = dims[2]
-        lane_peak = dims[3] if len(dims) > 3 else 0
+    for (g, t, c), (dims, rows, end_cyc, lrows, brows) in sorted(data.items()):
+        nfu, nr_mem = dims[1], dims[2]
+        elenb, rob_depth = dims[4], dims[5]
         eng = _ensure_spatz_engine(builder, uu, g, t, c, args)
-        # VFU busy/sub-state ON the engine line.
+        # 1. CPI stack FIRST (ranks 0..4), so the summary reads before detail.
+        ctr = {b: add_track(builder, uu.get(("sp_cpi", g, t, c, b)), b,
+                            parent=eng, counter=True, order_rank=i)
+               for i, b in enumerate(SPATZ_CPI)}
+        # 2. One item per functional unit, each with its FSM on its own line.
+        vfu = _ensure_spatz_unit(builder, uu, g, t, c, args, "VFU")
         nsl += _emit_spatz_fsm(
-            builder, eng,
+            builder, vfu,
             _spatz_unit_rows(rows, 4, 5, SPATZ_VFU_STATES),
             SPATZ_VFU_STATES, end_cyc)
-        # VLSU load/store sub-state on a child line.
-        vlsu_leaf = add_track(builder, uu.get(("sp_vlsu", g, t, c)),
-                              "VLSU", parent=eng)
+        vlsu = _ensure_spatz_unit(builder, uu, g, t, c, args, "VLSU")
         nsl += _emit_spatz_fsm(
-            builder, vlsu_leaf,
+            builder, vlsu,
             _spatz_unit_rows(rows, 6, 7, SPATZ_VLSU_STATES),
             SPATZ_VLSU_STATES, end_cyc)
-        # VSLDU busy (no sub-state) on a child line.
-        vsldu_leaf = add_track(builder, uu.get(("sp_vsldu", g, t, c)),
-                               "VSLDU", parent=eng)
+        vsldu = _ensure_spatz_unit(builder, uu, g, t, c, args, "VSLDU")
         nsl += _emit_spatz_fsm(
-            builder, vsldu_leaf,
+            builder, vsldu,
             _spatz_unit_rows(rows, 8, None, ["BUSY"]),
             ["BUSY"], end_cyc)
-        ctr = {b: add_track(builder, uu.get(("sp_cpi", g, t, c, b)), b,
-                            parent=eng, counter=True) for b in SPATZ_CPI}
+        # 3. Per-unit detail.
+        nctr += _emit_spatz_lanes(builder, uu, g, t, c, vfu, lrows, nfu,
+                                  elenb, end_cyc, win)
+        nctr += _emit_spatz_rob(builder, uu, g, t, c, vlsu, brows, nr_mem,
+                                rob_depth, end_cyc)
         mem_ctr = add_track(builder, uu.get(("sp_mem", g, t, c)),
-                            "mem_ports", parent=eng, counter=True)
-        # VFU lane utilization: bytes fed to the FUs / the per-cycle peak.
-        # Only meaningful once the trace carries the lane fields.
-        lane_ctr = (add_track(builder, uu.get(("sp_lane", g, t, c)),
-                              "vfu_lanes", parent=eng, counter=True)
-                    if lane_peak else None)
+                            "mem_ports", parent=vlsu, counter=True,
+                            order_rank=1)
         _emit_spatz_counters(builder, ctr, mem_ctr, rows, nr_mem, win,
-                             args, end_cyc, lane_ctr, lane_peak)
+                             args, end_cyc, None, 0)
         neng += 1
-    print(f"  Spatz engine: {neng} engine nodes "
-          f"(VFU+VLSU+VSLDU FSM + 5-way occupancy/CPI incl. idle + "
-          f"mem-port util), {nsl} state slices")
+    print(f"  Spatz engine: {neng} engine nodes (CPI stack + VFU/VLSU/VSLDU "
+          f"items: FSM slices, per-lane occupancy, SEW-relative util, "
+          f"per-port ROB level), {nsl} state slices, {nctr} detail series")
     return neng
 
 
@@ -2305,32 +2436,67 @@ def _spmem_bucket(recs, win):
     return lat, latn, occ, nreq
 
 
-def process_spatz_mem(sp_dir, builder, uu, args):
-    """Per-request Spatz VLSU memory trace (noc_profiling/spmem_g<g>_t<t>.log,
-    beside the pe_/rm_ port traces): adds a
-    'VLSU mem' counter group under each Spatz engine node carrying the
-    round-trip latency the engine trace cannot show -- mean cycles from the
-    accepted request handshake to the response, overall and split by address
-    class (local tile / intra-group / inter-group / SoC) -- plus the mean
-    number of outstanding word requests and the accepted-request rate. These
-    are cycle counts, so their y-axes auto-scale (never pinned to [0,1]).
+def process_spatz_mem(sp_dir, builder, uu, args, pe_data=None, flows=None):
+    """Per-request VLSU memory trace, taken from the VECTOR ports of
+    noc_profiling/core_g<g>_t<t>.log (flat index idx % ppc != 0). Everything
+    lands under the VLSU unit node, which owns these ports:
+
+      mem <- counter group: the round-trip latency the engine trace cannot see
+             (accepted request handshake -> response), overall and split by
+             address class (local tile / intra-group / inter-group / SoC),
+             plus mean outstanding word requests and accepted-request rate.
+             Cycle counts, so their y-axes auto-scale (never pinned to [0,1]).
+      req <n> / resp <n> <- the flat per-port req/resp lines, exactly as
+             process_rm_ports nests RedMulE's master ports under its engine
+             node: same _emit_pe_ports rendering, same flow binding.
+
     Returns #cores with a memory trace."""
-    if not mt.have_trace(sp_dir):
-        print(f"  Spatz mem: no spmem_g*_t*.log in {sp_dir}; skipping "
-              "(pre-2026-08 run?)", file=sys.stderr)
-        return 0
+    ppc = max(1, args.ports_per_core)
+    if ppc < 2:
+        return 0                      # no vector ports on this build
     win = max(1, int(round(args.window_ns / args.clk_ns)))
-    ncore = nrec = ninfl = norph = 0
-    for g, t, dims, cores, end_cyc in mt.iter_spmem_tiles(sp_dir):
-        for c, ct in sorted(cores.items()):
+    ncore = nrec = ninfl = norph = nport = 0
+    # Port lines for EVERY vector port that has a trace, traffic or not --
+    # process_rm_ports does the same for RedMulE, and "aligned with RedMulE" is
+    # the point. Doing this inside the latency loop below would hide the ports
+    # of an idle Spatz entirely, since that loop needs paired requests.
+    if pe_data:
+        for (g, t, idx), pe in sorted(pe_data.items()):
+            c, p = divmod(idx, ppc)
+            if p == 0:                # the scalar port stays on the Core line
+                continue
+            vlsu = _ensure_spatz_unit(builder, uu, g, t, c, args, "VLSU")
+            _emit_pe_ports(builder, uu, vlsu, ("spv", g, t, c, p),
+                           pe[0], pe[1], args, 40 + 2 * (p - 1),
+                           flows=flows, req_ctx=(g, t, idx),
+                           port_label=f"{p - 1:02d}")
+            nport += 1
+    for g, t, ports in mt.iter_port_tiles(sp_dir, "core",
+                                          args.tiles_per_group):
+        merged = {}
+        for idx, pt in sorted(ports.items()):
+            c, p = divmod(idx, ppc)
+            if p == 0:                # the scalar Snitch data port
+                continue
+            m = merged.setdefault(c, mt.CoreTrace())
+            m.recs.extend(r._replace(port=p - 1) for r in pt.recs)
+            # n_req/n_inflight have to be merged too -- omitting them left the
+            # summary line below reporting "0 word requests" on runs that had
+            # plenty.
+            m.n_req += pt.n_req
+            m.n_inflight += pt.n_inflight
+            m.n_rsp += pt.n_rsp
+            m.n_orphan += pt.n_orphan
+        for c, ct in sorted(merged.items()):
             if not ct.recs:
                 continue
+            ct.recs.sort(key=lambda r: r.cyc)
             lat, latn, occ, nreq = _spmem_bucket(ct.recs, win)
             if not nreq:
                 continue
-            eng = _ensure_spatz_engine(builder, uu, g, t, c, args)
+            vlsu = _ensure_spatz_unit(builder, uu, g, t, c, args, "VLSU")
             node = add_track(builder, uu.get(("sp_mem_node", g, t, c)),
-                             "VLSU mem", parent=eng,
+                             "mem", parent=vlsu, order_rank=30,
                              child_order=CHILD_ORDER_EXPLICIT)
             # overall latency first, then only the classes actually used
             series = [(None, "lat")] + [
@@ -2346,6 +2512,7 @@ def process_spatz_mem(sp_dir, builder, uu, args):
             req_ctr = add_track(builder, uu.get(("sp_mreq", g, t, c)),
                                 "req/cyc", parent=node, counter=True,
                                 order_rank=len(series) + 1)
+            end_cyc = max((r.cyc + (r.lat or 0)) for r in ct.recs)
             wlo = WIN_CYC_LO // win
             whi = min(end_cyc, WIN_CYC_HI - 1) // win
             last = {}
@@ -2374,7 +2541,8 @@ def process_spatz_mem(sp_dir, builder, uu, args):
             ninfl += ct.n_inflight
             norph += ct.n_orphan
     print(f"  Spatz mem: {ncore} cores, {nrec} word requests paired "
-          f"(latency + per-class latency + outstanding + req-rate counters)"
+          f"(latency + per-class latency + outstanding + req-rate counters), "
+          f"{nport} flat req/resp port lines under VLSU"
           + (f"; {ninfl} in flight at EOS, {norph} orphan responses"
              if (ninfl or norph) else ""))
     return ncore
@@ -2440,7 +2608,7 @@ def main():
         help="spike-dasm path (default: auto-detect)")
     ap.add_argument(
         "--noc", help="noc_profiling/ dir (router_g*/tile_g* full logs, plus "
-        "the always-on Spatz spmem_g*_t*.log memory trace); overlays NoC "
+        "the per-request core_g*_t*.log memory trace); overlays NoC "
         "state-runs + derived counters on the timeline")
     ap.add_argument(
         "--spm", help="spm_profiling/ dir (bank_g*_t*.log); adds per-SPM-bank "
@@ -2455,7 +2623,7 @@ def main():
         help="spatz_profiling/ dir (spatz_g*_t*_c*.log); adds the always-on "
         "Spatz vector-engine node (VFU/VLSU/VSLDU FSM, occupancy/CPI stack, "
         "mem-port util) under each Spatz core. The per-request VLSU memory "
-        "round-trip latency counters come from --noc (spmem_g*_t*.log)")
+        "round-trip latency counters come from --noc (core_g*_t*.log)")
     ap.add_argument(
         "--cycle-start",
         type=int,
@@ -2543,12 +2711,17 @@ def main():
     uu = Uuids()
     a2l = Addr2Line(args.addr2line, args.elf)
 
+    # The Spatz VLSU owns the vector ports (flat idx % ppc != 0): they render
+    # under its unit node rather than on the Core line, so process_dasm must
+    # not emit them as well.
+    args.spatz_owns_vports = bool(
+        args.spatz and max(1, args.ports_per_core) >= 2 and
+        glob.glob(os.path.join(args.spatz, "spatz_g*_t*_c*.log")))
+
     pe_data = load_pe_logs(args.noc) if args.noc else {
     }    # per-core PE port traffic
     rm_data = (load_pe_logs(args.noc, "rm_g*_t*.log", RM_LOG_RE)
-               if args.noc else {})  # per-RedMulE-port traffic (narrow plane)
-    rmw_data = (load_pe_logs(args.noc, "rmw_g*_t*.log", RMW_LOG_RE)
-                if args.noc else {})  # the WP2 wide plane's engine port
+               if args.noc else {})  # RedMulE ports, on whichever plane
     flows = None
     if args.flows:  # flows only in packet mode
         if args.noc_slices != "packet":
@@ -2556,9 +2729,7 @@ def main():
                 "  WARNING: --flows needs --noc-slices packet; flows disabled",
                 file=sys.stderr)
         else:
-            # Both RedMulE families live at the same base on the local-port
-            # axis and a build emits only one of them, so they merge cleanly.
-            flows = Flows(pe_data, {**rm_data, **rmw_data},
+            flows = Flows(pe_data, rm_data,
                           args.cores_per_tile * max(1, args.ports_per_core))
     n = 0
     for path in files:
@@ -2571,8 +2742,9 @@ def main():
         n += 1
     if pe_data:
         print(
-            f"  PE ports: attached {len(pe_data)} core port "
-            "traces under Core nodes")
+            f"  PE ports: attached {len(pe_data)} core port traces"
+            + (" (scalar under Core, vector under Spatz VLSU)"
+               if args.spatz_owns_vports else " under Core nodes"))
     # always-on RedMulE engine node (under Tile);
     if args.redmule:
         # creates the node BEFORE rm ports nest in it
@@ -2580,13 +2752,13 @@ def main():
     # always-on Spatz vector-engine node (under each Core node)
     if args.spatz:
         process_spatz(args.spatz, builder, uu, args)
-    # The per-request memory trace is captured by tb_noc_profiling.svh and
-    # sits in noc_profiling/ with the other port traces (pe_/rm_); interim
-    # 2026-08-04 runs had it in spatz_profiling/, hence the fallback.
-    sp_mem_dir = (args.noc if (args.noc and mt.have_trace(args.noc))
+    # The per-request memory trace IS the core_ port trace in noc_profiling/;
+    # the VLSU counters below are its vector ports (idx % ppc != 0).
+    sp_mem_dir = (args.noc if args.noc
                   else args.spatz)
     if sp_mem_dir:
-        process_spatz_mem(sp_mem_dir, builder, uu, args)
+        process_spatz_mem(sp_mem_dir, builder, uu, args,
+                          pe_data=pe_data, flows=flows)
     if args.noc:
         process_rm_ports(
             args.noc,
@@ -2595,7 +2767,7 @@ def main():
             args,
             flows=flows,
             rm_data=rm_data,
-            rmw_data=rmw_data)
+                             )
         # Tiles BEFORE routers so the root order is Core / NoC tiles / NoC
         # routers: a memory access enters/exits the mesh at the tile, so
         # keeping tiles adjacent to the cores makes the

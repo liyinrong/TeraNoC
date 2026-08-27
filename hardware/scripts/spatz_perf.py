@@ -18,8 +18,11 @@ beside the other port traces (needs ``noc_profiling=1``):
   scoreboard occupancy, per-unit busy/sub-state, retire handshakes, active
   memory ports. Gives the occupancy/CPI stack and *VLSU cycles per memory
   instruction*.
-* ``noc_profiling/spmem_g<g>_t<t>.log`` -- the per-REQUEST memory trace: one
-  record per accepted word request with its round-trip latency and destination
+* ``noc_profiling/core_g<g>_t<t>.log`` -- the per-REQUEST memory trace of every
+  core port; the Spatz vector ports are the flat indices with
+  ``idx % ppc != 0`` (``ppc = NrMemPorts + 1``). One record per accepted word
+  request, paired with its response to give a round-trip latency and a
+  destination
   class. Gives what the engine trace cannot: where the VLSU occupancy goes.
 
 Reported per-memory-instruction decomposition (all per core, per kernel
@@ -73,7 +76,17 @@ class CoreEngine:
     """Engine-trace reduction of one Spatz core."""
 
     def __init__(self):
-        self.dims = (0, 0, 0, 0)  # VLEN, N_FU, NrMemPorts, VRFWordBytes
+        # VLEN, N_FU, NrMemPorts, VRFWordBytes, ELENB, RobDepth
+        self.dims = (0, 0, 0, 0, 0, 0)
+        # L records: elements fed vs the peak AT THE CURRENT SEW, and the
+        # per-lane result-valid bytes. Both are change-detected state runs, so
+        # each is weighted by the cycles its run covers.
+        self.vfu_elem = 0.0      # sum of elems over cycles
+        self.vfu_peak = 0.0      # sum of nr_elem_word over the same cycles
+        self.vfu_fed = 0         # cycles with a word fed
+        self.lane_cyc = collections.Counter()   # lane -> busy cycles
+        self.rob_sum = collections.Counter()    # port -> summed level
+        self.rob_cyc = 0                        # cycles covered by B runs
         self.end_cyc = 0
         self.active = 0         # cycles with a C row (engine not idle)
         self.bucket = collections.Counter()
@@ -93,6 +106,11 @@ class CoreEngine:
         self.lin = self.lout = 0
         self.feed = 0           # cycles a word was fed to the FUs
         self.extended = False   # log carries the 2026-08 fields
+        # -- VLSU reorder buffers (engine's own view of its memory work) --
+        self.vlsu_out_sum = 0   # sum of outstanding requests over cycles
+        self.vlsu_out_cyc = 0   # cycles with anything outstanding
+        self.rob_full_cyc = 0   # cycles with at least one ROB saturated
+        self.vlsu_ext = False   # log carries the ROB fields
         # -- per vector instruction (I/R lines) --
         self.n_insn = [0, 0, 0, 0]          # per UNITS
         self.vl_sum = [0, 0, 0, 0]
@@ -123,14 +141,46 @@ def load_engine(sp_dir, lo, hi):
         e = CoreEngine()
         # (unit, scoreboard id) -> issue cycles awaiting their retire
         pend = collections.defaultdict(collections.deque)
+        # L/B are change-detected state RUNS: a row holds until the next one,
+        # so each is charged for the cycles its run actually covers, clipped
+        # to the window. Counting rows instead would weight a 1-cycle blip the
+        # same as a 1000-cycle plateau.
+        l_state = b_state = None
+
+        def flush_l(upto):
+            nonlocal l_state
+            if l_state is not None:
+                n = min(upto, hi) - max(l_state[0], lo)
+                if n > 0 and l_state[3]:
+                    e.vfu_elem += l_state[3] * n
+                    e.vfu_peak += l_state[2] * n
+                    e.vfu_fed += n
+                    for i, by in enumerate(l_state[4:]):
+                        if by:
+                            e.lane_cyc[i] += n
+            l_state = None
+
+        def flush_b(upto):
+            nonlocal b_state
+            if b_state is not None:
+                n = min(upto, hi) - max(b_state[0], lo)
+                if n > 0:
+                    for i, lvl in enumerate(b_state[1:]):
+                        e.rob_sum[i] += lvl * n
+                    e.rob_cyc += n
+            b_state = None
+
         with open(path, "r", errors="replace") as f:
             for line in f:
                 x = line.split()
                 if not x:
                     continue
-                if x[0] == "D" and len(x) in (4, 5):
-                    e.dims = tuple(int(v) for v in x[1:]) + (
-                        (0,) if len(x) == 4 else ())
+                # 4..7 fields: the header grew twice (VRFWordBytes, then
+                # ELENB + RobDepth). Pad rather than pin the length -- an
+                # exact-length check here silently blanked every dim once.
+                if x[0] == "D" and 4 <= len(x) <= 7:
+                    e.dims = tuple(
+                        [int(v) for v in x[1:]] + [0, 0, 0])[:6]
                     continue
                 if x[0] == "E" and len(x) == 2:
                     e.end_cyc = int(x[1])
@@ -164,7 +214,25 @@ def load_engine(sp_dir, lo, hi):
                     if q:
                         e.lat[u].add(cyc - q.popleft())
                     continue
-                if x[0] != "C" or len(x) not in (14, 18):
+                # L <cyc> <vsew> <nr_elem_word> <elems> <lane0..laneN-1>
+                if x[0] == "L" and len(x) >= 5:
+                    try:
+                        v = [int(z) for z in x[1:]]
+                    except ValueError:
+                        continue
+                    flush_l(v[0])
+                    l_state = v
+                    continue
+                # B <cyc> <pend0..pendN-1>
+                if x[0] == "B" and len(x) >= 3:
+                    try:
+                        v = [int(z) for z in x[1:]]
+                    except ValueError:
+                        continue
+                    flush_b(v[0])
+                    b_state = v
+                    continue
+                if x[0] != "C" or len(x) not in (14, 18, 21):
                     continue
                 v = [int(z) for z in x[1:]]
                 cyc = v[0]
@@ -172,8 +240,8 @@ def load_engine(sp_dir, lo, hi):
                     continue
                 (_cyc, _occ, stall, issue, vfu_b, _vfu_st, vlsu_b, _vlsu_st,
                  vsldu_b, vfu_r, vlsu_r, vsldu_r, memact) = v[:13]
-                if len(v) == 17:                  # 2026-08 fields
-                    istall, vstall, lin, lout = v[13:]
+                if len(v) >= 17:                  # 2026-08 fields
+                    istall, vstall, lin, lout = v[13:17]
                     e.extended = True
                     # A cause only means "blocked" while something is
                     # actually waiting to issue (bit 4). The RTL's own `stall`
@@ -202,6 +270,14 @@ def load_engine(sp_dir, lo, hi):
                     e.lout += lout
                     if lin:
                         e.feed += 1
+                if len(v) >= 20:                  # VLSU ROB state
+                    vlsu_out, rob_full, _rob_empty = v[17:20]
+                    e.vlsu_ext = True
+                    e.vlsu_out_sum += vlsu_out
+                    if vlsu_out:
+                        e.vlsu_out_cyc += 1
+                    if rob_full:
+                        e.rob_full_cyc += 1
                 e.active += 1
                 e.bucket[_bucket(stall, vfu_b, vlsu_b, vsldu_b)] += 1
                 e.issue += issue
@@ -215,6 +291,9 @@ def load_engine(sp_dir, lo, hi):
                 if e.first is None:
                     e.first = cyc
                 e.last = cyc
+        # the last run holds to the E footer
+        flush_l(e.end_cyc + 1)
+        flush_b(e.end_cyc + 1)
         e.n_unretired = sum(len(q) for q in pend.values())
         out[(g, t, c)] = e
     return out
@@ -247,24 +326,36 @@ class CoreMem:
         self.occ += r.lat
 
 
-def load_mem(sp_dir, lo, hi):
-    """Parse every spmem_g*_t*.log -> ({(g,t,c): CoreMem}, dims)."""
-    out, dims = {}, None
-    for g, t, d, cores, _end in mt.iter_spmem_tiles(sp_dir):
-        dims = d
-        for c, ct in cores.items():
-            cm = CoreMem(d.nr_ports)
+def load_mem(noc_dir, lo, hi, nr_mem_ports, tiles_per_group):
+    """Parse the VECTOR ports out of noc_profiling/core_g*_t*.log ->
+    {(g,t,c): CoreMem}.
+
+    core_ carries every core memory port of a tile on the flat local-port axis
+    (idx = ports_per_core*c + p, p=0 the scalar Snitch port). The Spatz vector
+    ports are p >= 1, so vector port = p - 1. There is no separate
+    engine-boundary trace: the path from the VLSU to this tap is combinational,
+    so the cycles are the same ones, and noc_profiling is the single place a
+    memory request's life is recorded."""
+    out = {}
+    ppc = nr_mem_ports + 1
+    for g, t, ports in mt.iter_port_tiles(noc_dir, "core", tiles_per_group):
+        for idx, ct in ports.items():
+            c, p = divmod(idx, ppc)
+            if p == 0:                       # the scalar Snitch data port
+                continue
+            cm = out.get((g, t, c))
+            if cm is None:
+                cm = out[(g, t, c)] = CoreMem(nr_mem_ports)
             for r in ct.recs:
                 if not (lo <= r.cyc < hi):
                     continue
                 cm.n_req += 1
                 if r.lat is None:
                     cm.n_inflight += 1
-                cm.add(r)
-            cm.n_rsp = ct.n_rsp
-            cm.n_orphan = ct.n_orphan
-            out[(g, t, c)] = cm
-    return out, dims
+                cm.add(r._replace(port=p - 1))
+            cm.n_rsp += ct.n_rsp
+            cm.n_orphan += ct.n_orphan
+    return out
 
 
 def _fmt(v, w=10, p=2):
@@ -309,7 +400,7 @@ def _lat_line(name, s, total_n):
             f" {s.quantile(99):>7d} {s.hi:>7d}")
 
 
-def report(eng, mem, dims, args, out):
+def report(eng, mem, args, out):
     cores = sorted(set(eng) | set(mem))
     if not cores:
         print("no Spatz logs found", file=sys.stderr)
@@ -332,10 +423,6 @@ def report(eng, mem, dims, args, out):
     if any_e:
         print(f"  engine    : VLEN={any_e.dims[0]}, N_FU={any_e.dims[1]}, "
               f"mem ports/core={any_e.dims[2]}", file=out)
-    if dims:
-        print(f"  memory    : {dims.num_tiles} tiles, "
-              f"{dims.tiles_per_group} tiles/group, "
-              f"id bits={dims.id_bits}", file=out)
     print(f"  run       : {end_cyc} cycles; window "
           f"[{win_lo}, {win_hi if args.cycle_end is not None else 'end'}) "
           f"= {span} cycles", file=out)
@@ -384,6 +471,21 @@ def report(eng, mem, dims, args, out):
               "   <- model target", file=out)
         print("    mem-port valid cycles     "
               f"{s_memact / n:>12.1f}", file=out)
+        # VLSU reorder buffers: the engine's own view of its memory work.
+        # Cross-check against the round-trip table below via Little's law --
+        # outstanding = request rate * latency, measured independently.
+        if any(e.vlsu_ext for e in eng.values()):
+            s_out = sum(e.vlsu_out_sum for e in eng.values())
+            s_ocyc = sum(e.vlsu_out_cyc for e in eng.values())
+            s_full = sum(e.rob_full_cyc for e in eng.values())
+            print("", file=out)
+            print("    VLSU outstanding / cyc    "
+                  f"{s_out / (span * n):>12.2f}", file=out)
+            print("    ... while non-zero        "
+                  f"{(s_out / s_ocyc if s_ocyc else 0):>12.2f}", file=out)
+            print("    ROB-full cycles           "
+                  f"{_pct(s_full, span * n):>11.1f}%"
+                  "   (VLSU throttled by its own depth)", file=out)
 
     # ---------------- stall causes + VFU datapath ----------------
     if eng and any(e.extended for e in eng.values()):
@@ -420,13 +522,55 @@ def report(eng, mem, dims, args, out):
         print(f"    cycles feeding the FUs    {feed / n:>12.1f}"
               f"   ({_pct(feed, vfu_b):.1f}% of VFU-busy cycles)", file=out)
         print(f"    bytes fed / core          {lin / n:>12.1f}", file=out)
-        print("    lane utilization          "
+        print("    byte-mask fill            "
               f"{_pct(lin, feed * peak) if (feed and peak) else 0:>12.2f}%"
               "   <- of the cycles it feeds", file=out)
-        print("    lane utilization (window) "
+        print("    byte-mask fill (window)   "
               f"{_pct(lin, allc * peak) if peak else 0:>12.2f}%", file=out)
+        print("      (valid_operations is '1 for ordinary vector ops, so the "
+              "two above track", file=out)
+        print("       word_issued, NOT the vl tail -- use the SEW-relative "
+              "figures below)", file=out)
         print(f"    result-valid bytes / core {lout / n:>12.1f}"
               "   (held across writeback back-pressure)", file=out)
+
+        # The honest throughput measure: elements actually fed against the
+        # peak AT THE CURRENT ELEMENT WIDTH (nr_elem_word). Filling the lanes
+        # with fp8 scores the same 100% as filling them with fp32 -- a narrow
+        # SEW is not charged for leaving the byte width unused.
+        s_elem = sum(e.vfu_elem for e in eng.values())
+        s_peak = sum(e.vfu_peak for e in eng.values())
+        s_fed = sum(e.vfu_fed for e in eng.values())
+        if s_peak:
+            print("", file=out)
+            print("    elements / feeding cyc    "
+                  f"{s_elem / s_fed if s_fed else 0:>12.2f}", file=out)
+            print("    vs SEW peak (feeding)     "
+                  f"{_pct(s_elem, s_peak):>12.2f}%"
+                  "   <- tail words only", file=out)
+            win_peak = (s_peak * allc / s_fed) if s_fed else 0
+            print("    vs SEW peak (window)      "
+                  f"{_pct(s_elem, win_peak):>12.2f}%"
+                  "   <- model target", file=out)
+            lanes = sorted({i for e in eng.values() for i in e.lane_cyc})
+            if lanes:
+                print("    per-lane busy (result-valid, % of window)",
+                      file=out)
+                for i in lanes:
+                    v = sum(e.lane_cyc[i] for e in eng.values())
+                    print(f"      lane {i:<17}{_pct(v, allc):>12.2f}%",
+                          file=out)
+
+        # Per-port ROB level: which port saturated, and how deep it ran.
+        depth = next((e.dims[5] for e in eng.values() if e.dims[5]), 0)
+        rcyc = sum(e.rob_cyc for e in eng.values())
+        if depth and rcyc:
+            print("", file=out)
+            print(f"    VLSU ROB level per port (depth {depth})", file=out)
+            for p in sorted({i for e in eng.values() for i in e.rob_sum}):
+                v = sum(e.rob_sum[p] for e in eng.values())
+                print(f"      port {p:<17}{v / rcyc:>12.2f}"
+                      f"   ({_pct(v, rcyc * depth):.1f}% full)", file=out)
         vreq = sum(e.vfu_req_cyc for e in eng.values())
         if vreq:
             tot_v = collections.Counter()
@@ -620,7 +764,7 @@ def write_csv(path, eng, mem, span):
                 f"{r[c]:.4f}" for _h, c, _w, _p in COLS) + "\n")
 
 
-def write_dump(path, mem_dir, lo, hi, core):
+def write_dump(path, mem_dir, lo, hi, core, ppc=1, tpg=1):
     """One row per paired request -- the raw events, decoded (class resolved,
     request paired with its response). Streams tile by tile so a whole-machine
     dump never has to fit in memory."""
@@ -630,9 +774,10 @@ def write_dump(path, mem_dir, lo, hi, core):
         f.write("cycle,group,tile,core,port,rw,addr,dst_tile,class,latency\n")
         if not mem_dir:
             return 0
-        for g, t, _d, cores, _e in mt.iter_spmem_tiles(mem_dir):
-            for c, ct in sorted(cores.items()):
-                if want and (g, t, c) != want:
+        for g, t, ports in mt.iter_port_tiles(mem_dir, "core", tpg):
+            for idx, ct in sorted(ports.items()):
+                c, p = divmod(idx, ppc)
+                if p == 0 or (want and (g, t, c) != want):
                     continue
                 for r in ct.recs:
                     if not (lo <= r.cyc < hi) or r.lat is None:
@@ -658,6 +803,9 @@ def main():
     ap.add_argument("dir", help="build dir (finds spatz_profiling/ for the "
                                 "engine trace and noc_profiling/ for the "
                                 "memory trace), or either of those dirs")
+    ap.add_argument("--tiles-per-group", type=int, default=1,
+                    help="tiles per group -- needed to turn a destination "
+                         "tile into a local/intra/inter address class")
     ap.add_argument("--cycle-start", type=int, default=0,
                     help="ignore samples before this cycle (kernel window)")
     ap.add_argument("--cycle-end", type=int, default=None,
@@ -685,23 +833,24 @@ def main():
     # The two traces live in different directories (engine internals vs
     # memory-port traffic); accept the build dir, or either dir directly.
     eng_dir = _find(args.dir, "spatz_g*_t*_c*.log", ("spatz_profiling",))
-    # spatz_profiling is the last resort: that is where spmem landed before it
-    # was moved beside the other port traces.
-    mem_dir = _find(args.dir, "spmem_g*_t*.log",
-                    ("noc_profiling", "spatz_profiling"))
+    mem_dir = _find(args.dir, "core_g*_t*.log", ("noc_profiling",))
     args.dir = f"{eng_dir or '-'} + {mem_dir or '-'}"
 
     lo = max(0, args.cycle_start)
     hi = args.cycle_end if args.cycle_end is not None else (1 << 62)
     eng = load_engine(eng_dir, lo, hi) if eng_dir else {}
-    mem, dims = load_mem(mem_dir, lo, hi) if mem_dir else ({}, None)
+    # The engine header gives NrMemPorts, which is what turns a core_ flat port
+    # index back into (core, vector port): ports_per_core = NrMemPorts + 1.
+    nr_mem_ports = next((e.dims[2] for e in eng.values() if e.dims[2]), 0)
+    mem = (load_mem(mem_dir, lo, hi, nr_mem_ports, args.tiles_per_group)
+           if mem_dir and nr_mem_ports else {})
     if not eng and not mem:
-        print(f"no spatz_g*_t*_c*.log / spmem_g*_t*.log under {args.dir} "
+        print(f"no spatz_g*_t*_c*.log / core_g*_t*.log under {args.dir} "
               "(or its spatz_profiling/ , noc_profiling/)", file=sys.stderr)
         return 1
     out = open(args.output, "w") if args.output else sys.stdout
     try:
-        rc = report(eng, mem, dims, args, out)
+        rc = report(eng, mem, args, out)
     finally:
         if args.output:
             out.close()
@@ -711,7 +860,8 @@ def main():
         write_csv(args.csv, eng, mem, span)
         print(f"wrote {args.csv}", file=sys.stderr)
     if args.dump:
-        n = write_dump(args.dump, mem_dir, lo, hi, args.core)
+        n = write_dump(args.dump, mem_dir, lo, hi, args.core,
+                       nr_mem_ports + 1, args.tiles_per_group)
         print(f"wrote {args.dump} ({n} requests)", file=sys.stderr)
     return rc
 

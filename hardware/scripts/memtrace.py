@@ -6,49 +6,54 @@
 # Author: Yinrong Li, ETH Zurich
 """Readers for the per-request MEMORY-PORT traces of every requester.
 
-Parses ``noc_profiling/spmem_g<g>_t<t>.log`` (emitted by
-``tb/tb_noc_profiling.svh`` beside the other memory-port traces
-``pe_``/``rm_``, under the same ``noc_profiling=1`` gate;
-``tb/tb_spatz_profiling.svh`` keeps the engine-internal trace) and pairs every
-request with its response, so
-consumers get one record per memory word request with its round-trip latency
-and its address class. The same pairing runs on the tile-side port logs
-``pe_g<g>_t<t>.log`` (Snitch scalar + Spatz vector ports) and
-``rm_g<g>_t<t>.log`` (RedMulE master ports), so all three requester classes are
-measured with ONE metric -- see ``iter_port_tiles``. Pure stdlib, shared by
-``interco_perf.py`` / ``spatz_perf.py`` (text reports) and ``perfetto_gen.py``
-(timeline counters), which must not depend on each other.
+``noc_profiling/`` records the whole LIFE OF EACH MEMORY REQUEST and nothing
+else -- requester-internal state lives in the per-engine traces
+(``tb/tb_spatz_profiling.svh``, ``tb/tb_redmule_profiling.svh``). Two families
+cover every requester, both emitted by ``tb/tb_noc_profiling.svh`` under the
+``noc_profiling=1`` gate and both parsed here with the SAME pairing, so all
+requester classes are measured with one metric -- see ``iter_port_tiles``:
 
-Log format (one file per tile, every line prefixed with the core index)::
+    core_g<g>_t<t>.log   the Snitch scalar data port AND every Spatz vector
+                         port, on the flat local-port axis
+                         (idx = ports_per_core*core + port, p=0 scalar)
+    rm_g<g>_t<t>.log     the RedMulE master ports, on whichever plane carries
+                         them (narrow: several ports; WP2 wide: one)
 
-    D <NrMemPorts> <NumCoresPerTile> <NumTilesPerGroup> <NumTiles> <IdBits>
-    <c> Q <cyc> <port> <id> <addr_hex> <wr> <dst_tile>
-    <c> P <cyc> <port> <id> <wr>
-    E <last_cyc>
+Pure stdlib, shared by ``interco_perf.py`` / ``spatz_perf.py`` (text reports)
+and ``perfetto_gen.py`` (timeline counters), which must not depend on each
+other.
 
-Pairing key: ``(port, id & (2**IdBits - 1), wr)``. The VLSU puts its per-port
-ROB id on the request and gets it back on the response, and only the low
-IdBits round-trip through the TCDM (mempool_cc.sv packs {write, id[IdBits-1:0]}
-into meta_id) -- so the id is masked to IdBits before matching. `wr`
-distinguishes a store-ack from a load reply that reuses the same id (the store
-path frees its ROB entry at send, not at response). Within one key the memory
-system cannot reorder (an id is not reused until it is freed), so the k-th
-response pairs with the k-th request; ACROSS keys responses do come back out of
-order, which is exactly why the pairing is per key.
+Log format (one file per tile, every record prefixed with the port index)::
 
-Latency convention: ``lat = rsp_cycle - req_cycle``, i.e. the number of cycles
-from the accepted request handshake to the response landing at the Spatz
-boundary. A local-tile hit is the floor of this distribution; the issue-side
-back-pressure (valid waiting for ready) is NOT part of it -- that is the engine
-trace's ``memact``.
+    D <data_width_bits>
+    <idx> S <net> <io> 0 <start> <end> <state>
+    <idx> P 1 0 <cyc> <wen> <addr_hex> <meta_id> <dst_tile>   request accepted
+    <idx> P 0 0 <cyc> <meta_id>                               response arrived
+
+``D`` gives the bits moved by one record: 32 on the narrow plane, and
+WIDE_TCDM_DATA_WIDTH for ``rm_`` when the WP2 wide plane carries the engine.
+Request COUNTS are therefore not comparable across a plane A/B but count*width
+is; see ``read_width_bits``.
+
+Pairing key: ``(port idx, meta_id)``. meta_id is unique among that port's
+outstanding requests and round-trips unchanged, so within one key the k-th
+response belongs to the k-th request; across keys responses do come back out of
+order, which is exactly why the pairing is per key. The one exception is the
+RedMulE Z writeback, which reuses ONE meta_id for many outstanding stores --
+that path is an in-order FIFO, so FIFO pairing stays exact even though no
+individual request can be followed across a NoC hop.
+
+Latency convention: ``lat = rsp_cycle - req_cycle``, from the accepted request
+handshake to the response landing back at the port. A local-tile hit is the
+floor of the distribution; issue-side back-pressure (valid waiting for ready)
+is NOT part of it -- that is the ``S`` state runs, and the engine trace's
+``memact`` / ``vlsu_out``.
 """
 
 import collections
 import glob
 import os
 import re
-
-SPMEM_LOG_RE = re.compile(r"spmem_g(\d+)_t(\d+)\.log$")
 
 # Address classes, by destination relative to the requesting core's own tile.
 # CLS_UNKNOWN (= len(CLASSES), defined below) is only for logs predating the
@@ -59,9 +64,6 @@ CLS_LOCAL, CLS_INTRA, CLS_INTER, CLS_SOC = range(4)
 # One paired request. `lat` is None for a request still outstanding at the end
 # of the trace (counted separately; never folded into a latency statistic).
 Rec = collections.namedtuple("Rec", "cyc lat port wr cls dst addr")
-
-Dims = collections.namedtuple(
-    "Dims", "nr_ports cores_per_tile tiles_per_group num_tiles id_bits")
 
 
 class CoreTrace:
@@ -96,118 +98,43 @@ def classify(dst, g, t, tiles_per_group):
     return CLS_INTER
 
 
-def parse_tile_log(path, g, t):
-    """Parse one spmem_g<g>_t<t>.log -> (dims, {core: CoreTrace}, end_cyc).
-
-    Returns dims=None if the file carries no D header (not a trace)."""
-    dims = None
-    end_cyc = 0
-    cores = {}
-    # (core, port, id, wr) -> deque of (req_cyc, addr, dst)
-    pending = collections.defaultdict(collections.deque)
-    idmask = None
-    with open(path, "r", errors="replace") as f:
-        for line in f:
-            x = line.split()
-            if not x:
-                continue
-            if x[0] == "D" and len(x) == 6:
-                dims = Dims(*(int(v) for v in x[1:]))
-                idmask = (1 << dims.id_bits) - 1
-                continue
-            if x[0] == "E" and len(x) == 2:
-                end_cyc = int(x[1])
-                continue
-            if len(x) < 5 or dims is None:  # D header comes first
-                continue
-            try:
-                c = int(x[0])
-            except ValueError:
-                continue
-            ct = cores.get(c)
-            if ct is None:
-                ct = cores[c] = CoreTrace()
-            if x[1] == "Q" and len(x) == 8:
-                cyc, port = int(x[2]), int(x[3])
-                rid = int(x[4]) & (idmask if idmask is not None else ~0)
-                addr, wr, dst = int(x[5], 16), int(x[6]), int(x[7])
-                pending[(c, port, rid, wr)].append((cyc, addr, dst))
-                ct.n_req += 1
-            elif x[1] == "P" and len(x) == 6:
-                cyc, port = int(x[2]), int(x[3])
-                rid = int(x[4]) & (idmask if idmask is not None else ~0)
-                wr = int(x[5])
-                ct.n_rsp += 1
-                q = pending.get((c, port, rid, wr))
-                if q:
-                    qcyc, addr, dst = q.popleft()
-                    ct.recs.append(Rec(qcyc, cyc - qcyc, port, wr,
-                                       classify(dst, g, t,
-                                                dims.tiles_per_group),
-                                       dst, addr))
-                else:
-                    ct.n_orphan += 1
-    # whatever never came back
-    for (c, port, _rid, wr), q in pending.items():
-        ct = cores.setdefault(c, CoreTrace())
-        for qcyc, addr, dst in q:
-            ct.n_inflight += 1
-            ct.recs.append(Rec(qcyc, None, port, wr,
-                               classify(dst, g, t, dims.tiles_per_group),
-                               dst, addr))
-    for ct in cores.values():
-        ct.recs.sort(key=lambda r: r.cyc)
-    return dims, cores, end_cyc
-
-
-def iter_spmem_tiles(sp_dir):
-    """Yield (g, t, dims, {core: CoreTrace}, end_cyc) per tile log, in
-    (g,t) order. Streams one tile at a time -- a whole 256-core run is a few
-    million records, so consumers should aggregate as they go."""
-    paths = []
-    for path in glob.glob(os.path.join(sp_dir, "spmem_g*_t*.log")):
-        m = SPMEM_LOG_RE.search(os.path.basename(path))
-        if m:
-            paths.append((int(m.group(1)), int(m.group(2)), path))
-    for g, t, path in sorted(paths):
-        dims, cores, end_cyc = parse_tile_log(path, g, t)
-        if dims is None:
-            continue
-        yield g, t, dims, cores, end_cyc
-
-
-def have_trace(sp_dir):
-    """True if `sp_dir` holds at least one per-request memory trace."""
-    return bool(glob.glob(os.path.join(sp_dir, "spmem_g*_t*.log")))
-
-
 # ---------------------------------------------------------------------------
-# Tile-side port logs (pe_ = Snitch scalar + Spatz vector ports, rm_ = RedMulE
-# master ports). Same idea as the spmem trace, one level further out: the P
-# lines already carry both directions, so pairing them gives the SAME
-# round-trip metric for every requester class.
+# Tile-side port logs. The P lines carry both directions, so pairing them gives
+# the same round-trip metric for every requester class:
 #   req  <idx> P 1 0 <cyc> <wen> <addr_hex> <meta_id> <dst_tile>
 #   resp <idx> P 0 0 <cyc> <meta_id>
 # `dst_tile` is absent in logs from before 2026-08-04 -> class falls back to
 # "unknown" rather than being guessed.
-#
-# Pairing key is (port idx, meta_id). For a reorder-buffered requester (Snitch
-# loads, Spatz VLSU, RedMulE X/W/Y streams) meta_id is unique among that port's
-# outstanding requests, so FIFO order within the key is exact. The RedMulE Z
-# writeback instead reuses ONE meta_id for many concurrently-outstanding stores
-# -- but that path is an in-order FIFO, so the k-th response still belongs to
-# the k-th request and FIFO pairing stays exact. (The Perfetto exporter refuses
-# to draw flow arrows for that case only because a NoC hop cannot be tied to a
-# specific request there; a port-local round trip can.)
 # ---------------------------------------------------------------------------
-# rmw_ (the WP2 wide plane engine port) must precede rm_: they share a
-# prefix, and an alternation matches left to right.
-PORT_LOG_RE = re.compile(r"(?:pe|rmw|rm)_g(\d+)_t(\d+)\.log$")
+PORT_LOG_RE = re.compile(r"(?:core|rm)_g(\d+)_t(\d+)\.log$")
 CLS_UNKNOWN = len(CLASSES)
+# Default record width when a log predates the `D <bits>` header.
+DEFAULT_WIDTH_BITS = 32
+
+
+def read_width_bits(path):
+    """Bits moved by ONE record of this port log, from its `D <bits>` header.
+
+    RedMulE emits rm_ on either plane, and one wide record is
+    WIDE_TCDM_DATA_WIDTH bits where a narrow one is 32 -- so request COUNTS are
+    not comparable across a plane A/B, but count*width is. Reading the width
+    from the file (rather than from its name) is what lets a consumer normalise
+    without knowing which plane ran."""
+    with open(path, "r", errors="replace") as f:
+        for line in f:
+            x = line.split()
+            if x and x[0] == "D" and len(x) >= 2:
+                try:
+                    return int(x[1])
+                except ValueError:
+                    break
+            if x:
+                break
+    return DEFAULT_WIDTH_BITS
 
 
 def parse_port_log(path, g, t, tiles_per_group):
-    """Parse one pe_/rm_ log -> {port idx: CoreTrace} (P lines only; the S
+    """Parse one core_/rm_ log -> {port idx: CoreTrace} (P lines only; the S
     state runs are the fabric view and are read separately)."""
     ports = {}
     pending = collections.defaultdict(collections.deque)
@@ -261,17 +188,24 @@ def parse_port_log(path, g, t, tiles_per_group):
 
 
 def iter_port_tiles(noc_dir, kind, tiles_per_group):
-    """Yield (g, t, {port idx: CoreTrace}) for every pe_ (kind='pe'), rm_
-    (kind='rm') or rmw_ (kind='rmw', the WP2 wide plane's engine port) log, in
-    (g,t) order. `tiles_per_group` is needed to turn a destination tile into an
-    address class."""
+    """Yield (g, t, {port idx: CoreTrace}) for every core_ (kind='core', the
+    Snitch scalar port plus every Spatz vector port) or rm_ (kind='rm', the
+    RedMulE ports on whichever plane carries them) log, in (g,t) order.
+    `tiles_per_group` is needed to turn a destination tile into an address
+    class."""
+    for g, t, path in sorted(port_log_paths(noc_dir, kind)):
+        yield g, t, parse_port_log(path, g, t, tiles_per_group)
+
+
+def port_log_paths(noc_dir, kind):
+    """[(g, t, path)] for one port-log family -- use when the width header or
+    the file name itself is what you need, not the parsed records."""
     paths = []
     for path in glob.glob(os.path.join(noc_dir, f"{kind}_g*_t*.log")):
         m = PORT_LOG_RE.search(os.path.basename(path))
         if m:
             paths.append((int(m.group(1)), int(m.group(2)), path))
-    for g, t, path in sorted(paths):
-        yield g, t, parse_port_log(path, g, t, tiles_per_group)
+    return paths
 
 
 def percentile(sorted_vals, q):

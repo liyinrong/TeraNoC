@@ -16,13 +16,23 @@
   //
   // Spatz is per-CORE (not per-tile like RedMulE), so one log file per Spatz
   // core (reuses cycle_q from tb_noc_profiling.svh):
-  //   D <VLEN> <N_FU> <NrMemPorts> <VRFWordBytes>                   (header, once)
+  //   D <VLEN> <N_FU> <NrMemPorts> <VRFWordBytes> <ELENB> <RobDepth>
+  //                                                                 (header, once)
   //   C <cyc> <occ> <stall> <issue> <vfu_busy> <vfu_st> <vlsu_busy> <vlsu_st>
   //       <vsldu_busy> <vfu_rsp> <vlsu_rsp> <vsldu_rsp> <memact>
   //       <istall> <vstall> <lin> <lout> <vlsu_out> <rob_full> <rob_empty>
+  //   L <cyc> <vsew> <nr_elem_word> <elems> <lane0> .. <lane(N_FU-1)>
+  //                                                            (VFU lane state)
+  //   B <cyc> <pend0> .. <pend(NrMemPorts-1)>                  (VLSU ROB level)
   //   I <cyc> <id> <unit> <vl> <vsew> <vlmul>              (vector insn issued)
   //   R <cyc> <unit> <id>                                  (vector insn retired)
   //   E <last_cyc>                                                  (footer, once)
+  //
+  // L and B are CHANGE-DETECTED state runs (a line only when the value moves,
+  // like the NoC port traces), not one line per cycle: per-cycle detail is
+  // preserved because a run spans until the next line, at a fraction of the
+  // volume. They are separate record letters rather than more C columns on
+  // purpose -- widening C has silently broken its parsers twice.
   // A C line is written every cycle the engine is active; a cycle with no C line
   // means IDLE. The exporter derives the FSM slices, util counters and the
   // occupancy/CPI breakdown from these raw samples, so the policy can change
@@ -71,6 +81,38 @@
   //          back-pressure (like memact on the memory side), not a work count.
   //   VRFWordBytes = N_FU*ELENB, the per-cycle peak (in the D header).
   //
+  // PER-LANE work and the SEW-relative peak -- the `L` record.
+  //
+  // NOTE what is NOT usable here: valid_operations is '1 for every ordinary
+  // vector op (spatz_vfu.sv:140-142) -- it only narrows for scalar and
+  // reduction ops -- and vreg_wbe likewise. So neither carries the vl tail,
+  // and a per-lane popcount of them would be a constant ELENB. `lin` above
+  // therefore measures word_issued, not lane fill, whatever its name suggests.
+  // The two signals that DO carry it:
+  //   elems = min(spatz_req.vl - vl_q, nr_elem_word) on an issued cycle, else
+  //          0 -- the ELEMENTS actually fed this cycle. Spatz advances vl_q by
+  //          a whole nr_elem_word per word (spatz_vfu.sv:228), so only the LAST
+  //          word of a vector is partial; this is what makes that visible.
+  //   nr_elem_word = spatz_vfu.sv:103 -- the elements one VRF word holds at the
+  //          CURRENT vsew (N_FU << (MAXEW-vsew), halved when narrowing): 16 fp8
+  //          / 8 fp16 / 4 fp32 on N_FU=4, ELEN=32. elems/nr_elem_word is
+  //          therefore throughput as a fraction of the peak AT THIS ELEMENT
+  //          WIDTH, so a kernel that fills its lanes with fp8 reads 100% rather
+  //          than being penalised for not filling the byte width.
+  //   lane l = $countones(result_valid[l*ELENB +: ELENB]) -- the OUTPUT side,
+  //          per lane. This is the only genuinely per-lane signal in the VFU:
+  //          the input side is lock-step by construction (all lanes take a
+  //          slice of the same VRF word), so lanes differ only through FU
+  //          latency, IPU/FPU switches and drain, which is exactly what the
+  //          per-lane lines show.
+  //   All are 0 on a cycle with no word issued, so "not feeding" is its own
+  //   state rather than a stale hold.
+  //
+  // VLSU ROB LEVEL -- the `B` record: mem_pending_q[port], the per-port count
+  // of requests issued and not yet answered (0..RobDepth). C carries only the
+  // sum (vlsu_out) and the full/empty bitmaps; the level per port is what shows
+  // WHICH port saturated and how deep it ran.
+  //
   // WHAT was issued -- one `I` line per vector instruction accepted by the
   // controller (spatz_req_valid_o), so per-instruction metrics can be
   // normalised by length instead of averaging over mixed shapes:
@@ -99,16 +141,34 @@
           for (int c = 0; c < NumCoresPerTile; c++) begin
             f_speng[g][t][c] = $fopen($sformatf("%s/spatz_g%0d_t%0d_c%0d.log",
                                                 sp_log_path, g, t, c), "w");
-            $fwrite(f_speng[g][t][c], "D %0d %0d %0d %0d\n",
+            // ELENB sizes one lane; RobDepth (NrOutstandingLoads, read off the
+            // VLSU instance) scales the per-port ROB level.
+            $fwrite(f_speng[g][t][c], "D %0d %0d %0d %0d %0d %0d\n",
                     spatz_pkg::VLEN, spatz_pkg::N_FU,
                     mempool_pkg::NumMemPortsPerSpatz,
-                    spatz_pkg::N_FU * spatz_pkg::ELENB);
+                    spatz_pkg::N_FU * spatz_pkg::ELENB,
+                    spatz_pkg::ELENB,
+                    `SPATZ_TOP(0,0,0).i_vlsu.NrOutstandingLoads);
           end
     end
 
     for (genvar g = 0; g < NumGroups; g++) begin : gen_g
       for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_t
         for (genvar c = 0; c < NumCoresPerTile; c++) begin : gen_c
+          // Change-detection state for the L/B records: the last values
+          // written, so a line is emitted only when one of them moves. Cleared
+          // in the reset branch below -- NOT by a declaration initializer,
+          // which VCS rejects as a second procedural driver on a variable an
+          // always_ff also writes (ICPD_INIT); Questa accepts it silently.
+          // lb_init makes cycle 0 anchor the run rather than depending on the
+          // first compare.
+          logic [spatz_pkg::N_FU-1:0][7:0]                  prev_lane;
+          logic [2:0]                                       prev_sew;
+          int unsigned                                      prev_nelem;
+          int unsigned                                      prev_elems;
+          logic [mempool_pkg::NumMemPortsPerSpatz-1:0][7:0] prev_pend;
+          logic                                             lb_init;
+
           always_ff @(posedge clk or negedge rst_n) begin
             if (rst_n) begin
               automatic int unsigned occ        = $countones(`SPATZ_TOP(g,t,c).i_controller.running_insn_q);
@@ -158,8 +218,35 @@
                   `SPATZ_TOP(g,t,c).i_vlsu.rob_full;
               automatic logic [mempool_pkg::NumMemPortsPerSpatz-1:0] rob_empty =
                   `SPATZ_TOP(g,t,c).i_vlsu.rob_empty;
-              for (int mp = 0; mp < mempool_pkg::NumMemPortsPerSpatz; mp++)
+              // Per-port ROB level (the `B` record) and per-lane VFU bytes with
+              // their SEW peak (the `L` record); both 0 when nothing is
+              // pending / no word is fed, so idle is its own state.
+              automatic logic [mempool_pkg::NumMemPortsPerSpatz-1:0][7:0] pend = '0;
+              automatic logic [spatz_pkg::N_FU-1:0][7:0] lane  = '0;
+              automatic logic [2:0]                      sew   = '0;
+              automatic int unsigned                     nelem = 0;
+              automatic int unsigned                     elems = 0;
+              for (int mp = 0; mp < mempool_pkg::NumMemPortsPerSpatz; mp++) begin
+                pend[mp]  = `SPATZ_TOP(g,t,c).i_vlsu.mem_pending_q[mp];
                 vlsu_out += `SPATZ_TOP(g,t,c).i_vlsu.mem_pending_q[mp];
+              end
+              if (`SPATZ_TOP(g,t,c).i_vfu.word_issued) begin
+                for (int l = 0; l < spatz_pkg::N_FU; l++)
+                  lane[l] = $countones(`SPATZ_TOP(g,t,c).i_vfu.result_valid[
+                                       l*spatz_pkg::ELENB +: spatz_pkg::ELENB]);
+                sew   = `SPATZ_TOP(g,t,c).i_vfu.spatz_req.vtype.vsew;
+                nelem = `SPATZ_TOP(g,t,c).i_vfu.nr_elem_word;
+                // Only the last word of a vector is partial (vl_q advances by a
+                // whole nr_elem_word), so this clamp is the tail.
+                elems = (`SPATZ_TOP(g,t,c).i_vfu.spatz_req.vl >
+                         `SPATZ_TOP(g,t,c).i_vfu.vl_q)
+                      ? ((`SPATZ_TOP(g,t,c).i_vfu.spatz_req.vl -
+                          `SPATZ_TOP(g,t,c).i_vfu.vl_q) < nelem
+                         ? (`SPATZ_TOP(g,t,c).i_vfu.spatz_req.vl -
+                            `SPATZ_TOP(g,t,c).i_vfu.vl_q)
+                         : nelem)
+                      : 0;
+              end
               if (occ != 0 || vfu_busy || vlsu_busy || vsldu_busy || issue ||
                   memact != 0 || istall[3:0] != 4'd0 || vlsu_out != 0)
                 $fwrite(f_speng[g][t][c],
@@ -169,6 +256,27 @@
                         vfu_rsp, vlsu_rsp, vsldu_rsp, memact,
                         istall, vstall, lin, lout,
                         vlsu_out, rob_full, rob_empty);
+              // Change-detected state runs: one line only when the value moves.
+              if (!lb_init || lane != prev_lane || sew != prev_sew ||
+                  nelem != prev_nelem || elems != prev_elems) begin
+                $fwrite(f_speng[g][t][c], "L %0d %0d %0d %0d",
+                        cycle_q, sew, nelem, elems);
+                for (int l = 0; l < spatz_pkg::N_FU; l++)
+                  $fwrite(f_speng[g][t][c], " %0d", lane[l]);
+                $fwrite(f_speng[g][t][c], "\n");
+                prev_lane  <= lane;
+                prev_sew   <= sew;
+                prev_nelem <= nelem;
+                prev_elems <= elems;
+              end
+              if (!lb_init || pend != prev_pend) begin
+                $fwrite(f_speng[g][t][c], "B %0d", cycle_q);
+                for (int mp = 0; mp < mempool_pkg::NumMemPortsPerSpatz; mp++)
+                  $fwrite(f_speng[g][t][c], " %0d", pend[mp]);
+                $fwrite(f_speng[g][t][c], "\n");
+                prev_pend <= pend;
+              end
+              lb_init <= 1'b1;
               // One line per vector instruction issued / retired, so a metric
               // can be per instruction (and length-aware) instead of a mean
               // over whatever mix the kernel happened to run.
@@ -188,6 +296,14 @@
               if (vsldu_rsp)
                 $fwrite(f_speng[g][t][c], "R %0d 2 %0d\n", cycle_q,
                         `SPATZ_TOP(g,t,c).vsldu_rsp.id);
+            end else begin
+              // Sole reset of the L/B change-detection state (see above).
+              prev_lane  <= '0;
+              prev_sew   <= '0;
+              prev_nelem <= '0;
+              prev_elems <= '0;
+              prev_pend  <= '0;
+              lb_init    <= 1'b0;
             end
           end
         end

@@ -14,15 +14,14 @@ The text counterpart of what ``scripts/perfetto_gen.py`` draws from
 built by pairing each request P line with its response P line on the same port
 (key = meta_id, which is unique among a port's outstanding requests):
 
-    snitch scalar   the core's own load/store port      (pe_ idx % ppc == 0)
-    spatz vector    the Spatz VLSU's memory ports       (pe_ idx % ppc != 0)
-    redmule         the RedMulE master ports            (rm_)
-    redmule (wide plane)  the WP2 wide engine port      (rmw_)
+    snitch scalar   the core's own load/store port    (core_ idx % ppc == 0)
+    spatz vector    the Spatz VLSU's memory ports      (core_ idx % ppc != 0)
+    redmule         the RedMulE master ports           (rm_)
 
-A build carries EITHER ``rm_`` or ``rmw_``, never both -- which one it emits
-says which plane carried RedMulE. They are separate classes on purpose: one
-wide request moves a whole WideTcdmDataWidth line, so its request count and
-per-request latency are not comparable with a 32-bit port's.
+``rm_`` is the RedMulE family on EITHER plane. One record is 32 bits on the
+narrow plane and WIDE_TCDM_DATA_WIDTH on the WP2 wide one, so request counts
+are not comparable across a plane A/B -- the file's ``D <bits>`` header carries
+the width so a consumer can normalise to bytes.
 
 Because all three are measured the SAME way, they answer the question a model
 calibration actually asks: if scalar and RedMulE round trips match the model
@@ -43,17 +42,17 @@ Log families (S lines are run-length ``start end state``, state
 
     router_g<g>_{req,resp}.log  <rid> S <dir 0..4> <io> <start> <end> <state>
     tile_g<g>_t<t>.log          S <net> <io> <port> <start> <end> <state>
-    pe_g<g>_t<t>.log            <port> S <net> <io> 0 <start> <end> <state>
+    core_g<g>_t<t>.log          D <data_width_bits>
+                                <port> S <net> <io> 0 <start> <end> <state>
                                 <port> P 1 0 <cyc> <wen> <addr> <mid> <dst>
                                 <port> P 0 0 <cyc> <mid>
-    rm_g<g>_t<t>.log            same as pe_, <port> = RedMulE master port
-    rmw_g<g>_t<t>.log           same as rm_, the wide plane's single port
+    rm_g<g>_t<t>.log            same as core_, <port> = RedMulE master port
     bank_g<g>_t<t>.log          S <bank> <start> <end> <state>
 
 The WP2 wide plane adds its own fabric families, all optional::
 
     tile_g<g>_t<t>.log          SW/PW/QW lines = the wide side of the boundary
-    router_g<g>_wide_{req,resp}.log
+    router_wide_g<g>_{req,resp}.log
                                 <chan> S <cls> <dir> <io> <start> <end> <state>
                                 cls: req 0=RO 1=RW, resp 0=RD 1=WR
 
@@ -74,13 +73,13 @@ import memtrace as mt
 
 ROUTER_RE = re.compile(r"router_g(\d+)_(req|resp)\.log$")
 TILE_RE = re.compile(r"tile_g(\d+)_t(\d+)\.log$")
-PE_RE = re.compile(r"pe_g(\d+)_t(\d+)\.log$")
+CORE_RE = re.compile(r"core_g(\d+)_t(\d+)\.log$")
 RM_RE = re.compile(r"rm_g(\d+)_t(\d+)\.log$")
 BANK_RE = re.compile(r"bank_g(\d+)_t(\d+)\.log$")
-# WP2 wide TCDM plane: its own engine-port family and its own routers. A build
-# emits rm_ OR rmw_, never both -- which one says which plane carried RedMulE.
-RMW_RE = re.compile(r"rmw_g(\d+)_t(\d+)\.log$")
-WROUTER_RE = re.compile(r"router_g(\d+)_wide_(req|resp)\.log$")
+# WP2 wide TCDM plane: it reuses the rm_ family (same grammar, one client per
+# tile) and adds its own routers. Which plane carried RedMulE is read from the
+# rm_ file's `D <bits>` header, not from its name.
+WROUTER_RE = re.compile(r"router_wide_g(\d+)_(req|resp)\.log$")
 # Wide router classes per net: req = RO (meta-only read) / RW (payload),
 # resp = RD (data) / WR (meta-only write ack).
 WCLS = {"req": ("RO", "RW"), "resp": ("RD", "WR")}
@@ -97,7 +96,6 @@ SCALAR, VECTOR, REDMULE = "snitch scalar", "spatz vector", "redmule"
 # The wide-plane engine port is its OWN class: one of its requests moves a
 # whole WideTcdmDataWidth line, so its counts and latencies are not
 # comparable with a 32-bit port's and must never be summed with them.
-REDMULE_WIDE = "redmule (wide plane)"
 
 
 class Port:
@@ -159,9 +157,8 @@ def load_fabric(noc_dir, spm_dir, lo, hi):
         m_wrouter = WROUTER_RE.search(base)
         m_router = None if m_wrouter else ROUTER_RE.search(base)
         m_tile = TILE_RE.search(base)
-        m_pe, m_rm = PE_RE.search(base), RM_RE.search(base)
-        m_rmw = RMW_RE.search(base)
-        if not (m_router or m_wrouter or m_tile or m_pe or m_rm or m_rmw):
+        m_core, m_rm = CORE_RE.search(base), RM_RE.search(base)
+        if not (m_router or m_wrouter or m_tile or m_core or m_rm):
             continue
         with open(path, "r", errors="replace") as f:
             for line in f:
@@ -200,12 +197,11 @@ def load_fabric(noc_dir, spm_dir, lo, hi):
                                     (g, t, int(x[1]), int(x[2]), int(x[3])),
                                     x[4:7], lo, hi, last)
                 else:
-                    m = m_pe or m_rm or m_rmw
+                    m = m_core or m_rm
                     g, t = int(m.group(1)), int(m.group(2))
                     if x[1] != "S" or len(x) != 8:
                         continue
-                    name = ("core port" if m_pe else
-                            "redmule wide port" if m_rmw else "redmule port")
+                    name = "core port" if m_core else "redmule port"
                     last = _add_run(cls[name],
                                     (g, t, int(x[0]), int(x[2]), int(x[3])),
                                     x[5:8], lo, hi, last)
@@ -226,14 +222,12 @@ def load_fabric(noc_dir, spm_dir, lo, hi):
 
 def load_requesters(noc_dir, ppc, tpg, lo, hi):
     """Pair every port's requests with its responses -> {class: ReqClass}."""
-    out = {k: ReqClass() for k in (SCALAR, VECTOR, REDMULE, REDMULE_WIDE)}
-    for kind in ("pe", "rm", "rmw"):
+    out = {k: ReqClass() for k in (SCALAR, VECTOR, REDMULE)}
+    for kind in ("core", "rm"):
         for g, t, ports in mt.iter_port_tiles(noc_dir, kind, tpg):
             for idx, pt in ports.items():
                 if kind == "rm":
                     k = REDMULE
-                elif kind == "rmw":
-                    k = REDMULE_WIDE
                 else:
                     k = SCALAR if (ppc <= 1 or idx % ppc == 0) else VECTOR
                 rc = out[k]
@@ -266,29 +260,25 @@ def _req_section(reqs, fabric, span, args, out):
     print("-- requesters: memory round trip (accepted request -> response) "
           + "-" * 14, file=out)
     if not reqs:
-        print("    (no paired request/response packets -- the pe_/rm_ P lines "
-              "need noc_profiling=1)", file=out)
+        print("    (no paired request/response packets -- the core_/rm_ "
+              "P lines need noc_profiling=1)", file=out)
         return
     # port occupancy per class, from the same logs' S runs
     occ = collections.defaultdict(lambda: [0, 0, 0])   # busy, stall, nports
     ppc = max(1, args.ports_per_core)
     for name, ports in (("core port", fabric.get("core port", {})),
-                        ("redmule port", fabric.get("redmule port", {})),
-                        ("redmule wide port",
-                         fabric.get("redmule wide port", {}))):
+                        ("redmule port", fabric.get("redmule port", {}))):
         for (g, t, idx, net, io), p in ports.items():
             if net != 0:          # request side only
                 continue
             if name == "redmule port":
                 k = REDMULE
-            elif name == "redmule wide port":
-                k = REDMULE_WIDE
             else:
                 k = SCALAR if (ppc <= 1 or idx % ppc == 0) else VECTOR
             occ[k][0] += p.busy
             occ[k][1] += p.stall
             occ[k][2] += 1
-    for k in (SCALAR, VECTOR, REDMULE, REDMULE_WIDE):
+    for k in (SCALAR, VECTOR, REDMULE):
         rc = reqs.get(k)
         if not rc:
             continue
@@ -345,9 +335,6 @@ def _keyname(name, key, ppc):
     if name == "redmule port":
         g, t, idx, net, io = key
         return f"G{g} T{t} RM{idx} {NET[net]} {IO[io]}"
-    if name == "redmule wide port":
-        g, t, idx, net, io = key
-        return f"G{g} T{t} RMW {NET[net]} {IO[io]}"
     if name in ("tile", "tile wide"):
         g, t, net, io, port = key
         w = " wide" if name == "tile wide" else ""
@@ -368,7 +355,7 @@ def _keyname(name, key, ppc):
 
 def _fabric_section(cls, span, args, out):
     ppc = max(1, args.ports_per_core)
-    for name in ("core port", "redmule port", "redmule wide port"):
+    for name in ("core port", "redmule port"):
         if name not in cls:
             continue
         _hdr(f"{name}s (per requester port side)", out)
@@ -438,35 +425,6 @@ def _fabric_section(cls, span, args, out):
                   f"busy {_pct(p.busy, span):>6.2f}%", file=out)
 
 
-def _spmem_crosscheck(noc_dir, reqs, lo, hi, out):
-    """The Spatz vector ports are also traced at the Spatz boundary
-    (spmem_*.log). That path is combinational, so both views must see the same
-    cycles -- a mismatch means one of the two traces is mis-paired."""
-    if not mt.have_trace(noc_dir) or VECTOR not in reqs:
-        return
-    n = 0
-    tot = 0
-    for _g, _t, _d, cores, _e in mt.iter_spmem_tiles(noc_dir):
-        for ct in cores.values():
-            for r in ct.recs:
-                if r.lat is not None and lo <= r.cyc < hi:
-                    n += 1
-                    tot += r.lat
-    if not n:
-        return
-    v = reqs[VECTOR]
-    print("", file=out)
-    print("-- cross-check: Spatz-boundary trace vs tile-side ports "
-          + "-" * 19, file=out)
-    print(f"    spmem_*.log : {n:>10d} requests, "
-          f"mean {tot / n:>7.2f} cyc", file=out)
-    print(f"    pe_*.log    : {v.all.n:>10d} requests, "
-          f"mean {v.all.mean:>7.2f} cyc", file=out)
-    d = abs(tot / n - v.all.mean)
-    print(f"    -> {'agree' if (n == v.all.n and d < 0.01) else 'DIFFER'} "
-          "(the two taps are one combinational hop apart)", file=out)
-
-
 def main():
     ap = argparse.ArgumentParser("interco_perf")
     ap.add_argument("dir", help="build dir (finds noc_profiling/ and "
@@ -526,7 +484,6 @@ def main():
               "util = busy+stall", file=out)
         if not args.no_requesters:
             _req_section(reqs, fabric, span, args, out)
-            _spmem_crosscheck(noc_dir, reqs, lo, hi, out)
         _fabric_section(fabric, span, args, out)
     finally:
         if args.output:
