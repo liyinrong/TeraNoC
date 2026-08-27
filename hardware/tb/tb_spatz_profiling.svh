@@ -8,9 +8,14 @@
 `ifndef TARGET_SYNTHESIS
 `ifndef TARGET_VERILATOR
 
+  localparam int SpatzProfiling = `ifdef SPATZ_PROFILING `SPATZ_PROFILING `else 0 `endif;
+
   // ===========================================================================
-  // Spatz VECTOR ENGINE trace -- ALWAYS ON whenever the cores are Spatz cores
-  // (mempool_pkg::RVV). Engine INTERNALS only (controller scoreboard occupancy,
+  // Spatz VECTOR ENGINE trace -- on whenever the cores are Spatz cores
+  // (mempool_pkg::RVV) and SPATZ_PROFILING is set, which it is by default.
+  // Pass spatz_profiling=0 to drop it: one file per core with a line per active
+  // cycle costs GBs on a 256-core run, which is the wrong trade when the
+  // question is a cycle count rather than engine behaviour. Engine INTERNALS only (controller scoreboard occupancy,
   // VFU / VLSU / VSLDU busy + sub-state, issue/retire handshakes, active memory
   // ports); the Spatz memory-port traffic itself stays under NOC_PROFILING.
   //
@@ -128,7 +133,7 @@
   // inside the unified core complex (mempool_cc.riscv_core.gen_spatz.i_spatz).
   `define SPATZ_TOP(gg,tt,cc) dut.i_mempool_cluster.gen_groups_x[(gg)/NumY].gen_groups_y[(gg)%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[tt].i_tile.gen_cores[cc].gen_mempool_cc.riscv_core.gen_spatz.i_spatz
 
-  if (mempool_pkg::RVV) begin : gen_spatz_eng_prof
+  if (mempool_pkg::RVV && SpatzProfiling) begin : gen_spatz_eng_prof
     int f_speng [NumGroups][NumTilesPerGroup][NumCoresPerTile];
 
     initial begin

@@ -235,6 +235,9 @@ endif
 ifeq (1, $(noc_profiling))
 	vlog_defs += -DNOC_PROFILING=$(noc_profiling)
 endif
+ifeq (1, $(spatz_profiling))
+	vlog_defs += -DSPATZ_PROFILING=$(spatz_profiling)
+endif
 # --------------------------
 # Remapping Controls
 # --------------------------
@@ -872,7 +875,7 @@ perfetto_sif := $(perfetto_dir)/ubuntu2404.sif
 #   dump=<file>        also dump ONE ROW PER REQUEST as CSV (use window=/core=)
 #   core=G,T,C         restrict dump= to one core
 .PHONY: perf-report spatz-perf redmule-perf interco-perf
-# Engine trace: $(buildpath)/spatz_profiling (always on). Per-request memory
+# Engine trace: $(buildpath)/spatz_profiling (spatz_profiling=1). Per-request memory
 # trace: $(buildpath)/noc_profiling, beside the core_/rm_ port traces and under
 # the same noc_profiling=1 gate. The script picks both out of the build dir.
 spatz-perf:

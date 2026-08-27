@@ -95,6 +95,10 @@ spm_profiling ?= 1
 # Enable the interconnect access pattern profiling
 noc_profiling ?= 1
 
+# Per-core Spatz engine trace (one file per Spatz core, a line per active cycle).
+# Inactive on non-Spatz flavors regardless.
+spatz_profiling ?= 1
+
 # FlooNoC router buffering. The two globals below are the fallback for every
 # router in both planes; flavors have always set them to 2. The stage-1 DSE
 # sweeps the four classes independently and its S1 winner wants a deeper wide
