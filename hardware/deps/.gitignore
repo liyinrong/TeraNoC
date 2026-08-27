@@ -9,5 +9,6 @@ floo_noc/
 fpnew/
 fpu_div_sqrt_mvp/
 register_interface/
+spatz/
 tech_cells_generic/
 .teranoc_deps

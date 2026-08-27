@@ -188,12 +188,19 @@ endif
 # RVV (= spatz) and FP-format selection are always defined (0 when disabled).
 vlog_defs += -DRVV=$(spatz)
 vlog_defs += -DRVF=$(rvf) -DRVD=$(rvd)
-# spatz_pkg/rvv_pkg are referenced by mempool_cc in every build, so render
-# spatz_pkg.sv unconditionally; the full Spatz RTL stays spatz-only (-t spatz).
+# spatz_pkg/rvv_pkg are referenced by mempool_cc in every build. The Spatz git
+# dependency SHIPS its generated/spatz_pkg.sv, rendered from the mempool branch
+# of the template, so VLEN / N_FPU / N_IPU stay `ifdef-driven and the -D defines
+# below still select the geometry. Nothing is rendered here any more: the render
+# inputs (cfg/spatz_pkg.hjson, util/render_spatz_pkg.py) were TeraNoC additions
+# to the old vendored copy and do not exist upstream, and writing into a bender
+# checkout would leave the dependency permanently dirty.
+#
+# Consequence to respect: editing spatz_pkg.sv.tpl in the Spatz repository means
+# regenerating and committing generated/spatz_pkg.sv in the SAME commit, or the
+# two silently drift.
 SPATZ_DIR := $(shell $(bender) path spatz)
 SPATZ_PKG := $(SPATZ_DIR)/hw/ip/spatz/src/generated/spatz_pkg.sv
-$(SPATZ_PKG): $(SPATZ_DIR)/cfg/spatz_pkg.hjson $(SPATZ_DIR)/hw/ip/spatz/src/spatz_pkg.sv.tpl $(SPATZ_DIR)/util/render_spatz_pkg.py
-	$(python) $(SPATZ_DIR)/util/render_spatz_pkg.py -c $(SPATZ_DIR)/cfg/spatz_pkg.hjson -t $(SPATZ_DIR)/hw/ip/spatz/src/spatz_pkg.sv.tpl -o $@
 
 ifeq ($(spatz), 1)
 vlog_defs += -DVLEN=$(vlen) -DN_IPU=$(n_ipu) -DN_FPU=$(n_fpu)
