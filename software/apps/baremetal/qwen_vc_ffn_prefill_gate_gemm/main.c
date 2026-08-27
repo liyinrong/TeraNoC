@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Virtual-cluster placement variant of ffn_prefill_gate_gemm. Same logical
-// shape and same engine budget as the baseline; the placement policy comes from
-// APP_DEFINES so one binary directory covers the whole DSE ladder.
+// shape and engine budget as the baseline; the placement policy arrives via
+// APP_DEFINES so one directory covers the whole DSE ladder.
 
 #define QWEN_BENCHMARK_NAME "qwen_vc_ffn_prefill_gate_gemm"
 #define QWEN_LOGICAL_M 2048
