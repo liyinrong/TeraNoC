@@ -147,12 +147,22 @@ package snitch_pkg;
                     XF8     ? 8 :  // Xf8 ext.
                     0;             // Unused in case of no FP
 
+  // cvfpu v0.3.0 took NUM_FP_FORMATS 6 -> 9 and added the MX and PACE fields. fmt_logic_t is
+  // ASCENDING ([0:NUM_FP_FORMATS-1]) and these masks are CONCATENATIONS, not assignment
+  // patterns, so they MUST be written to the full width: a 6-element literal is zero-padded on
+  // the index-0 side, which shifts every format by +3 (FP32 off, FP8 on) and hangs the FPU on
+  // the first FP instruction. MX and PACE are unused here.
   localparam fpnew_pkg::fpu_features_t FPU_FEATURES = '{
     Width:         fpnew_pkg::maximum(FLEN, 32),
     EnableVectors: XFVEC,
     EnableNanBox:  1'b0,
-    FpFmtMask:     {RVF, RVD, XF16, FPU_FP8, XF16ALT, XF8ALT},
-    IntFmtMask:    {XFVEC && XF8, XFVEC && (XF16 || XF16ALT), 1'b1, 1'b0}
+    //              FP32 FP64  FP16  FP8      FP16a    FP8a     FP6   FP6a  FP4
+    FpFmtMask:     {RVF, RVD,  XF16, FPU_FP8, XF16ALT, XF8ALT,  1'b0, 1'b0, 1'b0},
+    //              INT8                INT16                             INT32 INT64
+    IntFmtMask:    {XFVEC && XF8, XFVEC && (XF16 || XF16ALT), 1'b1, 1'b0},
+    MxFpFmtMask:   9'b0,          // MX formats unused
+    MxIntFmtMask:  4'b0,
+    PaceFeatures:  '{default: 0}  // PACE unused
   };
 
   // Latencies of FP ops (number of regs)
@@ -168,43 +178,49 @@ package snitch_pkg;
   localparam int unsigned LAT_SDOTP        = 'd2;
 
   localparam fpnew_pkg::fpu_implementation_t FPU_IMPLEMENTATION = '{
-    PipeRegs:  '{// FP32, FP64, FP16, FP8, FP16alt
+    PipeRegs:  '{// FP32, FP64, FP16, FP8, FP16alt, FP8alt, FP6, FP6alt, FP4
                  '{ LAT_COMP_FP32,
                     LAT_COMP_FP64,
                     LAT_COMP_FP16,
                     LAT_COMP_FP8,
                     LAT_COMP_FP16ALT,
-                    LAT_COMP_FP8ALT}, // ADDMUL
+                    LAT_COMP_FP8ALT,
+                    'd0, 'd0, 'd0},      // ADDMUL (FP6/FP6alt/FP4 off in FpFmtMask)
                  '{default: LAT_DIVSQRT}, // DIVSQRT
                  '{default: LAT_NONCOMP}, // NONCOMP
                  '{default: LAT_CONV},    // CONV
-                 '{default: LAT_SDOTP}},  // SDOTP
+                 '{default: LAT_SDOTP},   // SDOTP
+                 '{default: 'd0}},        // MXDOTP (disabled, row unread)
     UnitTypes: '{'{default: fpnew_pkg::MERGED}, // ADDMUL
                  '{default: fpnew_pkg::DISABLED}, // DIVSQRT
                  '{default: fpnew_pkg::PARALLEL}, // NONCOMP
                  '{default: fpnew_pkg::MERGED},   // CONV
-                 '{default: fpnew_pkg::MERGED}},  // SDOTP
+                 '{default: fpnew_pkg::MERGED},   // SDOTP
+                 '{default: fpnew_pkg::DISABLED}},// MXDOTP: its slice asserts width==64
     PipeConfig: fpnew_pkg::BEFORE
   };
 
   // Tile-shared divsqrt unit implemented as fpnew
   localparam fpnew_pkg::fpu_implementation_t DIVSQRT_IMPLEMENTATION = '{
-    PipeRegs:  '{// FP32, FP64, FP16, FP8, FP16alt
+    PipeRegs:  '{// FP32, FP64, FP16, FP8, FP16alt, FP8alt, FP6, FP6alt, FP4
                  '{ LAT_COMP_FP32,
                     LAT_COMP_FP64,
                     LAT_COMP_FP16,
                     LAT_COMP_FP8,
                     LAT_COMP_FP16ALT,
-                    LAT_COMP_FP8ALT}, // ADDMUL
+                    LAT_COMP_FP8ALT,
+                    'd0, 'd0, 'd0},      // ADDMUL (FP6/FP6alt/FP4 off in FpFmtMask)
                  '{default: LAT_DIVSQRT}, // DIVSQRT
                  '{default: LAT_NONCOMP}, // NONCOMP
                  '{default: LAT_CONV},    // CONV
-                 '{default: LAT_SDOTP}},  // SDOTP
+                 '{default: LAT_SDOTP},   // SDOTP
+                 '{default: 'd0}},        // MXDOTP (disabled, row unread)
     UnitTypes: '{'{default: fpnew_pkg::DISABLED},   // ADDMUL
                  '{default: fpnew_pkg::MERGED}, // DIVSQRT
                  '{default: fpnew_pkg::DISABLED},   // NONCOMP
                  '{default: fpnew_pkg::DISABLED},   // CONV
-                 '{default: fpnew_pkg::DISABLED}},  // SDOTP
+                 '{default: fpnew_pkg::DISABLED},   // SDOTP
+                 '{default: fpnew_pkg::DISABLED}},  // MXDOTP
     PipeConfig: fpnew_pkg::BEFORE
   };
 

@@ -16,7 +16,7 @@ dependencies:
   spatz:                { path: "hardware/deps/spatz"                                                         }
   cluster_icache:       { git: "https://github.com/pulp-platform/cluster_icache.git",       version: 0.3.1   }
   tech_cells_generic:   { git: "https://github.com/pulp-platform/tech_cells_generic.git",   version: 0.2.13  }
-  fpnew:                { git: "https://github.com/pulp-platform/cvfpu.git",                rev: pulp-v0.2.3 }
+  fpnew:                { git: "https://github.com/pulp-platform/cvfpu.git",                rev: pulp-v0.3.0 }
   floo_noc:             { git: "https://github.com/pulp-platform/FlooNoC.git",              version: 0.8.1   }
   scm:                  { path: "hardware/deps/scm"                                                          }
   redmule:              { git: "https://github.com/pulp-platform/redmule.git",              rev: mbertuletti/outstanding   }
