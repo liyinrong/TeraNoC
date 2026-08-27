@@ -531,13 +531,19 @@ update-floogen: update-l2map
 	@# elaborates against the wrong topology -- silently, because an
 	@# out-of-range constant index is not an elaboration error. Check the
 	@# endpoint count instead of trusting the filename.
+	@# Some ymls (config/floo_noc_mempool.yml) declare a third endpoint kind for the
+	@# host/peripheral aperture on top of the groups and L2 banks; others do not, so
+	@# count it from the yml rather than assuming a shape. It carries no `array:`,
+	@# which is why its presence means exactly one endpoint.
 	@ep=$$(grep -oE 'NumEndpoints = [0-9]+' \
 		$(MEMPOOL_DIR)/hardware/generated/floo_terapool_noc_pkg.sv \
 		| grep -oE '[0-9]+'); \
-	want=$$(( $(num_groups) + $(l2_banks) )); \
+	peri=$$(grep -cE '^[[:space:]]*-[[:space:]]*name:[[:space:]]*"host_peri"' \
+		$(MEMPOOL_DIR)/config/$(floo_noc_cfg)); \
+	want=$$(( $(num_groups) + $(l2_banks) + $$peri )); \
 	if [ "$$ep" != "$$want" ]; then \
 		echo "ERROR: floo_terapool_noc_pkg has NumEndpoints=$$ep, expected $$want"; \
-		echo "       ($(num_groups) groups + $(l2_banks) L2 banks)."; \
+		echo "       ($(num_groups) groups + $(l2_banks) L2 banks + $$peri host_peri)."; \
 		echo "       Does config/$(floo_noc_cfg) still say 'name: terapool'?"; \
 		exit 1; \
 	fi
