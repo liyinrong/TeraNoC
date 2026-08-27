@@ -8,27 +8,139 @@
 # the software-build target used by the dense LLM benchmarks: RedMulE executes
 # GEMM/GEMV stages while Spatz handles RMSNorm, RoPE, softmax, and residuals.
 
-include $(MEMPOOL_DIR)/config/tensorpool256.mk
+###########################
+## 1. Architecture Config
+###########################
+
+# Global Control
+terapool ?= 1
+# Reuse terapool's identical FlooNoC yml (4x4 mesh).
+floo_noc_cfg ?= floo_noc_tensorpool256_spatz4.yml
 
 config_build_path ?= tensorpool256_spatz4
 
-# Use the tp256_spatz4-specific FlooNoC config: its L2/HBM System Address Map
-# matches this flavor's 512 MiB L2 (l2_size below). Without this override the
-# included tensorpool256.mk falls back to floo_noc_terapool.yml, whose SAM lays
-# L2 out as 1 MiB/bank (16 MiB total) -> L2 accesses above 16 MiB misroute to the
-# wrong bank, corrupting instruction fetch and wedging the boot/barrier.
-floo_noc_cfg := floo_noc_tensorpool256_spatz4.yml
+# Number of cores
+num_cores ?= 256
 
-# Real-size dense-LLM weights, KV state, and spill buffers live in L2. Keep the
-# inherited TensorPool L1 geometry and extend L2 up to the bootrom boundary.
-l2_size := 536870912
+# Number of groups
+num_groups ?= 16
 
+# Number of cores per tile
+num_cores_per_tile ?= 4
+
+# L1 scratchpad banking factor
+banking_factor ?= 4
+
+# Number of shared divsqrt units per tile
+# Defaults to 1 if xDivSqrt is activated
+num_divsqrt_per_tile ?= 1
+
+#####################
+## 2. NoC Config
+#####################
+
+# FlooNoC configuration
+num_directions ?= 5
+num_x          ?= 4
+
+# Topology
+# 0: 2D mesh, 1: torus
+noc_topology ?= 0
+
+# Routing algorithm
+# 0: xy, 1: id_table
+noc_routing_algorithm ?= 0
+
+# NoC remapping configuration
+# 0: no remapping, 1: req remapping, 2: resp remapping 3: req+resp remapping
+noc_router_remapping ?= 3
+
+# Virtual channel number
+noc_virtual_channel_num ?= 1
+
+# Narrow (32-bit) TCDM plane: physical channels per group and mesh
+# direction, by class. RO = meta-only read request, RW = payload
+# request/response, WO = write-only request. At least one write-capable
+# request channel (RW or WO) and one RW response channel are required.
+noc_req_narrow_ro_channel_num ?= 0
+noc_req_narrow_rw_channel_num ?= 2
+noc_req_narrow_wo_channel_num ?= 0
+noc_resp_narrow_rw_channel_num ?= 2
+
+$(info [DEBUG:][noc_req_narrow_ro_channel_num]----$(noc_req_narrow_ro_channel_num))
+$(info [DEBUG:][noc_req_narrow_rw_channel_num]--$(noc_req_narrow_rw_channel_num))
+$(info [DEBUG:][noc_req_narrow_wo_channel_num]----$(noc_req_narrow_wo_channel_num))
+$(info [DEBUG:][noc_resp_narrow_rw_channel_num]------$(noc_resp_narrow_rw_channel_num))
+
+# Wide TCDM plane (WP2) payload width: one 512-bit RedMulE TCDM beat. The plane
+# itself stays off unless noc_req_wide_rw_channel_num >= 1 (config/config.mk).
+wide_tcdm_data_width ?= 512
+
+# Router buffer configuration
+noc_router_input_fifo_dep  ?= 2
+noc_router_output_fifo_dep ?= 2
+
+# Router remapping xbar size configuration
+noc_router_remap_group_size ?= 4
+
+###########################
+## 3. RedMulE Tensor-Core Config
+###########################
+
+# Number of tiles that host a RedMulE tensor core
+num_redmule_tiles ?= 16
+
+# RedMulE engine geometry (array height, width, pipe regs)
+redmule_height ?= 8
+redmule_width  ?= 32
+redmule_regs   ?= 3
+
+# Outstanding-transactions ROB depth in the redmule TCDM path
+rob_depth      ?= 16
+
+###########################
+## 4. AXI and DMA Config
+###########################
+
+# Radix for hierarchical AXI interconnect
+axi_hier_radix ?= 17
+
+# Number of AXI masters per group
+axi_masters_per_group ?= 1
+
+# Number of DMA backends in each group
+dmas_per_group ?= 1 # Burst Length = 16
+
+# L1 size per bank (in bytes)
+l1_bank_size ?= 2048
+
+# L2 Banks/Channels
+l2_size               ?= 536870912
+l2_banks              ?= 16
+axi_width_interleaved ?= 16
+
+###########################
+## 5. Spatz Config
+###########################
+
+# Activate Spatz and RVV
 spatz ?= 1
+
+# Lenght of single vector register
 vlen ?= 512
+
+# Number of IPUs
 n_ipu ?= 4
+
+# Number of FPUs
 n_fpu ?= 4
 
+# Enable FPU
 rvf ?= 1
 rvd ?= 0
+
+# Make sure XPULP is off for Spatz configuration
 xpulpimg ?= 0
+
+# Make sure zfinx is off for Spatz configuration
 zfinx ?= 0
