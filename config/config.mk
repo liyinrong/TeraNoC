@@ -237,11 +237,13 @@ spatz ?= 0
 spatz_burst ?= 0
 
 # Spatz VLSU reorder-buffer depth, and the width root of the ROB id that mempool_cc
-# packs into meta_id alongside the store-ack flag. The upstream Spatz default of 32
-# needs 5 id bits; mempool_cc currently forwards only $clog2(NumIntOutstandingLoads)
-# = 3, so ids 8..31 alias onto 0..7 and responses land in the wrong ROB entry --
-# measured as a hang in sp_dotp_f32 and sp_axpy_f32. 8 is what fits today.
-spatz_rob_depth ?= 8
+# packs into meta_id alongside the store-ack flag. 16 is the largest depth whose id
+# plus that flag still fits a 5-bit meta_id, and it is also the smallest depth at
+# which a burst is admissible at all: burst emission needs vl >= 64 B and
+# vl <= NrOutstandingLoads * 4 B, so a depth of 8 rules every burst out. The
+# upstream default of 32 needs a 6-bit meta_id, which would widen every mesh link.
+# mempool_cc checks the pairing at elaboration.
+spatz_rob_depth ?= 16
 
 # Spatz vector-unit parameters
 n_fpu ?= 1

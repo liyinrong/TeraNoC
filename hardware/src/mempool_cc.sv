@@ -446,7 +446,20 @@ module mempool_cc
   // id and recover it from the response id. The flag sits just above the
   // outstanding-load id (WrFlagBit); meta_id must have room for it, else the
   // zero-pad replication below is negative -> a loud elaboration error.
-  localparam int unsigned WrFlagBit = $clog2(snitch_pkg::NumIntOutstandingLoads);
+  // The flag sits directly above the vector unit's ROB id, so the id width must come from
+  // the vector unit. NumIntOutstandingLoads is the SCALAR core's outstanding-load count and
+  // only coincided with it while both were 8: once the VLSU reorder buffer is deeper the id
+  // is silently truncated and responses land in the wrong entry. MemRspIdWidth is the same
+  // root the VLSU sizes spatz_mem_rsp_t.id from, so it tracks spatz_rob_depth by construction.
+  localparam int unsigned WrFlagBit = MemRspIdWidth;
+
+  // Elaboration check: the packing is {pad, write, id[WrFlagBit-1:0]} into a meta_id, so the
+  // id plus the flag must fit. Truncation here is silent at run time and shows up only as a
+  // wedged vector unit, so check it rather than trust it.
+  if (WrFlagBit + 1 > $bits(data_qid_o[0]))
+    $fatal(1, "mempool_cc: meta_id is %0d b but the Spatz ROB id (%0d b) plus the write flag \
+needs %0d b -- lower spatz_rob_depth or widen MetaIdWidth.",
+           $bits(data_qid_o[0]), WrFlagBit, WrFlagBit + 1);
   for (genvar i = 0; i < NumMemPortsPerSpatz; i++) begin : gen_tcdm_assignment
     assign data_qaddr_o[i+1]       = spatz_mem_req[i].addr;
     assign data_qwrite_o[i+1]      = spatz_mem_req[i].write;
