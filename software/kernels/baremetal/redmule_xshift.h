@@ -2,9 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-// RedMulE X contraction-start offset policy (REDMULE_XSHIFT, register index 18
-// = REDMULE_REG_OFFS + 0x48, absolute 0x88; see archi_redmule.h for why not
-// 0x18).
+// RedMulE X contraction-start offset policy (MCNFIG4.x_shift, at 0x40 in the
+// generated register map; write it with redmule_x_shift_set() from hal_redmule.h).
 //
 // Every engine walks the contraction from element 0, so after a barrier they all
 // address the same L1 tile and drain through it one at a time. Starting each
@@ -123,7 +122,7 @@ static inline uint16_t redmule_x_shift(uint32_t engine_id, uint32_t n_size,
   return (uint16_t)(accesses * port_width);
 }
 
-// W column-start offset in ELEMENTS, for REDMULE_MCFG1[31:16] (redmule_cfg's
+// W column-start offset in ELEMENTS, for MCNFIG3.w_cols_offset (redmule_cfg's
 // w_col_off). Identical policy to redmule_x_shift, applied to the OUTPUT COLUMN
 // axis instead of the contraction: the engine runs [w_col_off, k_size) then
 // wraps to [0, w_col_off). Because output columns are independent, this one is

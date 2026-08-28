@@ -155,10 +155,10 @@ packages:
       Git: https://github.com/pulp-platform/L2_tcdm_hybrid_interco.git
     dependencies: []
   redmule:
-    revision: 8608ec01f91fdab0cc232d533cfa172a94274275
+    revision: 29fefc29ed4bcef6935a057076a8956b9173c2cc
     version: null
     source:
-      Git: https://github.com/pulp-platform/redmule.git
+      Git: https://github.com/liyinrong/redmule.git
     dependencies:
     - common_cells
     - cv32e40p

@@ -295,6 +295,14 @@ int main() {
     mempool_wait(10);
     redmule_cfg(X_ptr, W_ptr, Y_ptr, (matrix_M / num_redmules), matrix_N,
                 matrix_P, W_shift, GEMM, Float16);
+#if RM_X_SHIFT
+    // Same contraction-start offset the tiled schedule uses: each engine begins on a
+    // different L1 tile and wraps, so the result is unchanged and the engines stop
+    // queueing on the same banks straight out of the barrier.
+    redmule_x_shift_set(redmule_x_shift(redmule_id, matrix_N, PORT_WIDTH,
+                                        sizeof(__fp16), NUM_BANKS_PER_TILE,
+                                        NUM_BANKS));
+#endif
     mempool_wait(10);
     hwpe_trigger_job();
     mempool_wfi();
