@@ -1,22 +1,8 @@
 diff --git a/hardware/deps/hwpe-stream/rtl/hwpe_stream_package.sv b/hardware/deps/hwpe-stream/rtl/hwpe_stream_package.sv
-index 82b132d..86fd567 100644
+index 82b132d..006b7d4 100644
 --- a/hardware/deps/hwpe-stream/rtl/hwpe_stream_package.sv
 +++ b/hardware/deps/hwpe-stream/rtl/hwpe_stream_package.sv
-@@ -62,6 +62,13 @@ package hwpe_stream_package;
-     logic signed [31:0] d2_stride;  // former block_stride
-     logic signed [31:0] d3_stride;
-     logic         [2:0] dim_enable_1h;
-+    // Optional rotation of the innermost dimension: d0 starts at d0_offset
-+    // instead of the base address and wraps back to it after d0_wrap_cnt
-+    // transactions, so the same d0_len addresses are visited in a rotated
-+    // order. d0_wrap_cnt = 0 disables it, which is the legacy behaviour.
-+    // Requires 0 < d0_wrap_cnt < d0_len and a non-negative d0_stride.
-+    logic        [31:0] d0_offset;
-+    logic        [31:0] d0_wrap_cnt;
-   } ctrl_addressgen_v3_t;
- 
-   typedef struct packed {
-@@ -77,6 +84,19 @@ package hwpe_stream_package;
+@@ -77,6 +77,19 @@ package hwpe_stream_package;
      logic signed [31:0] d3_stride;
      logic signed [31:0] d4_stride;
      logic         [3:0] dim_enable_1h;
@@ -36,62 +22,6 @@ index 82b132d..86fd567 100644
    } ctrl_addressgen_v4_t;
  
    typedef struct packed {
-diff --git a/hardware/deps/hwpe-stream/rtl/streamer/hwpe_stream_addressgen_v3.sv b/hardware/deps/hwpe-stream/rtl/streamer/hwpe_stream_addressgen_v3.sv
-index 2162f71..bb43824 100644
---- a/hardware/deps/hwpe-stream/rtl/streamer/hwpe_stream_addressgen_v3.sv
-+++ b/hardware/deps/hwpe-stream/rtl/streamer/hwpe_stream_addressgen_v3.sv
-@@ -217,17 +217,25 @@ module hwpe_stream_addressgen_v3
-       if(overall_counter_q < ctrl_i.tot_len) begin
-         addr_valid_d = 1'b1;
-         if((d0_counter_q < ctrl_i.d0_len) || (ctrl_i.dim_enable_1h[0] == 1'b0) || (DIM_ENABLE_1H[0] == 1'b0)) begin
--          d0_addr_d    = d0_addr_q + d0_stride;
-+          // Rotated d0: the run starts at d0_offset and returns to the base
-+          // after d0_wrap_cnt transactions, covering the same d0_len addresses
-+          // in a rotated order. The presample cycle below holds d0_addr at the
-+          // offset while the counter advances to 1, so when d0_counter_q == k
-+          // this branch is computing the address of transaction k.
-+          if ((ctrl_i.d0_wrap_cnt != '0) && (d0_counter_q == ctrl_i.d0_wrap_cnt))
-+            d0_addr_d  = '0;
-+          else
-+            d0_addr_d  = d0_addr_q + d0_stride;
-           d0_counter_d = d0_counter_q + 1;
-         end
-         else if ((d1_counter_q < ctrl_i.d1_len) || (ctrl_i.dim_enable_1h[1] == 1'b0) || (DIM_ENABLE_1H[1] == 1'b0)) begin
--          d0_addr_d    = '0;
-+          d0_addr_d    = ctrl_i.d0_offset;
-           d1_addr_d    = d1_addr_q + d1_stride;
-           d0_counter_d = 1;
-           d1_counter_d = d1_counter_q + 1;
-         end
-         else if ((d2_counter_q < ctrl_i.d2_len) || (ctrl_i.dim_enable_1h[2] == 1'b0) || (DIM_ENABLE_1H[2] == 1'b0)) begin
--          d0_addr_d    = '0;
-+          d0_addr_d    = ctrl_i.d0_offset;
-           d1_addr_d    = '0;
-           d2_addr_d    = d2_addr_q + d2_stride;
-           d0_counter_d = 1;
-@@ -235,7 +243,7 @@ module hwpe_stream_addressgen_v3
-           d2_counter_d = d2_counter_q + 1;
-         end
-         else begin
--          d0_addr_d    = '0;
-+          d0_addr_d    = ctrl_i.d0_offset;
-           d1_addr_d    = '0;
-           d2_addr_d    = '0;
-           d3_addr_d    = d3_addr_q + d3_stride;
-@@ -263,7 +271,12 @@ module hwpe_stream_addressgen_v3
-       d0_addr_q <= '0;
-     end
-     else if (presample_i) begin
--      d0_addr_q <= '0;
-+      // Seed the rotation. Presample overrides the enable branch below, so the
-+      // first transaction is emitted at the offset rather than one stride past
-+      // it. A non-rotated stream leaves d0_offset at 0, which is the legacy
-+      // behaviour; d0_offset without d0_wrap_cnt simply shifts d0 without
-+      // wrapping, which no caller here uses.
-+      d0_addr_q <= ctrl_i.d0_offset;
-     end
-     else if (enable_i) begin
-       d0_addr_q <= d0_addr_d;
 diff --git a/hardware/deps/hwpe-stream/rtl/streamer/hwpe_stream_addressgen_v4.sv b/hardware/deps/hwpe-stream/rtl/streamer/hwpe_stream_addressgen_v4.sv
 index d03f2d0..4bdaff7 100644
 --- a/hardware/deps/hwpe-stream/rtl/streamer/hwpe_stream_addressgen_v4.sv
