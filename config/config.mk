@@ -236,6 +236,13 @@ spatz ?= 0
 # hardware/src/tcdm_burst_expander.sv. 0 = word-interleaved path only.
 spatz_burst ?= 0
 
+# Spatz VLSU reorder-buffer depth, and the width root of the ROB id that mempool_cc
+# packs into meta_id alongside the store-ack flag. The upstream Spatz default of 32
+# needs 5 id bits; mempool_cc currently forwards only $clog2(NumIntOutstandingLoads)
+# = 3, so ids 8..31 alias onto 0..7 and responses land in the wrong ROB entry --
+# measured as a hang in sp_dotp_f32 and sp_axpy_f32. 8 is what fits today.
+spatz_rob_depth ?= 8
+
 # Spatz vector-unit parameters
 n_fpu ?= 1
 n_ipu ?= 1
