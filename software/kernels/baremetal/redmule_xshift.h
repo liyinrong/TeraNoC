@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // RedMulE X contraction-start offset policy (MCNFIG4.x_shift, at 0x40 in the
-// generated register map; write it with redmule_x_shift_set() from hal_redmule.h).
+// generated register map; write it with redmule_x_shift_set() from
+// hal_redmule.h).
 //
 // Every engine walks the contraction from element 0, so after a barrier they all
 // address the same L1 tile and drain through it one at a time. Starting each
