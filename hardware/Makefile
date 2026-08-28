@@ -203,6 +203,10 @@ SPATZ_DIR := $(shell $(bender) path spatz)
 SPATZ_PKG := $(SPATZ_DIR)/hw/ip/spatz/src/generated/spatz_pkg.sv
 
 ifeq ($(spatz), 1)
+# Burst emission needs a memory side that expands a burst_len>1 request into that many
+# responses. Until the burst expander (narrow plane) or the wide adapter is in place,
+# spatz_burst=0 keeps the VLSU on the word-interleaved path.
+vlog_defs += -DSPATZ_VLSU_BURST=$(spatz_burst)
 vlog_defs += -DVLEN=$(vlen) -DN_IPU=$(n_ipu) -DN_FPU=$(n_fpu)
 vlog_defs += -DN_FU=$(shell awk 'BEGIN{print ($(n_ipu) > $(n_fpu)) ? $(n_ipu) : $(n_fpu)}')
 # -t mempool defines TARGET_MEMPOOL, required by the vendored Spatz RTL.

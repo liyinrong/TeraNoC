@@ -232,6 +232,10 @@ redmule_regs   ?= 0
 # Enable the Spatz vector unit (RVV)
 spatz ?= 0
 
+# Spatz burst emission. Requires a burst-expanding memory side; see
+# hardware/src/tcdm_burst_expander.sv. 0 = word-interleaved path only.
+spatz_burst ?= 0
+
 # Spatz vector-unit parameters
 n_fpu ?= 1
 n_ipu ?= 1
