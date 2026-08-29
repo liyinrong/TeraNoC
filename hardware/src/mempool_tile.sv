@@ -18,9 +18,10 @@ module mempool_tile
   // Enable a RedMulE tensor core: widens the local interconnect by RMMasterPorts.
   parameter logic        RedMulE      = 1'b0,
   parameter int unsigned NumLocalPorts = RedMulE ? RMMasterPorts + NumCoresPerTile * NumDataPortsPerCore : NumCoresPerTile * NumDataPortsPerCore,
-  // Wide engines have their own local-port axis. The current RedMulE uses slot 0;
-  // keeping the dimension explicit allows future engines to instantiate one shim each.
-  parameter int unsigned NumWideLocalPorts = 1,
+  // Wide engines have their own local-port axis: one slot per wide client, each
+  // with its own shim and its own bank-interconnect port. Derived in mempool_pkg
+  // from which clients the build instantiates (RedMulE, Spatz burst adapter).
+  parameter int unsigned NumWideLocalPorts = mempool_pkg::NumWideLocalPorts,
   // Dependent parameters. DO NOT CHANGE.
   parameter int unsigned NumCaches    = NumCoresPerTile / NumCoresPerCache,
   // If NumDivsqrtPerTile is set, otherwise the parameter defaults to 1.

@@ -300,6 +300,30 @@ package mempool_pkg;
       `ifdef WIDE_TCDM_DATA_WIDTH `WIDE_TCDM_DATA_WIDTH `else RMDataWidth `endif;
   localparam integer unsigned NumSuperbankWords = WideTcdmDataWidth / DataWidth;
 
+  // ------------------------------------------------------------------
+  //  Wide-plane requesters on a tile
+  // ------------------------------------------------------------------
+  // Each wide client gets its OWN scrambler + tcdm_shim and its OWN local port
+  // into the bank interconnect, so two clients hitting different superbanks of
+  // the same tile proceed in the same cycle, and one may go own-tile while the
+  // other goes remote. Only the tile's single physical wide master link is
+  // shared; the existing stream_xbar (NumInp = NumWideLocalPorts) muxes it.
+  //
+  // The count is build-uniform, not per-tile: a tile without RedMulE ties its
+  // slot off rather than changing the port dimensions of the group.
+  //   slot 0 : RedMulE      (present when NumRMTiles > 0)
+  //   slot 1 : Spatz burst adapter (present when spatz_burst is on)
+  localparam bit SpatzWideBurst =
+      `ifdef SPATZ_VLSU_BURST (`SPATZ_VLSU_BURST != 0) `else 1'b0 `endif;
+  localparam integer unsigned NumWideRmPorts    = (NumRMTiles > 0) ? 1 : 0;
+  localparam integer unsigned NumWideSpatzPorts = SpatzWideBurst   ? 1 : 0;
+  // At least one slot: the arrays and the crossbars are declared unconditionally
+  // and a zero-width dimension is not legal.
+  localparam integer unsigned NumWideLocalPorts =
+      (NumWideRmPorts + NumWideSpatzPorts) > 0 ? (NumWideRmPorts + NumWideSpatzPorts) : 1;
+  localparam integer unsigned WideRmPortIdx    = 0;
+  localparam integer unsigned WideSpatzPortIdx = NumWideRmPorts; // 1 with RedMulE, else 0
+
   localparam integer unsigned RMBaseAddr = 32'h4002_0000;
   localparam integer unsigned RMMask     = ~((1 << idx_width(RMRegSize)) - 1);
 
