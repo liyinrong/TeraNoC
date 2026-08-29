@@ -226,6 +226,75 @@ module spatz_wide_burst_adapter
 
 `ifndef SYNTHESIS
   // pragma translate_off
+  // ------------------------------------------------------------------
+  //  End-to-end burst instrumentation (SPATZ_BURST_DEBUG)
+  // ------------------------------------------------------------------
+  // Self-checking rather than a dump: for each burst, record which beats were
+  // presented and confirm at completion that all len_q of them went out exactly
+  // once. That separates "the adapter mis-delivers" from "the VLSU mishandles a
+  // correctly delivered beat" -- the latter matters because TwinROB0 (receive on
+  // mem port 1) has never actually run in this build until now.
+  localparam bit BurstDbgEn = `ifdef SPATZ_BURST_DEBUG `SPATZ_BURST_DEBUG `else 0 `endif;
+  if (BurstDbgEn) begin : gen_burst_dbg
+    logic [WideWords-1:0] seen_d, seen_q;
+    int unsigned          dbg_bursts_q, dbg_stalls_q, dbg_dups_q, dbg_short_q;
+
+    always_comb begin
+      seen_d = seen_q;
+      if ((state_q == Idle) && wide_req_valid_o && wide_req_ready_i) seen_d = '0;
+      if ((state_q == Drain) && !drain_stall_i[owner_q])
+        for (int unsigned l = 0; l < RecvPorts; l++) begin
+          automatic logic [BeatCntWidth-1:0] kk = beat_q + BeatCntWidth'(l);
+          if (kk < BeatCntWidth'(len_q)) seen_d[kk[idx_width(WideWords)-1:0]] = 1'b1;
+        end
+    end
+
+    always_ff @(posedge clk_i) begin
+      if (!rst_ni) begin
+        seen_q <= '0; dbg_bursts_q <= 0; dbg_stalls_q <= 0; dbg_dups_q <= 0; dbg_short_q <= 0;
+      end else begin
+        seen_q <= seen_d;
+        if ((state_q == Drain) && drain_stall_i[owner_q]) dbg_stalls_q <= dbg_stalls_q + 1;
+        // A beat presented onto a k already marked is a duplicate delivery.
+        if ((state_q == Drain) && !drain_stall_i[owner_q])
+          for (int unsigned l = 0; l < RecvPorts; l++) begin
+            automatic logic [BeatCntWidth-1:0] kk = beat_q + BeatCntWidth'(l);
+            if ((kk < BeatCntWidth'(len_q)) && seen_q[kk[idx_width(WideWords)-1:0]])
+              dbg_dups_q <= dbg_dups_q + 1;
+          end
+        // Burst completing: every beat below len_q must have been presented.
+        if ((state_q == Drain) && (state_d == Idle)) begin
+          dbg_bursts_q <= dbg_bursts_q + 1;
+          for (int unsigned k = 0; k < WideWords; k++)
+            if ((k < len_q) && !seen_d[k]) begin
+              dbg_short_q <= dbg_short_q + 1;
+              $display("[BURST-DBG] %m MISSING beat k=%0d of len=%0d (base_id=%0d)",
+                       k, len_q, base_id_q);
+            end
+        end
+        // First burst of this adapter: full picture, beat by beat.
+        if ((dbg_bursts_q == 0) && (state_q == Drain) && !drain_stall_i[owner_q]) begin
+          for (int unsigned l = 0; l < RecvPorts; l++)
+            if ((beat_q + BeatCntWidth'(l)) < BeatCntWidth'(len_q))
+              $display("[BURST-DBG] %m beat k=%0d lane=%0d id=%0d data=%08x",
+                       beat_q + BeatCntWidth'(l), l,
+                       spatz_resp_id_o[owner_q][l], spatz_resp_data_o[owner_q][l]);
+        end
+        if ((dbg_bursts_q == 0) && (state_q == Await) && wide_resp_valid_i)
+          $display("[BURST-DBG] %m WIDE base_id=%0d len=%0d data=%0h",
+                   base_id_q, len_q, wide_resp_i.data);
+        if ((dbg_bursts_q == 0) && (state_q == Idle) && wide_req_valid_o && wide_req_ready_i)
+          $display("[BURST-DBG] %m REQ core=%0d addr=%08x id=%0d len=%0d",
+                   arb_idx, spatz_req_addr_i[arb_idx], spatz_req_id_i[arb_idx],
+                   spatz_req_burst_len_i[arb_idx]);
+        // Periodic census so a rare fault is still visible.
+        if (dbg_bursts_q == 64)
+          $display("[BURST-CENSUS] %m bursts=%0d stall_cycles=%0d dup_beats=%0d missing_beats=%0d",
+                   dbg_bursts_q, dbg_stalls_q, dbg_dups_q, dbg_short_q);
+      end
+    end
+  end : gen_burst_dbg
+
   // A burst longer than one wide access cannot be served: it would need a second
   // access this adapter never issues, and the VLSU would wait forever for the tail.
   always_ff @(posedge clk_i) begin
