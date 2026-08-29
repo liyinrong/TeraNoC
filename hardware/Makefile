@@ -312,8 +312,12 @@ $(error noc_wide_router_remapping is set but the wide plane is off: set noc_req_
 endif
 else
 	vlog_defs += -DUSE_WIDE_TCDM_PLANE
+# The plane needs at least one wide CLIENT. RedMulE was the only one; the Spatz
+# burst adapter is a second, so a Spatz-only flavor can use the plane too.
 ifeq (0,$(strip $(num_redmule_tiles)))
-$(error Wide TCDM plane requires at least one RedMulE tile)
+ifneq (1,$(strip $(spatz_burst)))
+$(error Wide TCDM plane needs a wide client: set num_redmule_tiles >= 1 or spatz_burst=1)
+endif
 endif
 ifeq (0,$(strip $(wide_tcdm_data_width)))
 $(error Wide TCDM plane requires wide_tcdm_data_width > 0)
@@ -321,9 +325,14 @@ endif
 ifeq (0,$(strip $(num_intra_group_ports_per_tile)))
 $(error Wide TCDM plane requires at least one intra-group port per tile)
 endif
+# RedMulE drives the plane at exactly its TCDM port width, so when it is a client
+# the two must agree. Without RedMulE the plane is sized by the other client: a
+# Spatz burst is MaxBurstWords * 32 b, which is one superbank by construction.
 redmule_tcdm_data_width := $(shell printf '%s' $$((16 * $(redmule_height) * ($(redmule_regs) + 1))))
+ifneq (0,$(strip $(num_redmule_tiles)))
 ifneq ($(strip $(wide_tcdm_data_width)),$(strip $(redmule_tcdm_data_width)))
 $(error wide_tcdm_data_width=$(wide_tcdm_data_width) must equal the current RedMulE TCDM port width $(redmule_tcdm_data_width))
+endif
 endif
 wide_tcdm_word_remainder := $(shell printf '%s' $$(( $(wide_tcdm_data_width) % 32 )))
 ifneq (0,$(strip $(wide_tcdm_word_remainder)))

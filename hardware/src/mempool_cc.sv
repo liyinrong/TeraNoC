@@ -58,6 +58,10 @@ module mempool_cc
   output logic     [TCDMPorts-1:0][31:0]    data_qdata_o,
   output logic     [TCDMPorts-1:0][3:0]     data_qstrb_o,
   output meta_id_t [TCDMPorts-1:0]          data_qid_o,
+  // Burst length of each request, in 32-bit words. 1 for every ordinary request;
+  // >1 only on a Spatz vector port whose VLSU chose the burst path, and then only
+  // on its port 0. The tile uses it to divert the request onto the wide plane.
+  output logic     [TCDMPorts-1:0][spatz_pkg::BurstLenWidth-1:0] data_qburst_len_o,
   output logic     [TCDMPorts-1:0]          data_qvalid_o,
   input  logic     [TCDMPorts-1:0]          data_qready_i,
   input  logic     [TCDMPorts-1:0][31:0]    data_pdata_i,
@@ -480,6 +484,7 @@ needs %0d b -- lower spatz_rob_depth or widen MetaIdWidth.",
     assign data_qid_o[i+1]         = {{($bits(data_qid_o[i+1])-WrFlagBit-1){1'b0}},
                                       spatz_mem_req[i].write,
                                       spatz_mem_req[i].id[WrFlagBit-1:0]};
+    assign data_qburst_len_o[i+1]  = spatz_mem_req[i].burst_len;
     assign data_qvalid_o[i+1]      = spatz_mem_req_valid[i];
     assign spatz_mem_req_ready[i]  = data_qready_i[i+1];
     assign spatz_mem_rsp[i].data   = data_pdata_i[i+1];
@@ -581,6 +586,10 @@ needs %0d b -- lower spatz_rob_depth or widen MetaIdWidth.",
   assign data_qdata_o[0]      = data_req_q.data;
   assign data_qstrb_o[0]      = data_req_q.strb;
   assign data_qid_o[0]        = data_req_q.id;
+  // The scalar/FP port never bursts; so do the vector ports of a non-Spatz build.
+  // Driving the whole vector here and letting the Spatz loop override its own
+  // slots would be two drivers, so drive only what this branch owns.
+  assign data_qburst_len_o[0] = spatz_pkg::BurstLenWidth'(1);
   assign data_qvalid_o[0]     = data_req_q_valid;
   assign data_req_q_ready     = data_qready_i[0];
   assign data_resp_d.data     = data_pdata_i[0];
@@ -811,6 +820,10 @@ needs %0d b -- lower spatz_rob_depth or widen MetaIdWidth.",
   assign data_qdata_o[0]      = data_req_q.data;
   assign data_qstrb_o[0]      = data_req_q.strb;
   assign data_qid_o[0]        = data_req_q.id;
+  // The scalar/FP port never bursts; so do the vector ports of a non-Spatz build.
+  // Driving the whole vector here and letting the Spatz loop override its own
+  // slots would be two drivers, so drive only what this branch owns.
+  assign data_qburst_len_o[0] = spatz_pkg::BurstLenWidth'(1);
   assign data_qvalid_o[0]     = data_req_qvalid;
   assign data_req_qready   = data_qready_i[0];
   assign data_resp_d.data  = data_pdata_i[0];

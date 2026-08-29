@@ -60,6 +60,12 @@ module spatz_wide_burst_adapter
   output data_t    [NumSpatz-1:0][RecvPorts-1:0]                 spatz_resp_data_o,
   output meta_id_t [NumSpatz-1:0][RecvPorts-1:0]                 spatz_resp_id_o,
 
+  // Hold the drain for a cycle. The vector response ports have no ready, so the
+  // adapter and the tile's narrow path must never present a beat on the same port
+  // in the same cycle: the tile raises this whenever the narrow path is answering
+  // one of this core's receive lanes.
+  input  logic     [NumSpatz-1:0]                                drain_stall_i,
+
   // ---- Wide side ----
   output wide_req_t  wide_req_o,
   output logic       wide_req_valid_o,
@@ -153,7 +159,7 @@ module spatz_wide_burst_adapter
     spatz_resp_valid_o = '0;
     spatz_resp_data_o  = '0;
     spatz_resp_id_o    = '0;
-    if (state_q == Drain) begin
+    if ((state_q == Drain) && !drain_stall_i[owner_q]) begin
       for (int unsigned l = 0; l < RecvPorts; l++) begin
         automatic logic [BeatCntWidth-1:0] k = beat_q + BeatCntWidth'(l);
         if (k < BeatCntWidth'(len_q)) begin
@@ -193,9 +199,12 @@ module spatz_wide_burst_adapter
         end
       end
       Drain: begin
-        beat_d = beat_q + BeatCntWidth'(RecvPorts);
-        if ((beat_q + BeatCntWidth'(RecvPorts)) >= BeatCntWidth'(len_q))
-          state_d = Idle;
+        // Only advance on a cycle whose beats were actually presented.
+        if (!drain_stall_i[owner_q]) begin
+          beat_d = beat_q + BeatCntWidth'(RecvPorts);
+          if ((beat_q + BeatCntWidth'(RecvPorts)) >= BeatCntWidth'(len_q))
+            state_d = Idle;
+        end
       end
       default: state_d = Idle;
     endcase
