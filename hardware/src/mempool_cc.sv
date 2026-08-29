@@ -394,8 +394,19 @@ module mempool_cc
     .data_o  ( acc_resp_q       )
   );
 
+  // Two ports only when the burst path is on: with burst off no block reservation
+  // ever happens, so the second ROB0 write/read port would be dead logic.
+  localparam int unsigned SpatzBurstRecvPorts =
+      mempool_pkg::SpatzWideBurst ? 2 : 1;
+
   spatz #(
     .NrMemPorts         ( NumMemPortsPerSpatz     ),
+    // Burst-response receive width. At 1 a burst drains one word per cycle into the
+    // VRF; at 2 the VLSU's TwinROB0 steers odd beats to mem port 1 and commits two
+    // elements per cycle. The VRF write port is N_FU*ELEN = 4 words wide, so 2 uses
+    // half of it -- 4 needs spatz_vlsu's parity datapath generalised past its
+    // hardwired 2 (it $errors above that today).
+    .NumRespPorts       ( SpatzBurstRecvPorts     ),
     .NumOutstandingLoads( snitch_pkg::NumIntOutstandingLoads ),
     .FPUImplementation  ( FPUImplementation       ),
     .RegisterRsp        ( 1'b1                    ),

@@ -774,6 +774,76 @@ module mempool_tile
   tcdm_wide_master_resp_t   [NumWideLocalPorts-1:0] remote_wide_resp_interco;
   logic                     [NumWideLocalPorts-1:0] remote_wide_resp_interco_valid;
   logic                     [NumWideLocalPorts-1:0] remote_wide_resp_interco_ready;
+
+`ifdef USE_WIDE_TCDM_PLANE
+  // ------------------------------------------------------------------
+  //  Shared wide remote link
+  // ------------------------------------------------------------------
+  // Every wide client has its own shim and its own bank-interconnect port, but the
+  // tile has ONE physical wide master link, so these two crossbars -- and only these
+  // -- are shared. They live at module scope rather than inside a client's generate
+  // so a second client can be added without moving them again.
+  wide_remote_ports_index_t [NumWideRemoteRespPortsPerTile-1:0] remote_wide_resp_sel;
+  for (genvar r = 0; r < NumWideRemoteRespPortsPerTile; r++) begin : gen_wide_resp_sel
+    assign remote_wide_resp_sel[r] =
+        wide_remote_ports_index_t'(postreg_tcdm_wide_master_resp[r].rdata.core_id);
+  end : gen_wide_resp_sel
+
+  stream_xbar #(
+    .NumInp   (NumWideLocalPorts             ),
+    .NumOut   (NumWideRemoteReqPortsPerTile  ),
+    .payload_t(tcdm_wide_master_req_t        ),
+    .AxiVldRdy(0                             ), // as i_remote_req_interco: sel_i may
+    .LockIn   (0                             )  // change before the handshake
+  ) i_remote_wide_req_interco (
+    .clk_i  (clk_i                          ),
+    .rst_ni (rst_ni                         ),
+    .flush_i(1'b0                           ),
+    // External priority flag
+    .rr_i   ('0                             ),
+    // Master
+    .data_i (remote_wide_req_interco        ),
+    .valid_i(remote_wide_req_interco_valid  ),
+    .ready_o(remote_wide_req_interco_ready  ),
+    .sel_i  (remote_wide_req_interco_tgt_sel),
+    // Slave
+    .data_o (prereg_tcdm_wide_master_req      ),
+    .valid_o(prereg_tcdm_wide_master_req_valid),
+    .ready_i(prereg_tcdm_wide_master_req_ready),
+    .idx_o  (/* unused */                     )
+  );
+
+  // Every group response -- same-group or inter-group -- merges onto the
+  // shim's remote port, mirroring i_remote_resp_interco on the narrow side.
+  // The shim then merges it with the own-tile response from the bank
+  // interconnect, so RedMulE still sees a single response stream.
+  stream_xbar #(
+    .NumInp   (NumWideRemoteRespPortsPerTile),
+    .NumOut   (NumWideLocalPorts            ),
+    .payload_t(tcdm_wide_master_resp_t      )
+  ) i_remote_wide_resp_interco (
+    .clk_i  (clk_i                              ),
+    .rst_ni (rst_ni                             ),
+    .flush_i(1'b0                               ),
+    // External priority flag
+    .rr_i   ('0                                 ),
+    // Master
+    .data_i (postreg_tcdm_wide_master_resp      ),
+    .valid_i(postreg_tcdm_wide_master_resp_valid),
+    .ready_o(postreg_tcdm_wide_master_resp_ready),
+    // Route each remote response back to the client that issued it. core_id is
+  // the wide slot index, set per requester and round-tripped by the bank meta.
+  .sel_i  (remote_wide_resp_sel                ),
+    // Slave
+    .data_o (remote_wide_resp_interco           ),
+    .valid_o(remote_wide_resp_interco_valid     ),
+    .ready_i(remote_wide_resp_interco_ready     ),
+    .idx_o  (/* unused */                       )
+  );
+
+
+`endif
+
   `endif
 
   stream_xbar #(
@@ -1560,57 +1630,6 @@ module mempool_tile
     assign remote_wide_req_interco_tgt_sel[WidePortIdx] =
         remote_wide_req_tgt_sel[WidePortIdx];
 
-    stream_xbar #(
-      .NumInp   (NumWideLocalPorts             ),
-      .NumOut   (NumWideRemoteReqPortsPerTile  ),
-      .payload_t(tcdm_wide_master_req_t        ),
-      .AxiVldRdy(0                             ), // as i_remote_req_interco: sel_i may
-      .LockIn   (0                             )  // change before the handshake
-    ) i_remote_wide_req_interco (
-      .clk_i  (clk_i                          ),
-      .rst_ni (rst_ni                         ),
-      .flush_i(1'b0                           ),
-      // External priority flag
-      .rr_i   ('0                             ),
-      // Master
-      .data_i (remote_wide_req_interco        ),
-      .valid_i(remote_wide_req_interco_valid  ),
-      .ready_o(remote_wide_req_interco_ready  ),
-      .sel_i  (remote_wide_req_interco_tgt_sel),
-      // Slave
-      .data_o (prereg_tcdm_wide_master_req      ),
-      .valid_o(prereg_tcdm_wide_master_req_valid),
-      .ready_i(prereg_tcdm_wide_master_req_ready),
-      .idx_o  (/* unused */                     )
-    );
-
-    // Every group response -- same-group or inter-group -- merges onto the
-    // shim's remote port, mirroring i_remote_resp_interco on the narrow side.
-    // The shim then merges it with the own-tile response from the bank
-    // interconnect, so RedMulE still sees a single response stream.
-    stream_xbar #(
-      .NumInp   (NumWideRemoteRespPortsPerTile),
-      .NumOut   (NumWideLocalPorts            ),
-      .payload_t(tcdm_wide_master_resp_t      )
-    ) i_remote_wide_resp_interco (
-      .clk_i  (clk_i                              ),
-      .rst_ni (rst_ni                             ),
-      .flush_i(1'b0                               ),
-      // External priority flag
-      .rr_i   ('0                                 ),
-      // Master
-      .data_i (postreg_tcdm_wide_master_resp      ),
-      .valid_i(postreg_tcdm_wide_master_resp_valid),
-      .ready_o(postreg_tcdm_wide_master_resp_ready),
-      .sel_i  ('0                                 ),
-      // Slave
-      .data_o (remote_wide_resp_interco           ),
-      .valid_o(remote_wide_resp_interco_valid     ),
-      .ready_i(remote_wide_resp_interco_ready     ),
-      .idx_o  (/* unused */                       )
-    );
-
-
     // The RedMulE narrow interco slots are unused in the wide plane: tie them off
     // (leaving them undriven bleeds X into the remote router / response xbar).
     for (genvar p = 0; p < RMMasterPorts; p++) begin : gen_rm_narrow_tieoff
@@ -1919,16 +1938,20 @@ module mempool_tile
 
     assign wake_up = wake_up_q;
 
-    // No RedMulE here: never source an own-tile or master-side wide access. This
-    // tile still accepts raw wide slave requests through the module-scope B2 path.
+    // No RedMulE here: this tile never sources a wide access from the RedMulE SLOT.
+    // It still accepts raw wide slave requests through the module-scope B2 path, and
+    // another client (the Spatz burst adapter) may still drive its own slot -- so tie
+    // off this slot's crossbar inputs only, never the shared crossbar outputs.
     `ifdef USE_WIDE_TCDM_PLANE
-    assign local_wide_req_interco_payload      = '0;
-    assign local_wide_req_interco_valid        = '0;
-    assign remote_wide_req_interco_addr_int    = '0;
-    assign local_wide_resp_interco_ready       = '1;
-    assign prereg_tcdm_wide_master_req         = '0;
-    assign prereg_tcdm_wide_master_req_valid   = '0;
-    assign postreg_tcdm_wide_master_resp_ready = '1;
+    assign local_wide_req_interco_payload[WideRmPortIdx]   = '0;
+    assign local_wide_req_interco_valid[WideRmPortIdx]     = 1'b0;
+    assign local_wide_req_interco_addr_int[WideRmPortIdx]  = '0;
+    assign local_wide_resp_interco_ready[WideRmPortIdx]    = 1'b1;
+    assign remote_wide_req_interco[WideRmPortIdx]          = '0;
+    assign remote_wide_req_interco_valid[WideRmPortIdx]    = 1'b0;
+    assign remote_wide_req_interco_addr_int[WideRmPortIdx] = '0;
+    assign remote_wide_req_interco_tgt_sel[WideRmPortIdx]  = '0;
+    assign remote_wide_resp_interco_ready[WideRmPortIdx]   = 1'b1;
     `endif
 
     for (genvar c = 0; c < NumSoCPorts; c++) begin: gen_redmule_soc_passthrough
