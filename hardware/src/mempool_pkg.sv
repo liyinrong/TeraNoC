@@ -327,14 +327,10 @@ package mempool_pkg;
   // (spatz_pkg::MemRspIdWidth, keyed off the same SPATZ_VLSU_ROB_DEPTH define
   // mirrored here) and the flag is the store ack that the TCDM response channel has
   // no line for. mempool_cc checks at elaboration that the two agree.
-  localparam integer unsigned SpatzVlsuIdWidth =
-      `ifdef SPATZ_VLSU_ROB_DEPTH $clog2(`SPATZ_VLSU_ROB_DEPTH) `else 5 `endif;
-  localparam integer unsigned SpatzVlsuMetaIdWidth = SpatzVlsuIdWidth + 1;
-
-  localparam integer unsigned CoreMetaIdWidth =
-      !snitch_pkg::SpatzMode           ? snitch_pkg::MetaIdWidth :
-      (snitch_pkg::MetaIdWidth > SpatzVlsuMetaIdWidth) ? snitch_pkg::MetaIdWidth
-                                                       : SpatzVlsuMetaIdWidth;
+  // snitch_pkg::MetaIdWidth already maxes over every requester that rides a core
+  // port, the vector LSU + store-ack flag included, because mempool_tile types its
+  // per-core tcdm_shim with snitch_pkg::dreq_t and all core ports pass through it.
+  localparam integer unsigned CoreMetaIdWidth = snitch_pkg::MetaIdWidth;
   localparam integer unsigned RMMetaIdWidth =
       NumRMTiles > 0 ? idx_width(RMNumStreams * RMOutstandingTransactions) : 0;
   localparam integer unsigned MetaIdWidth =

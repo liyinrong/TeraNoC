@@ -25,15 +25,25 @@ package snitch_pkg;
   // target. The scalar core's single Zfinx regfile needs only rd (5b); Spatz adds
   // a use_fd bit (id[5]) to pick its separate FP regfile vs the integer GPRs -> 6b.
   localparam int AccIdWidth             = SpatzMode ? 6 : 5;
-  // Meta-id of the SCALAR core port (port 0 of the core complex). That port is shared
-  // by the integer LSU and, in Spatz builds, the FP sequencer's LSU. The VECTOR LSU
-  // ports do NOT use this field -- mempool_cc drives data_qid_o[i+1] from the VLSU id
-  // directly -- so the Spatz reorder-buffer depth is irrelevant here, and sizing this
-  // from it truncated the FP sequencer's register index and hung the core.
-  localparam MetaIdWidth                = SpatzMode
+  // Vector LSU reorder-buffer id plus the store-ack flag mempool_cc packs directly
+  // above it. The vector ports do not use dreq_t themselves, but mempool_tile types
+  // its PER-CORE tcdm_shim with dreq_t/dresp_t and every core port -- vector ports
+  // included -- passes through it, so this width must cover them or meta_id is
+  // silently truncated in the shim. Measured cost of getting this wrong: at
+  // spatz_rob_depth=32 the flag sits at bit 5, the 5-bit dreq_t id dropped it, no
+  // store ack ever returned, and the whole cluster wedged at the barrier.
+  localparam int VlsuIdWidth =
+      `ifdef SPATZ_VLSU_ROB_DEPTH $clog2(`SPATZ_VLSU_ROB_DEPTH) `else 5 `endif;
+  localparam int VlsuMetaIdWidth        = VlsuIdWidth + 1;
+
+  // Shared core<->L1 meta-id: the widest requirement over everything that rides a
+  // core port -- integer LSU, FP sequencer, and (Spatz builds) the vector LSU.
+  localparam int ScalarPortIdWidth      = SpatzMode
       ? ((idx_width(NumIntOutstandingLoads) > FpSeqIdWidth) ? idx_width(NumIntOutstandingLoads)
                                                             : FpSeqIdWidth)
       : idx_width(NumIntOutstandingLoads);
+  localparam MetaIdWidth                = !SpatzMode ? ScalarPortIdWidth
+      : ((ScalarPortIdWidth > VlsuMetaIdWidth) ? ScalarPortIdWidth : VlsuMetaIdWidth);
   // Xpulpimg extension enabled?
   localparam bit XPULPIMG = `ifdef XPULPIMG `XPULPIMG `else 1'bX `endif;
   // ZFINX extension enabled?
