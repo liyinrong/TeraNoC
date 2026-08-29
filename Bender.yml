@@ -15,7 +15,7 @@ dependencies:
   snitch:               { path: "hardware/deps/snitch"                                                       }
   # Merged burst-capable Spatz (Zexin's zexin/teranoc_burst + TeraNoC's fixes).
   # TODO: repoint at the liyinrong/spatz fork once it exists; local clone for now.
-  spatz:                { git: "file:///usr/scratch/badile48/msc26f31/spatz_burst", rev: 38954d46c7e1955deaae3326a52229aee6c96d6f }
+  spatz:                { git: "file:///usr/scratch/badile48/msc26f31/spatz_burst", rev: d9495af4 }
   cluster_icache:       { git: "https://github.com/pulp-platform/cluster_icache.git",       version: 0.3.1   }
   tech_cells_generic:   { git: "https://github.com/pulp-platform/tech_cells_generic.git",   version: 0.2.13  }
   fpnew:                { git: "https://github.com/pulp-platform/cvfpu.git",                rev: pulp-v0.3.0 }
@@ -55,6 +55,7 @@ sources:
   - hardware/src/control_registers/control_registers_reg_pkg.sv
   - hardware/src/control_registers/control_registers_reg_top.sv
   # Level 1
+  - hardware/src/spatz_wide_burst_adapter.sv
   - hardware/src/mempool_tile.sv
   # Level 2
   - hardware/src/floo_remapper.sv
