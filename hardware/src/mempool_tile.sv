@@ -1243,8 +1243,9 @@ module mempool_tile
     end : gen_adp_rsp
 
     spatz_wide_burst_adapter #(
-      .NumSpatz   (NumCoresPerTile    ),
-      .RecvPorts  (RecvPorts          ),
+      .NumSpatz   (NumCoresPerTile        ),
+      .RecvPorts  (RecvPorts              ),
+      .RobIdWidth (spatz_pkg::MemRspIdWidth),
       .wide_req_t (tcdm_wide_rm_req_t ),
       .wide_resp_t(tcdm_wide_rm_resp_t)
     ) i_spatz_wide_burst_adapter (

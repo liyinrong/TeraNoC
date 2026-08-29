@@ -34,6 +34,12 @@ module spatz_wide_burst_adapter
   parameter int unsigned NumSpatz      = 1,
   // Lanes used to return beats. Must match the VLSU's BurstRecvPorts.
   parameter int unsigned RecvPorts     = 2,
+  // Width of the reorder-buffer id inside meta_id, i.e. spatz_pkg::MemRspIdWidth.
+  // The beat id must wrap within this field: a block reservation may start near the
+  // top of the ROB and wrap, and anything carried out of the field lands on the
+  // store-ack flag mempool_cc packs directly above it -- which would make a load
+  // beat look like a write acknowledgement.
+  parameter int unsigned RobIdWidth    = 4,
   // 32-bit words in one wide access.
   parameter int unsigned WideWords     = NumSuperbankWords,
   parameter int unsigned BurstLenWidth = idx_width(WideWords + 1),
@@ -165,7 +171,8 @@ module spatz_wide_burst_adapter
         if (k < BeatCntWidth'(len_q)) begin
           spatz_resp_valid_o[owner_q][l] = 1'b1;
           spatz_resp_data_o[owner_q][l]  = rdata_q[k[idx_width(WideWords)-1:0]];
-          spatz_resp_id_o[owner_q][l]    = base_id_q + meta_id_t'(k);
+          spatz_resp_id_o[owner_q][l]    =
+              meta_id_t'((base_id_q[RobIdWidth-1:0] + k[RobIdWidth-1:0]));
         end
       end
     end
