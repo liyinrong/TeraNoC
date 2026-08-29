@@ -236,13 +236,17 @@ spatz ?= 0
 # hardware/src/tcdm_burst_expander.sv. 0 = word-interleaved path only.
 spatz_burst ?= 0
 
-# Spatz VLSU reorder-buffer depth, and the width root of the ROB id that mempool_cc
-# packs into meta_id alongside the store-ack flag. 16 is the largest depth whose id
-# plus that flag still fits a 5-bit meta_id, and it is also the smallest depth at
-# which a burst is admissible at all: burst emission needs vl >= 64 B and
-# vl <= NrOutstandingLoads * 4 B, so a depth of 8 rules every burst out. The
-# upstream default of 32 needs a 6-bit meta_id, which would widen every mesh link.
-# mempool_cc checks the pairing at elaboration.
+
+# Spatz VLSU reorder-buffer depth. Also the width root of the ROB id that
+# mempool_cc packs into meta_id alongside the store-ack flag, so MetaIdWidth
+# follows this knob (mempool_pkg.sv) rather than constraining it.
+# 16 is the smallest depth at which a burst is admissible at all -- burst
+# emission needs vl >= 64 B and vl <= NrOutstandingLoads * 4 B, so a depth of 8
+# rules every burst out -- and it is the largest that keeps meta_id at 5 bits.
+# The upstream default of 32 now ELABORATES (it used to abort) but does NOT yet run:
+# sp_matmul_f32 hangs with no compile errors, root cause not yet found. It also widens
+# meta_id to 6 bits and with it every mesh link. Do not raise this to 32 until that
+# hang is fixed and a measurement pays for the area.
 spatz_rob_depth ?= 16
 
 # Spatz vector-unit parameters
@@ -255,7 +259,7 @@ rvd   ?= 0
 # Spatz cores and a RedMulE engine can share a tile: the per-core data ports
 # (NumDataPortsPerCore) and the RedMulE master ports are flattened onto one
 # local-port axis (RedMulE slots start at NumSoCPorts), and MetaIdWidth is the
-# max over snitch/Spatz/RedMulE. See config/minpool_spatz4_redmule.mk.
+# max over snitch/Spatz/RedMulE. See config/tensorpool256_spatz4.mk.
 
 # ---------------------------------------------------------------------------
 # L2 interleave (folding) granularity -- DERIVED, not hardcoded.

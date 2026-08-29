@@ -16,15 +16,24 @@ package snitch_pkg;
   // `spatz` target. The per-core RVV/XPulp/FPEn parameters select what each core IS;
   // SpatzMode only sizes the shared, build-uniform widths below.
   localparam bit SpatzMode              = `ifdef TARGET_SPATZ 1'b1 `else 1'b0 `endif;
-  // Spatz reorder-buffer depth -> max outstanding TCDM loads in vector mode.
-  localparam int RobDepth               = 32;
+  // The FP sequencer's LSU id is a VECTOR-REGISTER index, not a buffer slot:
+  // spatz_mem_req_t.id is [$clog2(NRVREG):0] and the response id is $clog2(NRVREG)
+  // wide (spatz_pkg.sv:290,306). Those 5 bits must survive the round trip through
+  // dreq_t/dresp_t or the FP LSU matches a response to the wrong register.
+  localparam int FpSeqIdWidth           = 5; // $clog2(NRVREG = 32)
   // Accelerator-offload id (acc_req_t.id) = destination register + writeback
   // target. The scalar core's single Zfinx regfile needs only rd (5b); Spatz adds
   // a use_fd bit (id[5]) to pick its separate FP regfile vs the integer GPRs -> 6b.
   localparam int AccIdWidth             = SpatzMode ? 6 : 5;
-  // Shared core<->L1 NoC meta-id = max outstanding transactions over the build's PEs.
-  localparam MetaIdWidth                = SpatzMode ? idx_width(RobDepth)
-                                                   : idx_width(NumIntOutstandingLoads);
+  // Meta-id of the SCALAR core port (port 0 of the core complex). That port is shared
+  // by the integer LSU and, in Spatz builds, the FP sequencer's LSU. The VECTOR LSU
+  // ports do NOT use this field -- mempool_cc drives data_qid_o[i+1] from the VLSU id
+  // directly -- so the Spatz reorder-buffer depth is irrelevant here, and sizing this
+  // from it truncated the FP sequencer's register index and hung the core.
+  localparam MetaIdWidth                = SpatzMode
+      ? ((idx_width(NumIntOutstandingLoads) > FpSeqIdWidth) ? idx_width(NumIntOutstandingLoads)
+                                                            : FpSeqIdWidth)
+      : idx_width(NumIntOutstandingLoads);
   // Xpulpimg extension enabled?
   localparam bit XPULPIMG = `ifdef XPULPIMG `XPULPIMG `else 1'bX `endif;
   // ZFINX extension enabled?

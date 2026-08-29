@@ -9,7 +9,6 @@
 module tcdm_id_remapper
   import mempool_pkg::*;
   import snitch_pkg::MetaIdWidth;
-  import snitch_pkg::RobDepth;
   #(
     parameter int unsigned NumIn = 1
   ) (
@@ -57,9 +56,20 @@ module tcdm_id_remapper
     typedef logic [cf_math_pkg::idx_width(NumIn)-1:0] id_t;
     id_t id;
 
-    meta_id_t [RobDepth-1:0] remapped_id_q, remapped_id_d;
-    logic [RobDepth-1:0] remapped_id_valid_q, remapped_id_valid_d;
-    id_t [RobDepth-1:0] id_q, id_d;
+    // Size the table by the id SPACE, not by a separate depth constant. out_id is
+    // meta_id_t wide, so it can only ever address 2**MetaIdWidth entries: if the
+    // table were larger, the lzc could hand back an index above that, out_id would
+    // truncate it, and the entry would alias a live one while no_free_id stayed
+    // low -- a silent response-to-the-wrong-requester. Deriving the depth from
+    // MetaIdWidth also makes no_free_id assert at the true exhaustion point.
+    // No flavor changes today (the remapper exists only under RVF/RVD, i.e. Spatz
+    // builds, where RobDepth == 2**MetaIdWidth already); this removes the implicit
+    // invariant that made that true.
+    localparam int unsigned NumIds = 2**MetaIdWidth;
+
+    meta_id_t [NumIds-1:0] remapped_id_q, remapped_id_d;
+    logic [NumIds-1:0] remapped_id_valid_q, remapped_id_valid_d;
+    id_t [NumIds-1:0] id_q, id_d;
 
     `FF(remapped_id_q, remapped_id_d, '0)
     `FF(remapped_id_valid_q, remapped_id_valid_d, '0)
@@ -68,7 +78,7 @@ module tcdm_id_remapper
     `FF(locked_id_q, locked_id_d, '0)
 
     lzc #(
-      .WIDTH(RobDepth)
+      .WIDTH(NumIds)
     ) i_next_id_lzc (
       .in_i   (~remapped_id_valid_q),
       .cnt_o  (next_id             ),

@@ -310,10 +310,35 @@ package mempool_pkg;
       NumRMTiles > 0 ? RMMasterPorts + NumCoresPerTile * NumDataPortsPerCore
                      : NumCoresPerTile * NumDataPortsPerCore;
 
+  // Shared core<->L1 meta_id. Every engine on a tile master port carries its
+  // outstanding-transaction id in this one field, so it must be as wide as the
+  // widest requirement over the engines THIS build instantiates -- where the
+  // requirement is the engine's id plus whatever the tile packs alongside it:
+  //
+  //   scalar snitch     idx_width(NumIntOutstandingLoads)
+  //   Spatz FP sequencer $clog2(NRVREG) -- a vector-REGISTER index
+  //   Spatz vector LSU   idx_width(spatz_rob_depth) + 1  (store-ack flag)
+  //   RedMulE            idx_width(RMNumStreams * RMOutstandingTransactions)
+  //
+  // The two Spatz requesters have DIFFERENT widths and must be counted separately.
+  // snitch_pkg::MetaIdWidth covers port 0 (integer LSU + FP sequencer LSU). The
+  // vector LSU ports are a second, independent requester: mempool_cc packs
+  // {pad, write, id} into their meta_id, where id is the VLSU reorder-buffer id
+  // (spatz_pkg::MemRspIdWidth, keyed off the same SPATZ_VLSU_ROB_DEPTH define
+  // mirrored here) and the flag is the store ack that the TCDM response channel has
+  // no line for. mempool_cc checks at elaboration that the two agree.
+  localparam integer unsigned SpatzVlsuIdWidth =
+      `ifdef SPATZ_VLSU_ROB_DEPTH $clog2(`SPATZ_VLSU_ROB_DEPTH) `else 5 `endif;
+  localparam integer unsigned SpatzVlsuMetaIdWidth = SpatzVlsuIdWidth + 1;
+
+  localparam integer unsigned CoreMetaIdWidth =
+      !snitch_pkg::SpatzMode           ? snitch_pkg::MetaIdWidth :
+      (snitch_pkg::MetaIdWidth > SpatzVlsuMetaIdWidth) ? snitch_pkg::MetaIdWidth
+                                                       : SpatzVlsuMetaIdWidth;
+  localparam integer unsigned RMMetaIdWidth =
+      NumRMTiles > 0 ? idx_width(RMNumStreams * RMOutstandingTransactions) : 0;
   localparam integer unsigned MetaIdWidth =
-      (NumRMTiles > 0 &&
-       idx_width(RMNumStreams * RMOutstandingTransactions) > snitch_pkg::MetaIdWidth) ?
-      idx_width(RMNumStreams * RMOutstandingTransactions) : snitch_pkg::MetaIdWidth;
+      CoreMetaIdWidth > RMMetaIdWidth ? CoreMetaIdWidth : RMMetaIdWidth;
 
   /**********************************
    *  TCDM INTERCONNECT PARAMETERS  *
