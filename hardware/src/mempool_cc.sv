@@ -475,6 +475,34 @@ module mempool_cc
     $fatal(1, "mempool_cc: meta_id is %0d b but the Spatz ROB id (%0d b) plus the write flag \
 needs %0d b -- lower spatz_rob_depth or widen MetaIdWidth.",
            $bits(data_qid_o[0]), WrFlagBit, WrFlagBit + 1);
+  // TEMPORARY load-trace probe (SPATZ_LD_TRACE): prints (address, data) for every
+  // vector load response, so a narrow run and a wide+burst run can be diffed by
+  // ADDRESS rather than by time -- the two differ in timing, not in what each
+  // address should hold. Uniform across both paths: a burst request fills the
+  // id->addr table for all burst_len of its ids, so its beats resolve like any
+  // ordinary response.
+`ifndef TARGET_SYNTHESIS
+  // pragma translate_off
+  localparam bit LdTraceEn = `ifdef SPATZ_LD_TRACE `SPATZ_LD_TRACE `else 0 `endif;
+  if (LdTraceEn) begin : gen_ld_trace
+    for (genvar i = 0; i < NumMemPortsPerSpatz; i++) begin : gen_ld_trace_port
+      logic [31:0] addr_tab [2**$bits(data_qid_o[0])];
+      always_ff @(posedge clk_i) begin
+        if (data_qvalid_o[i+1] && data_qready_i[i+1] && !spatz_mem_req[i].write) begin
+          for (int unsigned k = 0; k < 2**spatz_pkg::BurstLenWidth; k++)
+            if (k < spatz_mem_req[i].burst_len)
+              addr_tab[(spatz_mem_req[i].id[WrFlagBit-1:0] + k) % (2**WrFlagBit)]
+                  <= spatz_mem_req[i].addr + 32'(4*k);
+        end
+        if (data_pvalid_i[i+1] && !data_pid_i[i+1][WrFlagBit])
+          $display("[LD] %m port=%0d addr=%08x data=%08x",
+                   i, addr_tab[data_pid_i[i+1][WrFlagBit-1:0]], data_pdata_i[i+1]);
+      end
+    end : gen_ld_trace_port
+  end : gen_ld_trace
+  // pragma translate_on
+`endif
+
   for (genvar i = 0; i < NumMemPortsPerSpatz; i++) begin : gen_tcdm_assignment
     assign data_qaddr_o[i+1]       = spatz_mem_req[i].addr;
     assign data_qwrite_o[i+1]      = spatz_mem_req[i].write;

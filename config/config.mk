@@ -244,6 +244,10 @@ spatz_burst ?= 0
 # the burst request path and the adapter, which are common to both.
 spatz_burst_recv_ports ?= 2
 
+# Dumps (address, data) for every vector load response, so a narrow run and a
+# wide+burst run can be diffed by address. Debug only -- one line per load.
+spatz_ld_trace ?= 0
+
 # Spatz VLSU reorder-buffer depth. Also the width root of the ROB id that
 # mempool_cc packs into meta_id alongside the store-ack flag, so MetaIdWidth
 # follows this knob (mempool_pkg.sv) rather than constraining it.
