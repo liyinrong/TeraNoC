@@ -22,16 +22,17 @@
 // Loads only: a burst is only ever emitted for a load (burst_mode_req demands
 // mem_is_load), so there is no write data path here.
 //
-// One wide slot serves all the Spatz cores of a tile, so requests are round-robin
-// arbitrated. A tile's wide access is a whole superbank, so a grant is never a
-// partial win: the winner gets its entire burst in one access.
+// ONE adapter per Spatz core, each feeding its own shim and its own wide local
+// port. Arbitration belongs only at the genuinely shared resource -- the tile's
+// single wide remote link, where the mux picks between the per-core shims and
+// RedMulE. Arbitrating inside the adapter instead would serialise two cores whose
+// bursts target different superbanks, or one going own-tile while the other goes
+// remote, for no reason.
 
 module spatz_wide_burst_adapter
   import mempool_pkg::*;
   import cf_math_pkg::idx_width;
 #(
-  // Spatz cores sharing this tile's wide slot.
-  parameter int unsigned NumSpatz      = 1,
   // Lanes used to return beats. Must match the VLSU's BurstRecvPorts.
   parameter int unsigned RecvPorts     = 2,
   // Width of the reorder-buffer id inside meta_id, i.e. spatz_pkg::MemRspIdWidth.
@@ -46,31 +47,30 @@ module spatz_wide_burst_adapter
   parameter type         wide_req_t    = logic,
   parameter type         wide_resp_t   = logic,
   // Dependent. DO NOT CHANGE.
-  parameter int unsigned SpatzIdxWidth = idx_width(NumSpatz),
   parameter int unsigned BeatCntWidth  = idx_width(WideWords + 1)
 ) (
   input  logic clk_i,
   input  logic rst_ni,
 
   // ---- Spatz side: the burst-capable port (port 0) of each core ----
-  input  addr_t    [NumSpatz-1:0]                  spatz_req_addr_i,
-  input  meta_id_t [NumSpatz-1:0]                  spatz_req_id_i,
-  input  logic     [NumSpatz-1:0][BurstLenWidth-1:0] spatz_req_burst_len_i,
-  input  logic     [NumSpatz-1:0]                  spatz_req_valid_i,
-  output logic     [NumSpatz-1:0]                  spatz_req_ready_o,
+  input  addr_t                                    spatz_req_addr_i,
+  input  meta_id_t                                 spatz_req_id_i,
+  input  logic     [BurstLenWidth-1:0]             spatz_req_burst_len_i,
+  input  logic                                     spatz_req_valid_i,
+  output logic                                     spatz_req_ready_o,
 
   // ---- Spatz side: beats back, RecvPorts lanes per core ----
   // The Spatz response path has no ready (mempool_cc ties data_pready_o high for
   // the vector ports), so a drain cycle can never be back-pressured.
-  output logic     [NumSpatz-1:0][RecvPorts-1:0]                 spatz_resp_valid_o,
-  output data_t    [NumSpatz-1:0][RecvPorts-1:0]                 spatz_resp_data_o,
-  output meta_id_t [NumSpatz-1:0][RecvPorts-1:0]                 spatz_resp_id_o,
+  output logic     [RecvPorts-1:0]                 spatz_resp_valid_o,
+  output data_t    [RecvPorts-1:0]                 spatz_resp_data_o,
+  output meta_id_t [RecvPorts-1:0]                 spatz_resp_id_o,
 
   // Hold the drain for a cycle. The vector response ports have no ready, so the
   // adapter and the tile's narrow path must never present a beat on the same port
   // in the same cycle: the tile raises this whenever the narrow path is answering
   // one of this core's receive lanes.
-  input  logic     [NumSpatz-1:0]                                drain_stall_i,
+  input  logic                                     drain_stall_i,
 
   // ---- Wide side ----
   output wide_req_t  wide_req_o,
@@ -91,51 +91,23 @@ module spatz_wide_burst_adapter
 
   state_e state_d, state_q;
 
-  logic [SpatzIdxWidth-1:0]     owner_d, owner_q;      // core the access belongs to
   meta_id_t                     base_id_d, base_id_q;  // ROB id of beat 0
   logic [BurstLenWidth-1:0]     len_d, len_q;          // beats to return
   logic [BeatCntWidth-1:0]      beat_d, beat_q;        // next beat to return
   logic [WideWords-1:0][31:0]   rdata_d, rdata_q;      // the captured wide beat
 
   // ------------------------------------------------------------------
-  //  Request arbitration
+  //  Request admission
   // ------------------------------------------------------------------
   // Only a real burst (burst_len > 1) belongs on the wide plane; a single-word
-  // request stays on the narrow path and is never offered here.
-  logic [NumSpatz-1:0]      arb_req;
-  logic [NumSpatz-1:0]      arb_gnt;
-  logic [SpatzIdxWidth-1:0] arb_idx;
-  logic                     arb_valid;
+  // request stays on the narrow path and is never offered here. No arbitration:
+  // this adapter serves exactly one core, and the contention for the tile's wide
+  // link is resolved by the mux after the shim.
+  logic burst_req;
+  assign burst_req = spatz_req_valid_i &&
+                     (spatz_req_burst_len_i > BurstLenWidth'(1));
 
-  for (genvar c = 0; c < NumSpatz; c++) begin : gen_arb_req
-    assign arb_req[c] = spatz_req_valid_i[c] &&
-                        (spatz_req_burst_len_i[c] > BurstLenWidth'(1));
-  end : gen_arb_req
-
-  rr_arb_tree #(
-    .NumIn    (NumSpatz),
-    .DataWidth(1       ),
-    .AxiVldRdy(1'b1    ),
-    .LockIn   (1'b1    )
-  ) i_arb (
-    .clk_i  (clk_i                     ),
-    .rst_ni (rst_ni                    ),
-    .flush_i(1'b0                      ),
-    .rr_i   ('0                        ),
-    .req_i  (arb_req                   ),
-    .gnt_o  (arb_gnt                   ),
-    .data_i ('0                        ),
-    .gnt_i  (state_q == Idle && wide_req_ready_i),
-    .req_o  (arb_valid                 ),
-    .data_o (/* unused */              ),
-    .idx_o  (arb_idx                   )
-  );
-
-  // A core's port-0 request is consumed here only when it is a burst AND it wins.
-  // Everything else keeps its narrow handshake, which the tile still drives.
-  for (genvar c = 0; c < NumSpatz; c++) begin : gen_req_ready
-    assign spatz_req_ready_o[c] = arb_gnt[c] && (state_q == Idle) && wide_req_ready_i;
-  end : gen_req_ready
+  assign spatz_req_ready_o = burst_req && (state_q == Idle) && wide_req_ready_i;
 
   // ------------------------------------------------------------------
   //  Wide request
@@ -145,12 +117,12 @@ module spatz_wide_burst_adapter
   // lands in exactly one superbank and never straddles two.
   always_comb begin
     wide_req_o        = '0;
-    wide_req_o.addr   = spatz_req_addr_i[arb_idx];
+    wide_req_o.addr   = spatz_req_addr_i;
     wide_req_o.write  = 1'b0;   // bursts are loads only
     wide_req_o.amo    = '0;
     wide_req_o.strb   = '1;
-    wide_req_o.id     = spatz_req_id_i[arb_idx];
-    wide_req_valid_o  = (state_q == Idle) && arb_valid;
+    wide_req_o.id     = spatz_req_id_i;
+    wide_req_valid_o  = (state_q == Idle) && burst_req;
   end
 
   // Accept the response only while draining is possible, i.e. not mid-drain.
@@ -165,13 +137,13 @@ module spatz_wide_burst_adapter
     spatz_resp_valid_o = '0;
     spatz_resp_data_o  = '0;
     spatz_resp_id_o    = '0;
-    if ((state_q == Drain) && !drain_stall_i[owner_q]) begin
+    if ((state_q == Drain) && !drain_stall_i) begin
       for (int unsigned l = 0; l < RecvPorts; l++) begin
         automatic logic [BeatCntWidth-1:0] k = beat_q + BeatCntWidth'(l);
         if (k < BeatCntWidth'(len_q)) begin
-          spatz_resp_valid_o[owner_q][l] = 1'b1;
-          spatz_resp_data_o[owner_q][l]  = rdata_q[k[idx_width(WideWords)-1:0]];
-          spatz_resp_id_o[owner_q][l]    =
+          spatz_resp_valid_o[l] = 1'b1;
+          spatz_resp_data_o[l]  = rdata_q[k[idx_width(WideWords)-1:0]];
+          spatz_resp_id_o[l]    =
               meta_id_t'((base_id_q[RobIdWidth-1:0] + k[RobIdWidth-1:0]));
         end
       end
@@ -183,7 +155,6 @@ module spatz_wide_burst_adapter
   // ------------------------------------------------------------------
   always_comb begin
     state_d   = state_q;
-    owner_d   = owner_q;
     base_id_d = base_id_q;
     len_d     = len_q;
     beat_d    = beat_q;
@@ -192,9 +163,8 @@ module spatz_wide_burst_adapter
     unique case (state_q)
       Idle: begin
         if (wide_req_valid_o && wide_req_ready_i) begin
-          owner_d   = arb_idx;
-          base_id_d = spatz_req_id_i[arb_idx];
-          len_d     = spatz_req_burst_len_i[arb_idx];
+          base_id_d = spatz_req_id_i;
+          len_d     = spatz_req_burst_len_i;
           beat_d    = '0;
           state_d   = Await;
         end
@@ -207,7 +177,7 @@ module spatz_wide_burst_adapter
       end
       Drain: begin
         // Only advance on a cycle whose beats were actually presented.
-        if (!drain_stall_i[owner_q]) begin
+        if (!drain_stall_i) begin
           beat_d = beat_q + BeatCntWidth'(RecvPorts);
           if ((beat_q + BeatCntWidth'(RecvPorts)) >= BeatCntWidth'(len_q))
             state_d = Idle;
@@ -218,7 +188,6 @@ module spatz_wide_burst_adapter
   end
 
   `FF(state_q,   state_d,   Idle)
-  `FF(owner_q,   owner_d,   '0  )
   `FF(base_id_q, base_id_d, '0  )
   `FF(len_q,     len_d,     '0  )
   `FF(beat_q,    beat_d,    '0  )
@@ -242,7 +211,7 @@ module spatz_wide_burst_adapter
     always_comb begin
       seen_d = seen_q;
       if ((state_q == Idle) && wide_req_valid_o && wide_req_ready_i) seen_d = '0;
-      if ((state_q == Drain) && !drain_stall_i[owner_q])
+      if ((state_q == Drain) && !drain_stall_i)
         for (int unsigned l = 0; l < RecvPorts; l++) begin
           automatic logic [BeatCntWidth-1:0] kk = beat_q + BeatCntWidth'(l);
           if (kk < BeatCntWidth'(len_q)) seen_d[kk[idx_width(WideWords)-1:0]] = 1'b1;
@@ -254,9 +223,9 @@ module spatz_wide_burst_adapter
         seen_q <= '0; dbg_bursts_q <= 0; dbg_stalls_q <= 0; dbg_dups_q <= 0; dbg_short_q <= 0;
       end else begin
         seen_q <= seen_d;
-        if ((state_q == Drain) && drain_stall_i[owner_q]) dbg_stalls_q <= dbg_stalls_q + 1;
+        if ((state_q == Drain) && drain_stall_i) dbg_stalls_q <= dbg_stalls_q + 1;
         // A beat presented onto a k already marked is a duplicate delivery.
-        if ((state_q == Drain) && !drain_stall_i[owner_q])
+        if ((state_q == Drain) && !drain_stall_i)
           for (int unsigned l = 0; l < RecvPorts; l++) begin
             automatic logic [BeatCntWidth-1:0] kk = beat_q + BeatCntWidth'(l);
             if ((kk < BeatCntWidth'(len_q)) && seen_q[kk[idx_width(WideWords)-1:0]])
@@ -273,20 +242,20 @@ module spatz_wide_burst_adapter
             end
         end
         // First burst of this adapter: full picture, beat by beat.
-        if ((dbg_bursts_q == 0) && (state_q == Drain) && !drain_stall_i[owner_q]) begin
+        if ((dbg_bursts_q == 0) && (state_q == Drain) && !drain_stall_i) begin
           for (int unsigned l = 0; l < RecvPorts; l++)
             if ((beat_q + BeatCntWidth'(l)) < BeatCntWidth'(len_q))
               $display("[BURST-DBG] %m beat k=%0d lane=%0d id=%0d data=%08x",
                        beat_q + BeatCntWidth'(l), l,
-                       spatz_resp_id_o[owner_q][l], spatz_resp_data_o[owner_q][l]);
+                       spatz_resp_id_o[l], spatz_resp_data_o[l]);
         end
         if ((dbg_bursts_q == 0) && (state_q == Await) && wide_resp_valid_i)
           $display("[BURST-DBG] %m WIDE base_id=%0d len=%0d data=%0h",
                    base_id_q, len_q, wide_resp_i.data);
         if ((dbg_bursts_q == 0) && (state_q == Idle) && wide_req_valid_o && wide_req_ready_i)
-          $display("[BURST-DBG] %m REQ core=%0d addr=%08x id=%0d len=%0d",
-                   arb_idx, spatz_req_addr_i[arb_idx], spatz_req_id_i[arb_idx],
-                   spatz_req_burst_len_i[arb_idx]);
+          $display("[BURST-DBG] %m REQ addr=%08x id=%0d len=%0d",
+                   spatz_req_addr_i, spatz_req_id_i,
+                   spatz_req_burst_len_i);
         // Periodic census so a rare fault is still visible.
         if (dbg_bursts_q == 64)
           $display("[BURST-CENSUS] %m bursts=%0d stall_cycles=%0d dup_beats=%0d missing_beats=%0d",
@@ -299,9 +268,9 @@ module spatz_wide_burst_adapter
   // access this adapter never issues, and the VLSU would wait forever for the tail.
   always_ff @(posedge clk_i) begin
     if (rst_ni && wide_req_valid_o && wide_req_ready_i &&
-        (spatz_req_burst_len_i[arb_idx] > BurstLenWidth'(WideWords)))
+        (spatz_req_burst_len_i > BurstLenWidth'(WideWords)))
       $fatal(1, "[spatz_wide_burst_adapter] burst_len %0d exceeds one wide access (%0d words).",
-             spatz_req_burst_len_i[arb_idx], WideWords);
+             spatz_req_burst_len_i, WideWords);
   end
   // pragma translate_on
 `endif

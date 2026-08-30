@@ -401,7 +401,7 @@ module mempool_cc
   // Two ports only when the burst path is on: with burst off no block reservation
   // ever happens, so the second ROB0 write/read port would be dead logic.
   localparam int unsigned SpatzBurstRecvPorts =
-      mempool_pkg::SpatzWideBurst ? 2 : 1;
+      mempool_pkg::SpatzWideBurst ? mempool_pkg::SpatzBurstRecvPorts : 1;
 
   spatz #(
     .NrMemPorts         ( NumMemPortsPerSpatz     ),

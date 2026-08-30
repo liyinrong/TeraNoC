@@ -237,6 +237,13 @@ spatz ?= 0
 spatz_burst ?= 0
 
 
+# Lanes the wide burst adapter uses to return beats, and the VLSU's NumRespPorts.
+# 2 enables the VLSU's TwinROB0 (odd beats steered to mem port 1, two elements
+# committed per cycle); 1 keeps the legacy single-lane receive and compiles
+# TwinROB0 out entirely. Useful as a discriminator: it isolates that datapath from
+# the burst request path and the adapter, which are common to both.
+spatz_burst_recv_ports ?= 2
+
 # Spatz VLSU reorder-buffer depth. Also the width root of the ROB id that
 # mempool_cc packs into meta_id alongside the store-ack flag, so MetaIdWidth
 # follows this knob (mempool_pkg.sv) rather than constraining it.

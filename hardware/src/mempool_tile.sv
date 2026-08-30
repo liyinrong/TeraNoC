@@ -1184,192 +1184,153 @@ module mempool_tile
 
 `ifdef USE_WIDE_TCDM_PLANE
   if (SpatzWideBurst) begin : gen_spatz_wide_burst
-    localparam int unsigned RecvPorts = 2;
-    // Vector port 0 of each core: the only port a burst is ever issued on.
+    localparam int unsigned RecvPorts = mempool_pkg::SpatzBurstRecvPorts;
+    // Vector port 0 of a core: the only port a burst is ever issued on.
     localparam int unsigned BurstPortOff = 1;
 
-    logic     [NumCoresPerTile-1:0]                  adp_req_valid, adp_req_ready;
-    addr_t    [NumCoresPerTile-1:0]                  adp_req_addr;
-    meta_id_t [NumCoresPerTile-1:0]                  adp_req_id;
-    logic [NumCoresPerTile-1:0][spatz_pkg::BurstLenWidth-1:0] adp_req_burst_len;
-    logic     [NumCoresPerTile-1:0][RecvPorts-1:0]   adp_rsp_valid;
-    data_t    [NumCoresPerTile-1:0][RecvPorts-1:0]   adp_rsp_data;
-    meta_id_t [NumCoresPerTile-1:0][RecvPorts-1:0]   adp_rsp_id;
-    logic     [NumCoresPerTile-1:0]                  adp_drain_stall;
+    // One adapter + one shim per core, each on its own wide slot. No arbitration
+    // here: the cores contend only at the tile's single wide remote link, which the
+    // mux after the shims resolves, together with RedMulE.
+    for (genvar c = 0; c < NumCoresPerTile; c++) begin : gen_spatz_wide_core
+      localparam int unsigned P0   = NumDataPortsPerCore*c + BurstPortOff;
+      localparam int unsigned WIdx = WideSpatzPortIdx + c;
 
-    for (genvar c = 0; c < NumCoresPerTile; c++) begin : gen_adp_tap
-      localparam int unsigned P0 = NumDataPortsPerCore*c + BurstPortOff;
-      // The scrambled address: the wide and narrow scramblers are configured
-      // identically, so reuse the narrow port's rather than instantiating a second.
-      assign adp_req_addr[c]      = snitch_data_qaddr_scrambled[P0];
-      assign adp_req_id[c]        = snitch_data_qid[P0];
-      assign adp_req_burst_len[c] = cc_data_qburst_len[P0];
-      assign adp_req_valid[c]     = cc_data_qvalid[P0] &&
-                                    (cc_data_qburst_len[P0] > spatz_pkg::BurstLenWidth'(1));
+      logic     [RecvPorts-1:0] rsp_valid;
+      data_t    [RecvPorts-1:0] rsp_data;
+      meta_id_t [RecvPorts-1:0] rsp_id;
+      logic                     req_ready, drain_stall;
+      tcdm_wide_rm_req_t        wreq;
+      logic                     wreq_valid, wreq_ready;
+      tcdm_wide_rm_resp_t       wresp;
+      logic                     wresp_valid, wresp_ready;
+
       // The narrow path owns these ports whenever it is answering on them, so hold
       // the drain rather than presenting two beats on one port in one cycle.
       always_comb begin
-        adp_drain_stall[c] = 1'b0;
+        drain_stall = 1'b0;
         for (int unsigned l = 0; l < RecvPorts; l++)
-          adp_drain_stall[c] |= snitch_data_pvalid[NumDataPortsPerCore*c + BurstPortOff + l];
+          drain_stall |= snitch_data_pvalid[P0 + l];
       end
-    end : gen_adp_tap
 
-    // Only vector port 0 can be diverted; every other port is untouched.
-    for (genvar i = 0; i < NumCorePorts; i++) begin : gen_divert
-      localparam int unsigned Core = i / NumDataPortsPerCore;
+      spatz_wide_burst_adapter #(
+        .RecvPorts  (RecvPorts               ),
+        .RobIdWidth (spatz_pkg::MemRspIdWidth),
+        .wide_req_t (tcdm_wide_rm_req_t      ),
+        .wide_resp_t(tcdm_wide_rm_resp_t     )
+      ) i_spatz_wide_burst_adapter (
+        .clk_i                (clk_i                    ),
+        .rst_ni               (rst_ni                   ),
+        // The scrambled address: the wide and narrow scramblers are configured
+        // identically, so reuse the narrow port's rather than adding a second.
+        .spatz_req_addr_i     (snitch_data_qaddr_scrambled[P0]),
+        .spatz_req_id_i       (snitch_data_qid[P0]      ),
+        .spatz_req_burst_len_i(cc_data_qburst_len[P0]   ),
+        .spatz_req_valid_i    (cc_data_qvalid[P0]       ),
+        .spatz_req_ready_o    (req_ready                ),
+        .spatz_resp_valid_o   (rsp_valid                ),
+        .spatz_resp_data_o    (rsp_data                 ),
+        .spatz_resp_id_o      (rsp_id                   ),
+        .drain_stall_i        (drain_stall              ),
+        .wide_req_o           (wreq                     ),
+        .wide_req_valid_o     (wreq_valid               ),
+        .wide_req_ready_i     (wreq_ready               ),
+        .wide_resp_i          (wresp                    ),
+        .wide_resp_valid_i    (wresp_valid              ),
+        .wide_resp_ready_o    (wresp_ready              )
+      );
+
+      // Divert this core's vector port 0 off the narrow shim while it is bursting,
+      // and merge the adapter's beats back onto its receive lanes.
+      assign core_divert[P0] = cc_data_qvalid[P0] &&
+                               (cc_data_qburst_len[P0] > spatz_pkg::BurstLenWidth'(1));
+      assign adp_qready[P0]  = req_ready;
+      for (genvar l = 0; l < RecvPorts; l++) begin : gen_lane
+        assign adp_pvalid[P0 + l] = rsp_valid[l];
+        assign adp_pdata[P0 + l]  = rsp_data[l];
+        assign adp_pid[P0 + l]    = rsp_id[l];
+      end : gen_lane
+
+      // ---- this core's own shim: own-tile vs remote ----
+      address_map_t [NumWideShimPorts-1:0] mask_map;
+      assign mask_map = '{
+        '{slave_idx: TCDM_WIDE_EXTERNAL,
+          mask : TCDMMask,
+          value: TCDMBaseAddr},
+        '{slave_idx: TCDM_WIDE_LOCAL,
+          mask : TCDMMask | ({idx_width(NumTiles){1'b1}} << (ByteOffset + $clog2(NumBanksPerTile))),
+          value: TCDMBaseAddr | (tile_id_i << (ByteOffset + $clog2(NumBanksPerTile)))}
+      };
+
+      assign local_wide_req_interco_payload[WIdx].tgt_addr = tile_addr_t'({
+          local_wide_req_interco_addr_int[WIdx][ByteOffset +
+              idx_width(NumBanksPerTile) + $clog2(NumTiles) +: TCDMAddrMemWidth],
+          local_wide_req_interco_addr_int[WIdx][
+              ByteOffset +: idx_width(NumBanksPerTile)]});
+      assign remote_wide_req_interco[WIdx].tgt_addr = remote_wide_req_tgt_addr[WIdx];
+
+      tcdm_shim #(
+        .AddrWidth           (AddrWidth                         ),
+        .DataWidth           (WideTcdmDataWidth                 ),
+        .MaxOutStandingTrans (snitch_pkg::NumIntOutstandingLoads),
+        .NrTCDM              (NumWideShimPorts                  ),
+        .NrSoC               (1                                 ),
+        .EnableSoC           (1'b0                              ),
+        .NumRules            (NumWideShimPorts                  ),
+        .req_t               (tcdm_wide_rm_req_t                ),
+        .resp_t              (tcdm_wide_rm_resp_t               )
+      ) i_spatz_tcdm_wide_shim (
+        .clk_i              (clk_i ),
+        .rst_ni             (rst_ni),
+        .tcdm_req_valid_o   ({local_wide_req_interco_valid[WIdx],                  remote_wide_req_interco_valid[WIdx]}         ),
+        .tcdm_req_tgt_addr_o({local_wide_req_interco_addr_int[WIdx],               remote_wide_req_interco_addr_int[WIdx]}      ),
+        .tcdm_req_wen_o     ({local_wide_req_interco_payload[WIdx].wen,            remote_wide_req_interco[WIdx].wen}           ),
+        .tcdm_req_wdata_o   ({local_wide_req_interco_payload[WIdx].wdata.data,     remote_wide_req_interco[WIdx].wdata.data}    ),
+        .tcdm_req_amo_o     ({local_wide_req_interco_payload[WIdx].wdata.amo,      remote_wide_req_interco[WIdx].wdata.amo}     ),
+        .tcdm_req_id_o      ({local_wide_req_interco_payload[WIdx].wdata.meta_id,  remote_wide_req_interco[WIdx].wdata.meta_id} ),
+        .tcdm_req_be_o      ({local_wide_req_interco_payload[WIdx].be,             remote_wide_req_interco[WIdx].be}            ),
+        .tcdm_req_ready_i   ({local_wide_req_interco_ready[WIdx],                  remote_wide_req_interco_ready[WIdx]}         ),
+        .tcdm_resp_valid_i  ({local_wide_resp_interco_valid[WIdx],                 remote_wide_resp_interco_valid[WIdx]}        ),
+        .tcdm_resp_ready_o  ({local_wide_resp_interco_ready[WIdx],                 remote_wide_resp_interco_ready[WIdx]}        ),
+        .tcdm_resp_rdata_i  ({local_wide_resp_interco_payload[WIdx].rdata.data,    remote_wide_resp_interco[WIdx].rdata.data}   ),
+        .tcdm_resp_id_i     ({local_wide_resp_interco_payload[WIdx].rdata.meta_id, remote_wide_resp_interco[WIdx].rdata.meta_id}),
+        .soc_qaddr_o (/* unused */), .soc_qwrite_o(/* unused */), .soc_qamo_o (/* unused */),
+        .soc_qdata_o (/* unused */), .soc_qstrb_o (/* unused */), .soc_qvalid_o(/* unused */),
+        .soc_qready_i('0), .soc_pdata_i('0), .soc_pwrite_i('0), .soc_perror_i('0),
+        .soc_pvalid_i('0), .soc_pready_o(/* unused */),
+        .data_qaddr_i (wreq.addr  ), .data_qwrite_i(wreq.write ), .data_qamo_i  (wreq.amo  ),
+        .data_qdata_i (wreq.data  ), .data_qstrb_i (wreq.strb  ), .data_qid_i   (wreq.id   ),
+        .data_qvalid_i(wreq_valid ), .data_qready_o(wreq_ready ),
+        .data_pdata_o (wresp.data ), .data_perror_o(wresp.error), .data_pid_o   (wresp.id  ),
+        .data_pvalid_o(wresp_valid), .data_pready_i(wresp_ready),
+        .address_map_i(mask_map   )
+      );
+      assign wresp.write = 1'b0;
+
+      // Self-routing fields. core_id is the wide slot index -- what the shared
+      // response crossbar selects on to get the beat back to this core's shim.
+      assign local_wide_req_interco_payload[WIdx].wdata.core_id = tile_core_id_t'(WIdx);
+      assign local_wide_req_interco_payload[WIdx].ini_addr      = tcdm_wide_tile_id;
+      assign local_wide_req_interco_payload[WIdx].src_group_id  = group_id;
+      assign remote_wide_req_interco[WIdx].wdata.core_id = tile_core_id_t'(WIdx);
+      assign remote_wide_req_interco[WIdx].tgt_group_id  = remote_wide_req_tgt_group_id[WIdx];
+      assign remote_wide_req_interco[WIdx].src_tile_id   = tcdm_wide_tile_id;
+      assign remote_wide_req_interco_tgt_sel[WIdx]       = remote_wide_req_tgt_sel[WIdx];
+    end : gen_spatz_wide_core
+
+    // Ports that are not a core's vector port 0 are never diverted.
+    for (genvar i = 0; i < NumCorePorts; i++) begin : gen_plain_ports
       localparam int unsigned Port = i % NumDataPortsPerCore;
-      if (Port == BurstPortOff) begin : gen_burst_port
-        assign core_divert[i] = adp_req_valid[Core];
-      end else begin : gen_plain_port
+      if (Port != BurstPortOff) begin : gen_plain
         assign core_divert[i] = 1'b0;
+        assign adp_qready[i]  = 1'b0;
       end
-    end : gen_divert
-
-    // Beats back: lane l of core c lands on that core's vector port BurstPortOff+l.
-    for (genvar i = 0; i < NumCorePorts; i++) begin : gen_adp_rsp
-      localparam int unsigned Core = i / NumDataPortsPerCore;
-      localparam int unsigned Port = i % NumDataPortsPerCore;
-      if (Port >= BurstPortOff && Port < BurstPortOff + RecvPorts) begin : gen_lane
-        localparam int unsigned Lane = Port - BurstPortOff;
-        assign adp_pvalid[i] = adp_rsp_valid[Core][Lane];
-        assign adp_pdata[i]  = adp_rsp_data[Core][Lane];
-        assign adp_pid[i]    = adp_rsp_id[Core][Lane];
-      end else begin : gen_no_lane
+      if ((Port < BurstPortOff) || (Port >= BurstPortOff + RecvPorts)) begin : gen_no_lane
         assign adp_pvalid[i] = 1'b0;
         assign adp_pdata[i]  = '0;
         assign adp_pid[i]    = '0;
       end
-    end : gen_adp_rsp
+    end : gen_plain_ports
 
-    spatz_wide_burst_adapter #(
-      .NumSpatz   (NumCoresPerTile        ),
-      .RecvPorts  (RecvPorts              ),
-      .RobIdWidth (spatz_pkg::MemRspIdWidth),
-      .wide_req_t (tcdm_wide_rm_req_t ),
-      .wide_resp_t(tcdm_wide_rm_resp_t)
-    ) i_spatz_wide_burst_adapter (
-      .clk_i                (clk_i                    ),
-      .rst_ni               (rst_ni                   ),
-      .spatz_req_addr_i     (adp_req_addr             ),
-      .spatz_req_id_i       (adp_req_id               ),
-      .spatz_req_burst_len_i(adp_req_burst_len        ),
-      .spatz_req_valid_i    (adp_req_valid            ),
-      .spatz_req_ready_o    (adp_req_ready            ),
-      .spatz_resp_valid_o   (adp_rsp_valid            ),
-      .spatz_resp_data_o    (adp_rsp_data             ),
-      .spatz_resp_id_o      (adp_rsp_id               ),
-      .drain_stall_i        (adp_drain_stall          ),
-      .wide_req_o           (spatz_wide_req           ),
-      .wide_req_valid_o     (spatz_wide_req_valid     ),
-      .wide_req_ready_i     (spatz_wide_req_ready     ),
-      .wide_resp_i          (spatz_wide_resp          ),
-      .wide_resp_valid_i    (spatz_wide_resp_valid    ),
-      .wide_resp_ready_o    (spatz_wide_resp_ready    )
-    );
-
-    // ----------------------------------------------------------------
-    //  Spatz wide slot: own shim, own bank-interconnect port
-    // ----------------------------------------------------------------
-    // Mirrors the RedMulE slot: the shim splits own-tile from every other tile, and
-    // the tile's remote request router then splits same-group from inter-group. The
-    // address is the one the narrow port already scrambled -- the wide and narrow
-    // scramblers are configured identically, so a second instance would be redundant.
-    localparam int unsigned WIdx = WideSpatzPortIdx;
-
-    address_map_t [NumWideShimPorts-1:0] spatz_wide_mask_map;
-    assign spatz_wide_mask_map = '{
-      '{slave_idx: TCDM_WIDE_EXTERNAL,
-        mask : TCDMMask,
-        value: TCDMBaseAddr},
-      '{slave_idx: TCDM_WIDE_LOCAL,
-        mask : TCDMMask | ({idx_width(NumTiles){1'b1}} << (ByteOffset + $clog2(NumBanksPerTile))),
-        value: TCDMBaseAddr | (tile_id_i << (ByteOffset + $clog2(NumBanksPerTile)))}
-    };
-
-    assign local_wide_req_interco_payload[WIdx].tgt_addr = tile_addr_t'({
-        local_wide_req_interco_addr_int[WIdx][ByteOffset +
-            idx_width(NumBanksPerTile) + $clog2(NumTiles) +: TCDMAddrMemWidth],
-        local_wide_req_interco_addr_int[WIdx][
-            ByteOffset +: idx_width(NumBanksPerTile)]});
-    assign remote_wide_req_interco[WIdx].tgt_addr = remote_wide_req_tgt_addr[WIdx];
-
-    tcdm_shim #(
-      .AddrWidth           (AddrWidth                         ),
-      .DataWidth           (WideTcdmDataWidth                 ),
-      .MaxOutStandingTrans (snitch_pkg::NumIntOutstandingLoads),
-      .NrTCDM              (NumWideShimPorts                  ),
-      .NrSoC               (1                                 ),
-      .EnableSoC           (1'b0                              ),
-      .NumRules            (NumWideShimPorts                  ),
-      .req_t               (tcdm_wide_rm_req_t                ),
-      .resp_t              (tcdm_wide_rm_resp_t               )
-    ) i_spatz_tcdm_wide_shim (
-      .clk_i              (clk_i ),
-      .rst_ni             (rst_ni),
-      // {local, remote}: idx 1 = same-group, idx 0 = inter-group.
-      .tcdm_req_valid_o   ({local_wide_req_interco_valid[WIdx],                  remote_wide_req_interco_valid[WIdx]}         ),
-      .tcdm_req_tgt_addr_o({local_wide_req_interco_addr_int[WIdx],               remote_wide_req_interco_addr_int[WIdx]}      ),
-      .tcdm_req_wen_o     ({local_wide_req_interco_payload[WIdx].wen,            remote_wide_req_interco[WIdx].wen}           ),
-      .tcdm_req_wdata_o   ({local_wide_req_interco_payload[WIdx].wdata.data,     remote_wide_req_interco[WIdx].wdata.data}    ),
-      .tcdm_req_amo_o     ({local_wide_req_interco_payload[WIdx].wdata.amo,      remote_wide_req_interco[WIdx].wdata.amo}     ),
-      .tcdm_req_id_o      ({local_wide_req_interco_payload[WIdx].wdata.meta_id,  remote_wide_req_interco[WIdx].wdata.meta_id} ),
-      .tcdm_req_be_o      ({local_wide_req_interco_payload[WIdx].be,             remote_wide_req_interco[WIdx].be}            ),
-      .tcdm_req_ready_i   ({local_wide_req_interco_ready[WIdx],                  remote_wide_req_interco_ready[WIdx]}         ),
-      .tcdm_resp_valid_i  ({local_wide_resp_interco_valid[WIdx],                 remote_wide_resp_interco_valid[WIdx]}        ),
-      .tcdm_resp_ready_o  ({local_wide_resp_interco_ready[WIdx],                 remote_wide_resp_interco_ready[WIdx]}        ),
-      .tcdm_resp_rdata_i  ({local_wide_resp_interco_payload[WIdx].rdata.data,    remote_wide_resp_interco[WIdx].rdata.data}   ),
-      .tcdm_resp_id_i     ({local_wide_resp_interco_payload[WIdx].rdata.meta_id, remote_wide_resp_interco[WIdx].rdata.meta_id}),
-      .soc_qaddr_o        (/* unused */),
-      .soc_qwrite_o       (/* unused */),
-      .soc_qamo_o         (/* unused */),
-      .soc_qdata_o        (/* unused */),
-      .soc_qstrb_o        (/* unused */),
-      .soc_qvalid_o       (/* unused */),
-      .soc_qready_i       ('0          ),
-      .soc_pdata_i        ('0          ),
-      .soc_pwrite_i       ('0          ),
-      .soc_perror_i       ('0          ),
-      .soc_pvalid_i       ('0          ),
-      .soc_pready_o       (/* unused */),
-      .data_qaddr_i       (spatz_wide_req.addr   ),
-      .data_qwrite_i      (spatz_wide_req.write  ),
-      .data_qamo_i        (spatz_wide_req.amo    ),
-      .data_qdata_i       (spatz_wide_req.data   ),
-      .data_qstrb_i       (spatz_wide_req.strb   ),
-      .data_qid_i         (spatz_wide_req.id     ),
-      .data_qvalid_i      (spatz_wide_req_valid  ),
-      .data_qready_o      (spatz_wide_req_ready  ),
-      .data_pdata_o       (spatz_wide_resp.data  ),
-      .data_perror_o      (spatz_wide_resp.error ),
-      .data_pid_o         (spatz_wide_resp.id    ),
-      .data_pvalid_o      (spatz_wide_resp_valid ),
-      .data_pready_i      (spatz_wide_resp_ready ),
-      .address_map_i      (spatz_wide_mask_map   )
-    );
-    assign spatz_wide_resp.write = 1'b0;
-
-    // Self-routing fields, as the RedMulE slot drives them. core_id is the wide slot
-    // index: it is what the shared response crossbar selects on.
-    assign local_wide_req_interco_payload[WIdx].wdata.core_id = tile_core_id_t'(WIdx);
-    assign local_wide_req_interco_payload[WIdx].ini_addr      = tcdm_wide_tile_id;
-    assign local_wide_req_interco_payload[WIdx].src_group_id  = group_id;
-    assign remote_wide_req_interco[WIdx].wdata.core_id  = tile_core_id_t'(WIdx);
-    assign remote_wide_req_interco[WIdx].tgt_group_id   = remote_wide_req_tgt_group_id[WIdx];
-    assign remote_wide_req_interco[WIdx].src_tile_id    = tcdm_wide_tile_id;
-    assign remote_wide_req_interco_tgt_sel[WIdx]        = remote_wide_req_tgt_sel[WIdx];
-
-    // The diverted request's handshake comes from the adapter, not the shim. The
-    // mux itself is in gen_divert_layer so every port is driven in one place.
-    for (genvar i = 0; i < NumCorePorts; i++) begin : gen_adp_gnt
-      localparam int unsigned Core = i / NumDataPortsPerCore;
-      localparam int unsigned Port = i % NumDataPortsPerCore;
-      if (Port == BurstPortOff) begin : gen_burst_gnt
-        assign adp_qready[i] = adp_req_ready[Core];
-      end else begin : gen_plain_gnt
-        assign adp_qready[i] = 1'b0;
-      end
-    end : gen_adp_gnt
   end else begin : gen_no_spatz_wide_burst
     assign core_divert = '0;
     assign adp_qready  = '0;

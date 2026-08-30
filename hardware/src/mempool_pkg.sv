@@ -315,14 +315,23 @@ package mempool_pkg;
   //   slot 1 : Spatz burst adapter (present when spatz_burst is on)
   localparam bit SpatzWideBurst =
       `ifdef SPATZ_VLSU_BURST (`SPATZ_VLSU_BURST != 0) `else 1'b0 `endif;
+  // Lanes the burst adapter returns beats on; must equal the VLSU's BurstRecvPorts.
+  localparam integer unsigned SpatzBurstRecvPorts =
+      `ifdef SPATZ_BURST_RECV_PORTS `SPATZ_BURST_RECV_PORTS `else 2 `endif;
   localparam integer unsigned NumWideRmPorts    = (NumRMTiles > 0) ? 1 : 0;
-  localparam integer unsigned NumWideSpatzPorts = SpatzWideBurst   ? 1 : 0;
+  // ONE wide slot per Spatz core: each core gets its own burst adapter and its own
+  // shim, so two cores of a tile can hold wide accesses at once (different
+  // superbanks, or one own-tile and one remote). They contend only at the tile's
+  // single wide remote link, which the mux after the shims resolves.
+  localparam integer unsigned NumWideSpatzPorts =
+      SpatzWideBurst ? NumCoresPerTile : 0;
   // At least one slot: the arrays and the crossbars are declared unconditionally
   // and a zero-width dimension is not legal.
   localparam integer unsigned NumWideLocalPorts =
       (NumWideRmPorts + NumWideSpatzPorts) > 0 ? (NumWideRmPorts + NumWideSpatzPorts) : 1;
   localparam integer unsigned WideRmPortIdx    = 0;
-  localparam integer unsigned WideSpatzPortIdx = NumWideRmPorts; // 1 with RedMulE, else 0
+  // Base slot of the Spatz block; core c owns WideSpatzPortIdx + c.
+  localparam integer unsigned WideSpatzPortIdx = NumWideRmPorts;
 
   localparam integer unsigned RMBaseAddr = 32'h4002_0000;
   localparam integer unsigned RMMask     = ~((1 << idx_width(RMRegSize)) - 1);
