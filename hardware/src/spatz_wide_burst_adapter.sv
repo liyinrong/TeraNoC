@@ -146,13 +146,21 @@ module spatz_wide_burst_adapter
     if ((state_q == Drain) && !drain_stall_i) begin
       for (int unsigned l = 0; l < RecvPorts; l++) begin
         automatic logic [BeatCntWidth-1:0] k = beat_q + BeatCntWidth'(l);
+        automatic logic [RobIdWidth-1:0]   beat_id;
         if (k < BeatCntWidth'(len_q)) begin
           spatz_resp_valid_o[l] = 1'b1;
           spatz_resp_data_o[l]  = rdata_q[k[idx_width(WideWords)-1:0]];
           // Entry index within THIS lane's ROB: beat k is that ROB's k/RecvPorts-th.
-          spatz_resp_id_o[l]    =
-              meta_id_t'(base_id_q[RobIdWidth-1:0] +
-                         (k[RobIdWidth-1:0] / RobIdWidth'(RecvPorts)));
+          // The sum MUST wrap inside the ROB id field. Writing it as
+          // meta_id_t'(a + b) does not: a cast propagates its size to the operands,
+          // so the addition is evaluated at meta_id width and the carry survives --
+          // landing on bit RobIdWidth, which is exactly WrFlagBit. The beat then
+          // reads back as a store acknowledgement and trips
+          // "store response arrived with no outstanding request". Truncate first by
+          // assigning to a RobIdWidth-wide variable, then widen.
+          beat_id               = base_id_q[RobIdWidth-1:0] +
+                                  k[RobIdWidth-1:0] / RobIdWidth'(RecvPorts);
+          spatz_resp_id_o[l]    = meta_id_t'(beat_id);
         end
       end
     end
