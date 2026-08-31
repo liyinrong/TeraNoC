@@ -670,7 +670,7 @@
               if (rq >= 2)  // req handshake -> one wide engine access accepted
                 $fwrite(f_rm[g][t], "0 P 1 0 %0d %0d %0h %0d %0d\n", cycle_q,
                   `RMW_ENG(g,t).tcdm_wide_rm_req.write,
-                  `RMW_ENG(g,t).tcdm.req_add,
+                  `RMW_ENG(g,t).tcdm.add,
                   `RMW_ENG(g,t).tcdm_wide_rm_req.id,
                   mem_dst_tile(`RMW_ENG(g,t).tcdm_wide_rm_req.addr));
               if (rp >= 2)  // resp handshake -> a wide response returns to the engine
