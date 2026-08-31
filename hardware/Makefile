@@ -207,7 +207,6 @@ ifeq ($(spatz), 1)
 # responses. Until the burst expander (narrow plane) or the wide adapter is in place,
 # spatz_burst=0 keeps the VLSU on the word-interleaved path.
 vlog_defs += -DSPATZ_VLSU_BURST=$(spatz_burst)
-vlog_defs += -DSPATZ_BURST_RECV_PORTS=$(spatz_burst_recv_ports)
 vlog_defs += -DSPATZ_LD_TRACE=$(spatz_ld_trace)
 # Spatz VLSU reorder-buffer depth. This is also the width root of the ROB id that
 # mempool_cc packs into meta_id, so it cannot be raised past what meta_id can carry.

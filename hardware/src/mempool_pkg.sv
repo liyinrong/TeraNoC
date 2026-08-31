@@ -315,9 +315,6 @@ package mempool_pkg;
   //   slot 1 : Spatz burst adapter (present when spatz_burst is on)
   localparam bit SpatzWideBurst =
       `ifdef SPATZ_VLSU_BURST (`SPATZ_VLSU_BURST != 0) `else 1'b0 `endif;
-  // Lanes the burst adapter returns beats on; must equal the VLSU's BurstRecvPorts.
-  localparam integer unsigned SpatzBurstRecvPorts =
-      `ifdef SPATZ_BURST_RECV_PORTS `SPATZ_BURST_RECV_PORTS `else 2 `endif;
   localparam integer unsigned NumWideRmPorts    = (NumRMTiles > 0) ? 1 : 0;
   // ONE wide slot per Spatz core: each core gets its own burst adapter and its own
   // shim, so two cores of a tile can hold wide accesses at once (different

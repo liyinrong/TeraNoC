@@ -400,8 +400,9 @@ module mempool_cc
 
   // Two ports only when the burst path is on: with burst off no block reservation
   // ever happens, so the second ROB0 write/read port would be dead logic.
-  localparam int unsigned SpatzBurstRecvPorts =
-      mempool_pkg::SpatzWideBurst ? mempool_pkg::SpatzBurstRecvPorts : 1;
+  // Every vector port receives burst beats: a word's port follows from its address,
+  // as on the non-burst path, so a burst commits through the ordinary 4-ROB path.
+  localparam int unsigned SpatzBurstRecvPorts = NumMemPortsPerSpatz;
 
   spatz #(
     .NrMemPorts         ( NumMemPortsPerSpatz     ),
@@ -497,6 +498,13 @@ needs %0d b -- lower spatz_rob_depth or widen MetaIdWidth.",
         if (data_pvalid_i[i+1] && !data_pid_i[i+1][WrFlagBit])
           $display("[LD] %m port=%0d addr=%08x data=%08x",
                    i, addr_tab[data_pid_i[i+1][WrFlagBit-1:0]], data_pdata_i[i+1]);
+        // Stores carry their address and data on the REQUEST, so no id table is
+        // needed: print them directly. Bursts are loads only, so a store is always
+        // one word and both runs must produce the same address->value stream.
+        if (data_qvalid_o[i+1] && data_qready_i[i+1] && spatz_mem_req[i].write)
+          $display("[ST] %m port=%0d addr=%08x data=%08x strb=%h",
+                   i, spatz_mem_req[i].addr, spatz_mem_req[i].data,
+                   spatz_mem_req[i].strb);
       end
     end : gen_ld_trace_port
   end : gen_ld_trace

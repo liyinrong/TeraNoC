@@ -1184,7 +1184,9 @@ module mempool_tile
 
 `ifdef USE_WIDE_TCDM_PLANE
   if (SpatzWideBurst) begin : gen_spatz_wide_burst
-    localparam int unsigned RecvPorts = mempool_pkg::SpatzBurstRecvPorts;
+    // One lane per vector memory port: a word's lane is fixed by its address, so
+    // the VLSU consumes a burst through its ordinary 4-ROB commit path.
+    localparam int unsigned RecvPorts = NumDataPortsPerCore - 1;
     // Vector port 0 of a core: the only port a burst is ever issued on.
     localparam int unsigned BurstPortOff = 1;
 

@@ -12,12 +12,16 @@
 // WideTcdmDataWidth) -- and this adapter unpacks the single wide response back into
 // the N beats the VLSU is waiting for.
 //
-// Beat k is returned on receive lane k % RecvPorts. That matches the VLSU's own
-// parity rule: with RecvPorts = 2 its TwinROB0 expects the odd beats of a block on
-// mem port 1 (burst_odd_alt in spatz_vlsu.sv: the ids inside the window whose LSB
-// differs from the base's), and (base+k)[0] ^ base[0] == k[0]. RecvPorts is a
-// parameter rather than a constant so this side is already right when the VLSU's
-// receive datapath is generalised past the 2 it hardwires today.
+// Beat k is returned on lane k % RecvPorts with id base + k / RecvPorts. That is the
+// non-burst word->port rule (spatz_vlsu.sv: word index 4n + port), so ROB p receives
+// words p, p+4, p+8 ... as its own consecutive entries and the VLSU commits a burst
+// through the ordinary path -- one element from each ROB filling a VRF row in ONE
+// write. A burst base is WideTcdmDataWidth-aligned, so base/4 % RecvPorts == 0 and
+// the lane reduces to k % RecvPorts.
+//
+// This is what makes the row atomic. Funnelling every beat into ROB0 instead forces
+// a row to be filled by several partial writes, and a consumer that reads between
+// them sees stale lanes -- measured as wrong results on every 8th output row.
 //
 // Loads only: a burst is only ever emitted for a load (burst_mode_req demands
 // mem_is_load), so there is no write data path here.
@@ -33,8 +37,10 @@ module spatz_wide_burst_adapter
   import mempool_pkg::*;
   import cf_math_pkg::idx_width;
 #(
-  // Lanes used to return beats. Must match the VLSU's BurstRecvPorts.
-  parameter int unsigned RecvPorts     = 2,
+  // Receive lanes = the VLSU's memory ports. Not a free choice: a word's lane is
+  // fixed by its address, exactly as on the non-burst path, so that the VLSU can
+  // consume a burst through the ordinary 4-ROB commit path.
+  parameter int unsigned RecvPorts     = 4,
   // Width of the reorder-buffer id inside meta_id, i.e. spatz_pkg::MemRspIdWidth.
   // The beat id must wrap within this field: a block reservation may start near the
   // top of the ROB and wrap, and anything carried out of the field lands on the
@@ -143,8 +149,10 @@ module spatz_wide_burst_adapter
         if (k < BeatCntWidth'(len_q)) begin
           spatz_resp_valid_o[l] = 1'b1;
           spatz_resp_data_o[l]  = rdata_q[k[idx_width(WideWords)-1:0]];
+          // Entry index within THIS lane's ROB: beat k is that ROB's k/RecvPorts-th.
           spatz_resp_id_o[l]    =
-              meta_id_t'((base_id_q[RobIdWidth-1:0] + k[RobIdWidth-1:0]));
+              meta_id_t'(base_id_q[RobIdWidth-1:0] +
+                         (k[RobIdWidth-1:0] / RobIdWidth'(RecvPorts)));
         end
       end
     end
