@@ -90,7 +90,7 @@ packages:
       Path: hardware/deps/floo_noc/./pd
     dependencies: []
   fpnew:
-    revision: e5aa6a01b5bbe1675c3aa8872e1203413ded83d1
+    revision: 841b19b9fc0148ee7cbf91c295e801c6bf21a421
     version: null
     source:
       Git: https://github.com/pulp-platform/cvfpu.git

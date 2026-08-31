@@ -383,10 +383,13 @@ package spatz_pkg;
     Width        : ELEN,
     EnableVectors: 1'b1,
     EnableNanBox : 1'b1,
-    //              FP32  FP64  FP16  FP8   FP16a FP8a
-    FpFmtMask    : {1'b1, 1'b1, 1'b1, 1'b1, 1'b1, 1'b1},
+    //              FP32  FP64  FP16  FP8   FP16a FP8a  FP6   FP6a  FP4
+    FpFmtMask    : {1'b1, 1'b1, 1'b1, 1'b1, 1'b1, 1'b1, 1'b0, 1'b0, 1'b0},
     //              INT8  INT16 INT32 INT64
-    IntFmtMask   : {1'b1, 1'b1, 1'b1, 1'b1}
+    IntFmtMask   : {1'b1, 1'b1, 1'b1, 1'b1},
+    MxFpFmtMask  : 9'b0,          // MX formats unused
+    MxIntFmtMask : 4'b0,
+    PaceFeatures : '{default: 0}  // PACE unused
   } :
 
 % if cfg['mempool']:
@@ -396,21 +399,25 @@ package spatz_pkg;
     Width        : ELEN,
     EnableVectors: 1'b1,
     EnableNanBox : 1'b1,
-    //              FP32  FP64  FP16  FP8   FP16a FP8a
-    FpFmtMask    : {RVF,  1'b0, 1'b1, 1'b0, 1'b0, 1'b0},
+    //              FP32  FP64  FP16  FP8   FP16a FP8a  FP6   FP6a  FP4
+    FpFmtMask    : {RVF,  1'b0, 1'b1, 1'b0, 1'b0, 1'b0, 1'b0, 1'b0, 1'b0},
     //              INT8  INT16 INT32 INT64
-    IntFmtMask   : {1'b0, 1'b1, 1'b1, 1'b0}
+    IntFmtMask   : {1'b0, 1'b1, 1'b1, 1'b0},
+    MxFpFmtMask  : 9'b0,          // MX formats unused
+    MxIntFmtMask : 4'b0,
+    PaceFeatures : '{default: 0}  // PACE unused
   };
 
   localparam fpnew_pkg::fpu_implementation_t MemPoolFPUImpl =
   '{
       // Pipeline stages
-      //              FP32 FP64 FP16 FP8 FP16a FP8a
-      PipeRegs: '{'{  1,   2,   1,   1,   0,   0},    // ADDMUL
-                  '{  1,   1,   1,   1,   1,   1},    // DIVSQRT
-                  '{  1,   1,   1,   1,   1,   1},    // NONCOMP
-                  '{  2,   2,   2,   2,   2,   2},    // CONV
-                  '{  2,   2,   2,   2,   2,   2}},   // DOTP
+      //              FP32 FP64 FP16 FP8 FP16a FP8a FP6 FP6a FP4
+      PipeRegs: '{'{  1,   2,   1,   1,   0,   0,   0,  0,   0},    // ADDMUL
+                  '{  1,   1,   1,   1,   1,   1,   1,  1,   1},    // DIVSQRT
+                  '{  1,   1,   1,   1,   1,   1,   1,  1,   1},    // NONCOMP
+                  '{  2,   2,   2,   2,   2,   2,   2,  2,   2},    // CONV
+                  '{  2,   2,   2,   2,   2,   2,   2,  2,   2},    // DOTP
+                  '{  0,   0,   0,   0,   0,   0,   0,  0,   0}},   // MXDOTP (disabled, row unread)
       // MERGED: share one functional unit for all types
       // PARALLEL: multiple functional units
       // DISABLED: turn off
@@ -418,7 +425,9 @@ package spatz_pkg;
                   '{  default: fpnew_pkg::DISABLED},  // DIVSQRT
                   '{  default: fpnew_pkg::PARALLEL},  // NONCOMP
                   '{  default: fpnew_pkg::MERGED},    // CONV
-                  '{  default: fpnew_pkg::DISABLED}}, // SDOTP
+                  '{  default: fpnew_pkg::DISABLED},  // SDOTP
+                  '{  default: fpnew_pkg::DISABLED}}, // MXDOTP -- stays DISABLED: its slice
+                                                      // asserts width==64 and FLEN here is 32
       PipeConfig: fpnew_pkg::BEFORE
   };
 % else :
@@ -427,10 +436,13 @@ package spatz_pkg;
     Width        : ELEN,
     EnableVectors: 1'b1,
     EnableNanBox : 1'b1,
-    //              FP32  FP64  FP16  FP8   FP16a FP8a
-    FpFmtMask    : {RVF,  1'b0, 1'b1, 1'b1, 1'b0, 1'b0},
+    //              FP32  FP64  FP16  FP8   FP16a FP8a  FP6   FP6a  FP4
+    FpFmtMask    : {RVF,  1'b0, 1'b1, 1'b1, 1'b0, 1'b0, 1'b0, 1'b0, 1'b0},
     //              INT8  INT16 INT32 INT64
-    IntFmtMask   : {1'b1, 1'b1, 1'b1, 1'b0}
+    IntFmtMask   : {1'b1, 1'b1, 1'b1, 1'b0},
+    MxFpFmtMask  : 9'b0,          // MX formats unused
+    MxIntFmtMask : 4'b0,
+    PaceFeatures : '{default: 0}  // PACE unused
   };
 
 % endif
