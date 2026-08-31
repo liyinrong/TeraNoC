@@ -76,7 +76,7 @@ module spatz_wide_burst_adapter
   // adapter and the tile's narrow path must never present a beat on the same port
   // in the same cycle: the tile raises this whenever the narrow path is answering
   // one of this core's receive lanes.
-  input  logic                                     drain_stall_i,
+  input  logic     [RecvPorts-1:0]                 drain_stall_i,
 
   // ---- Wide side ----
   output wide_req_t  wide_req_o,
@@ -89,6 +89,9 @@ module spatz_wide_burst_adapter
 
 `include "common_cells/registers.svh"
 
+  // Every lane has delivered its share of the burst.
+  logic drain_done;
+
   typedef enum logic [1:0] {
     Idle,     // arbitrate, issue the wide request
     Await,    // wide access outstanding
@@ -99,7 +102,14 @@ module spatz_wide_burst_adapter
 
   meta_id_t                     base_id_d, base_id_q;  // ROB id of beat 0
   logic [BurstLenWidth-1:0]     len_d, len_q;          // beats to return
-  logic [BeatCntWidth-1:0]      beat_d, beat_q;        // next beat to return
+  // Per-lane beat index. Lane l owns beats l, l+RecvPorts, l+2*RecvPorts ... -- its
+  // own ROB's consecutive entries -- so each lane drains INDEPENDENTLY. A shared
+  // counter would force one stalled lane to hold up the others, and the tile must
+  // stall a lane whenever the narrow path is answering on that port: a vector store's
+  // acks come back on all the vector ports, so an all-lanes stall blocks the whole
+  // drain for as long as any ack is in flight.
+  logic [BeatCntWidth-1:0]      beat_d [RecvPorts];
+  logic [BeatCntWidth-1:0]      beat_q [RecvPorts];
   logic [WideWords-1:0][31:0]   rdata_d, rdata_q;      // the captured wide beat
 
   // ------------------------------------------------------------------
@@ -143,27 +153,31 @@ module spatz_wide_burst_adapter
     spatz_resp_valid_o = '0;
     spatz_resp_data_o  = '0;
     spatz_resp_id_o    = '0;
-    if ((state_q == Drain) && !drain_stall_i) begin
+    if (state_q == Drain) begin
       for (int unsigned l = 0; l < RecvPorts; l++) begin
-        automatic logic [BeatCntWidth-1:0] k = beat_q + BeatCntWidth'(l);
+        automatic logic [BeatCntWidth-1:0] k = BeatCntWidth'(l) +
+                                               beat_q[l] * BeatCntWidth'(RecvPorts);
         automatic logic [RobIdWidth-1:0]   beat_id;
-        if (k < BeatCntWidth'(len_q)) begin
+        if (!drain_stall_i[l] && (k < BeatCntWidth'(len_q))) begin
+          // Entry index within THIS lane's ROB is simply the lane's beat count.
+          // Truncate by assignment before widening: meta_id_t'(a + b) would evaluate
+          // the sum at meta_id width and let the carry reach WrFlagBit, where
+          // mempool_cc packs the store-ack flag -- the beat would read back as a
+          // write acknowledgement.
+          beat_id               = base_id_q[RobIdWidth-1:0] + beat_q[l][RobIdWidth-1:0];
           spatz_resp_valid_o[l] = 1'b1;
           spatz_resp_data_o[l]  = rdata_q[k[idx_width(WideWords)-1:0]];
-          // Entry index within THIS lane's ROB: beat k is that ROB's k/RecvPorts-th.
-          // The sum MUST wrap inside the ROB id field. Writing it as
-          // meta_id_t'(a + b) does not: a cast propagates its size to the operands,
-          // so the addition is evaluated at meta_id width and the carry survives --
-          // landing on bit RobIdWidth, which is exactly WrFlagBit. The beat then
-          // reads back as a store acknowledgement and trips
-          // "store response arrived with no outstanding request". Truncate first by
-          // assigning to a RobIdWidth-wide variable, then widen.
-          beat_id               = base_id_q[RobIdWidth-1:0] +
-                                  k[RobIdWidth-1:0] / RobIdWidth'(RecvPorts);
           spatz_resp_id_o[l]    = meta_id_t'(beat_id);
         end
       end
     end
+  end
+
+  always_comb begin
+    drain_done = 1'b1;
+    for (int unsigned l = 0; l < RecvPorts; l++)
+      drain_done &= ((BeatCntWidth'(l) + beat_q[l] * BeatCntWidth'(RecvPorts)) >=
+                     BeatCntWidth'(len_q));
   end
 
   // ------------------------------------------------------------------
@@ -171,6 +185,7 @@ module spatz_wide_burst_adapter
   // ------------------------------------------------------------------
   always_comb begin
     state_d   = state_q;
+    for (int unsigned l = 0; l < RecvPorts; l++) beat_d[l] = beat_q[l];
     base_id_d = base_id_q;
     len_d     = len_q;
     beat_d    = beat_q;
@@ -181,7 +196,7 @@ module spatz_wide_burst_adapter
         if (wide_req_valid_o && wide_req_ready_i) begin
           base_id_d = spatz_req_id_i;
           len_d     = spatz_req_burst_len_i;
-          beat_d    = '0;
+          for (int unsigned l = 0; l < RecvPorts; l++) beat_d[l] = '0;
           state_d   = Await;
         end
       end
@@ -192,12 +207,15 @@ module spatz_wide_burst_adapter
         end
       end
       Drain: begin
-        // Only advance on a cycle whose beats were actually presented.
-        if (!drain_stall_i) begin
-          beat_d = beat_q + BeatCntWidth'(RecvPorts);
-          if ((beat_q + BeatCntWidth'(RecvPorts)) >= BeatCntWidth'(len_q))
-            state_d = Idle;
+        // Each lane advances only on a cycle whose beat it actually presented.
+        for (int unsigned l = 0; l < RecvPorts; l++) begin
+          automatic logic [BeatCntWidth-1:0] k = BeatCntWidth'(l) +
+                                                 beat_q[l] * BeatCntWidth'(RecvPorts);
+          if (!drain_stall_i[l] && (k < BeatCntWidth'(len_q)))
+            beat_d[l] = beat_q[l] + BeatCntWidth'(1);
         end
+        // Done when every lane has delivered its whole share.
+        if (drain_done) state_d = Idle;
       end
       default: state_d = Idle;
     endcase
@@ -206,7 +224,9 @@ module spatz_wide_burst_adapter
   `FF(state_q,   state_d,   Idle)
   `FF(base_id_q, base_id_d, '0  )
   `FF(len_q,     len_d,     '0  )
-  `FF(beat_q,    beat_d,    '0  )
+  for (genvar l = 0; l < RecvPorts; l++) begin : gen_beat_ff
+    `FF(beat_q[l], beat_d[l], '0)
+  end : gen_beat_ff
   `FF(rdata_q,   rdata_d,   '0  )
 
 `ifndef SYNTHESIS

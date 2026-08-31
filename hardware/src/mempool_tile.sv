@@ -1200,7 +1200,8 @@ module mempool_tile
       logic     [RecvPorts-1:0] rsp_valid;
       data_t    [RecvPorts-1:0] rsp_data;
       meta_id_t [RecvPorts-1:0] rsp_id;
-      logic                     req_ready, drain_stall;
+      logic                     req_ready;
+      logic [RecvPorts-1:0]     drain_stall;
       tcdm_wide_rm_req_t        wreq;
       logic                     wreq_valid, wreq_ready;
       tcdm_wide_rm_resp_t       wresp;
@@ -1208,11 +1209,13 @@ module mempool_tile
 
       // The narrow path owns these ports whenever it is answering on them, so hold
       // the drain rather than presenting two beats on one port in one cycle.
-      always_comb begin
-        drain_stall = 1'b0;
-        for (int unsigned l = 0; l < RecvPorts; l++)
-          drain_stall |= snitch_data_pvalid[P0 + l];
-      end
+      // PER-LANE, not an OR across lanes. A vector store's acks come back on every
+      // vector port, so an all-lanes stall blocks the whole drain for as long as any
+      // ack is in flight -- and the burst's reserved ROB entries keep rob_empty low,
+      // which is what the store is waiting on. Stall only the lane that is busy.
+      for (genvar l = 0; l < RecvPorts; l++) begin : gen_drain_stall
+        assign drain_stall[l] = snitch_data_pvalid[P0 + l];
+      end : gen_drain_stall
 
       spatz_wide_burst_adapter #(
         .RecvPorts  (RecvPorts               ),
