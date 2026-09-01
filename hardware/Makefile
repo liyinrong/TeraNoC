@@ -208,6 +208,10 @@ ifeq ($(spatz), 1)
 # spatz_burst=0 keeps the VLSU on the word-interleaved path.
 vlog_defs += -DSPATZ_VLSU_BURST=$(spatz_burst)
 vlog_defs += -DSPATZ_LD_TRACE=$(spatz_ld_trace)
+vlog_defs += -DSPATZ_MAX_BURST_WORDS=$(spatz_max_burst_words)
+ifeq ($(spatz_vlsu_wedge),1)
+vlog_defs += -DSPATZ_VLSU_WEDGE
+endif
 # Spatz VLSU reorder-buffer depth. This is also the width root of the ROB id that
 # mempool_cc packs into meta_id, so it cannot be raised past what meta_id can carry.
 vlog_defs += -DSPATZ_VLSU_ROB_DEPTH=$(spatz_rob_depth)

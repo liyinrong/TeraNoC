@@ -242,16 +242,25 @@ spatz_burst ?= 0
 # wide+burst run can be diffed by address. Debug only -- one line per load.
 spatz_ld_trace ?= 0
 
+# Words (32 bit) in one vector-load burst. A burst is unpacked from a SINGLE wide
+# access, so this is a property of the wide plane, not of Spatz: it must be
+# wide_tcdm_data_width / 32. Derived by default; override only to burst narrower
+# than the plane. It need not divide the VLSU's memory-port count -- a burst that
+# is not a whole multiple simply gives the low lanes one beat more than the high
+# ones. When the wide plane is off the value is unused, so keep it legal (1).
+ifeq ($(strip $(wide_tcdm_data_width)),0)
+spatz_max_burst_words ?= 1
+else
+spatz_max_burst_words ?= $(shell expr $(wide_tcdm_data_width) / 32)
+endif
+
 # Spatz VLSU reorder-buffer depth. Also the width root of the ROB id that
 # mempool_cc packs into meta_id alongside the store-ack flag, so MetaIdWidth
 # follows this knob (mempool_pkg.sv) rather than constraining it.
-# 16 is the smallest depth at which a burst is admissible at all -- burst
-# emission needs vl >= 64 B and vl <= NrOutstandingLoads * 4 B, so a depth of 8
-# rules every burst out -- and it is the largest that keeps meta_id at 5 bits.
-# The upstream default of 32 now ELABORATES (it used to abort) but does NOT yet run:
-# sp_matmul_f32 hangs with no compile errors, root cause not yet found. It also widens
-# meta_id to 6 bits and with it every mesh link. Do not raise this to 32 until that
-# hang is fixed and a measurement pays for the area.
+# 16 is the largest depth that keeps meta_id at 5 bits. 32 and 64 both run
+# correctly (verified: sp_matmul/dotp/axpy_f32 and sp_gemv_f16, cycle-identical
+# across all three depths), but each doubling widens meta_id by a bit and with it
+# every mesh link, so raise this only when a measurement pays for the area.
 spatz_rob_depth ?= 16
 
 # Spatz vector-unit parameters
