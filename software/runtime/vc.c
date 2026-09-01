@@ -223,44 +223,96 @@ vc_desc_t vc_descriptor(const vc_rect_t *r, uint32_t offset, uint32_t bytes) {
   return d;
 }
 
-void vc_dma_memcpy_blocking(const vc_desc_t *dst, const vc_desc_t *src) {
-  // PRE-WP4: the frontend is 1-D, so walk the block-strided pattern as
-  // count[0]*count[1] separate transfers. See the header for why this is a
-  // bring-up path and not a benchmark path.
-  // Walk the side that is actually block-strided. Looping on the SOURCE shape
-  // alone silently discards the destination's: an L2 source is flat
-  // (count {1,1}), so a strided VC destination collapsed into ONE contiguous
-  // copy that landed in the wrong physical words and spilled across the rows
-  // of neighbouring rectangles. Observed as a single 327680-byte transfer
-  // where 160 runs of 2048 were required.
-  const uint32_t d_runs = dst->count[0] * dst->count[1];
-  const uint32_t s_runs = src->count[0] * src->count[1];
+static dma_collective_handle_t
+vc_dma_invalid_handle(dma_collective_state_t *state, uint32_t generation,
+                      uint32_t stream, uint32_t status) {
+  const dma_collective_handle_t handle = {
+      .state = state,
+      .generation = generation,
+      .slot = 0,
+      .group_id = mempool_get_group_id(),
+      .base_group = 0,
+      .num_groups = 0,
+      .stream = stream,
+      .local_id = 0,
+      .status = status,
+  };
+  return handle;
+}
 
-  if (s_runs == 1) { // flat source, strided destination
-    for (uint32_t j = 0; j < dst->count[1]; ++j)
-      for (uint32_t i = 0; i < dst->count[0]; ++i) {
-        const uint32_t run = j * dst->count[0] + i;
-        dma_memcpy_blocking(
-            (void *)(dst->base + i * dst->stride[0] + j * dst->stride[1]),
-            (void *)(src->base + run * dst->len), dst->len);
-      }
-  } else if (d_runs == 1) { // strided source, flat destination
-    for (uint32_t j = 0; j < src->count[1]; ++j)
-      for (uint32_t i = 0; i < src->count[0]; ++i) {
-        const uint32_t run = j * src->count[0] + i;
-        dma_memcpy_blocking(
-            (void *)(dst->base + run * src->len),
-            (void *)(src->base + i * src->stride[0] + j * src->stride[1]),
-            src->len);
-      }
-  } else { // both strided: the shapes must agree run for run
-    for (uint32_t j = 0; j < dst->count[1]; ++j)
-      for (uint32_t i = 0; i < dst->count[0]; ++i)
-        dma_memcpy_blocking(
-            (void *)(dst->base + i * dst->stride[0] + j * dst->stride[1]),
-            (void *)(src->base + i * src->stride[0] + j * src->stride[1]),
-            dst->len);
-  }
+static dma_collective_scope_t vc_dma_scope(const vc_desc_t *dst,
+                                           const vc_desc_t *src) {
+  const vc_desc_t *const vc = dst->stride[1] != 0 ? dst : src;
+  const dma_collective_scope_t scope = {
+      .base_group = (vc->base % VC_WORD_STRIDE) / (uint32_t)VC_ROW_BYTES,
+      .num_groups = vc->len / (uint32_t)VC_ROW_BYTES,
+      .cores_per_group = NUM_CORES_PER_GROUP,
+  };
+  return scope;
+}
+
+dma_collective_handle_t vc_dma_memcpy_collective_nonblocking(
+    dma_collective_state_t *state, uint32_t generation, uint32_t stream,
+    const vc_desc_t *dst, const vc_desc_t *src) {
+  if (!vc_desc_valid(dst) || !vc_desc_valid(src))
+    return vc_dma_invalid_handle(state, generation, stream,
+                                 DMA_COLLECTIVE_ERROR_ARGUMENT);
+
+  // vc_descriptor leaves stride[1] nonzero even for a one-row allocation, so
+  // it remains distinguishable from the caller's flat L2 descriptor.
+  const uint32_t dst_vc = dst->stride[1] != 0;
+  const uint32_t src_vc = src->stride[1] != 0;
+  if (dst_vc == src_vc)
+    return vc_dma_invalid_handle(state, generation, stream,
+                                 DMA_COLLECTIVE_ERROR_ARGUMENT);
+
+  const vc_desc_t *const vc = dst_vc ? dst : src;
+  if (vc->count[0] != 1 || vc->len % VC_ROW_BYTES != 0)
+    return vc_dma_invalid_handle(state, generation, stream,
+                                 DMA_COLLECTIVE_ERROR_ARGUMENT);
+
+  const dma_collective_scope_t scope = vc_dma_scope(dst, src);
+  const uint32_t gid = mempool_get_group_id();
+  if (gid < scope.base_group || gid >= scope.base_group + scope.num_groups)
+    return vc_dma_invalid_handle(state, generation, stream,
+                                 DMA_COLLECTIVE_ERROR_SCOPE);
+
+  // Morton makes the rectangle a contiguous group-id range. Each group moves
+  // one bank-row stripe; the flat side advances by the full rectangle row and
+  // the VC side by the global word-plane stride.
+  const uint32_t slot = gid - scope.base_group;
+  const uint32_t group_offset = slot * (uint32_t)VC_ROW_BYTES;
+  const uint32_t dst_stride = dst_vc ? dst->stride[1] : vc->len;
+  const uint32_t src_stride = src_vc ? src->stride[1] : vc->len;
+
+  return dma_collective_submit_2d_nonblocking(
+      state, &scope, generation, stream, (void *)(dst->base + group_offset),
+      (const void *)(src->base + group_offset), VC_ROW_BYTES, dst_stride,
+      src_stride, vc->count[1]);
+}
+
+uint32_t vc_dma_memcpy_collective_wait_through(
+    const vc_desc_t *last_dst, const vc_desc_t *last_src,
+    const dma_collective_handle_t *last_handle) {
+  if (last_dst == NULL || last_src == NULL || last_handle == NULL)
+    return DMA_COLLECTIVE_ERROR_ARGUMENT;
+  const uint32_t dst_vc = last_dst->stride[1] != 0;
+  const uint32_t src_vc = last_src->stride[1] != 0;
+  if (dst_vc == src_vc)
+    return DMA_COLLECTIVE_ERROR_ARGUMENT;
+  const dma_collective_scope_t scope = vc_dma_scope(last_dst, last_src);
+  return dma_collective_wait_through(&scope, last_handle);
+}
+
+uint32_t vc_dma_memcpy_collective_blocking(dma_collective_state_t *state,
+                                           uint32_t generation, uint32_t stream,
+                                           const vc_desc_t *dst,
+                                           const vc_desc_t *src) {
+  const dma_collective_handle_t handle =
+      vc_dma_memcpy_collective_nonblocking(state, generation, stream, dst, src);
+  if (handle.status != DMA_COLLECTIVE_OK)
+    return handle.status;
+  return vc_dma_memcpy_collective_wait_through(dst, src, &handle);
 }
 
 // ---------------------------------------------------------------------------

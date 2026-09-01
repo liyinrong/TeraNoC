@@ -133,6 +133,10 @@ DEFINES += -DXQUEUE_SIZE=$(xqueue_size)
 DEFINES += -DNUM_REDMULE_TILES=$(num_redmule_tiles)
 DEFINES += -DREDMULE_H=$(redmule_height)
 DEFINES += -DREDMULE_P=$(redmule_regs)
+DEFINES += -DNUM_DMAS_PER_GROUP=$(dmas_per_group)
+DEFINES += -DAXI_DATA_WIDTH=$(axi_data_width)
+DEFINES += -DAXI_WIDTH_INTERLEAVED=$(axi_width_interleaved)
+DEFINES += -DL2_BANKS=$(l2_banks)
 # Identify the MemPool platform to the C sources. Several apps (notably the
 # Spatz apps sp_gemv_f32/sp_gemv_bk_f32/sp_gemv_opt_f32/sp_matmul_i32
 # CI builds reuse software artifacts in Verilator, where the testbench-side DPI
@@ -206,6 +210,7 @@ LINKER_SCRIPT ?= $(ROOT_DIR)/arch.ld
 
 RUNTIME += $(ROOT_DIR)/alloc.c.o
 RUNTIME += $(ROOT_DIR)/crt0.S.o
+RUNTIME += $(ROOT_DIR)/dma_collective.c.o
 RUNTIME += $(ROOT_DIR)/mempool_checks.c.o
 RUNTIME += $(ROOT_DIR)/printf.c.o
 RUNTIME += $(ROOT_DIR)/serial.c.o

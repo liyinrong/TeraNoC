@@ -21,6 +21,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "dma_collective.h"
 #include "runtime.h"
 
 // VIRTUAL_CLUSTER gates the HARDWARE permuter. Without this guard the software
@@ -162,19 +163,27 @@ uint32_t vc_global_addr(const vc_rect_t *r, uint32_t offset);
 // nothing; check it with vc_desc_valid().
 vc_desc_t vc_descriptor(const vc_rect_t *r, uint32_t offset, uint32_t bytes);
 
-// Walk a descriptor as N 1-D DMA transfers.
-//
-// PRE-WP4 PATH, deliberately. software/runtime/mempool_dma_frontend.h:20-42
-// is a 1-D frontend, so a 3-D descriptor becomes count[0]*count[1] separate
-// transfers of `len` bytes. For a 1 MiB 2x2 buffer that is 512 x 2 KiB:
-// fine for the gate, useless for a benchmark. Real ND transfers arrive with
-// idma_nd_midend in Phase 4 (roadmap §T4.1).
 // False when vc_descriptor refused the arguments.
 static inline uint32_t vc_desc_valid(const vc_desc_t *d) {
   return d->len != 0 && d->count[0] != 0 && d->count[1] != 0;
 }
 
-void vc_dma_memcpy_blocking(const vc_desc_t *dst, const vc_desc_t *src);
+// Submit one L2<->VC transfer collectively. Every core in the rectangle calls
+// with the same nonzero generation; a software-atomic claim elects one issuer
+// per group and the returned handle names that group's accepted request.
+//
+// Both descriptors use global aliases. One side must be a VC descriptor and
+// the other flat L2 memory. Cross-group L1<->L1 still needs the WP2 wide plane.
+dma_collective_handle_t vc_dma_memcpy_collective_nonblocking(
+    dma_collective_state_t *state, uint32_t generation, uint32_t stream,
+    const vc_desc_t *dst, const vc_desc_t *src);
+uint32_t vc_dma_memcpy_collective_wait_through(
+    const vc_desc_t *last_dst, const vc_desc_t *last_src,
+    const dma_collective_handle_t *last_handle);
+uint32_t vc_dma_memcpy_collective_blocking(dma_collective_state_t *state,
+                                           uint32_t generation, uint32_t stream,
+                                           const vc_desc_t *dst,
+                                           const vc_desc_t *src);
 
 // --- allocator -------------------------------------------------------------
 //
