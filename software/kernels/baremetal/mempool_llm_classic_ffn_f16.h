@@ -71,12 +71,13 @@ static inline void llm_classic_ffn_f16(
 
     {
       const mempool_timer_t stage_start = llm_stage_timer_start();
-      if (core_id == 0) {
-        dma_memcpy_blocking(l1_x, l2_x + row0 * dmodel,
-                            row_tile * dmodel * sizeof(__fp16));
-        dma_memcpy_blocking(l1_wbuf, l2_w1, w1_elems * sizeof(__fp16));
-        dma_memcpy_blocking(l1_wbuf + w1_elems, l2_w2,
-                            w2_elems * sizeof(__fp16));
+      if (mempool_is_group_coordinator()) {
+        dma_collective_all_memcpy_blocking(l1_x, l2_x + row0 * dmodel,
+                                           row_tile * dmodel * sizeof(__fp16));
+        dma_collective_all_memcpy_blocking(l1_wbuf, l2_w1,
+                                           w1_elems * sizeof(__fp16));
+        dma_collective_all_memcpy_blocking(l1_wbuf + w1_elems, l2_w2,
+                                           w2_elems * sizeof(__fp16));
       }
       mempool_barrier(num_cores);
       llm_stage_timer_stop(stage_start, &perf->load_x_w1_w2);
@@ -90,11 +91,12 @@ static inline void llm_classic_ffn_f16(
 
       {
         const mempool_timer_t stage_start = llm_stage_timer_start();
-        if (core_id == 0 && p + 1 < npanel) {
-          dma_memcpy_nonblocking(nxt, l2_w1 + (p + 1) * w1_elems,
-                                 w1_elems * sizeof(__fp16));
-          dma_memcpy_nonblocking(nxt + w1_elems, l2_w2 + (p + 1) * w2_elems,
-                                 w2_elems * sizeof(__fp16));
+        if (mempool_is_group_coordinator() && p + 1 < npanel) {
+          dma_collective_all_memcpy_nonblocking(nxt, l2_w1 + (p + 1) * w1_elems,
+                                                w1_elems * sizeof(__fp16));
+          dma_collective_all_memcpy_nonblocking(nxt + w1_elems,
+                                                l2_w2 + (p + 1) * w2_elems,
+                                                w2_elems * sizeof(__fp16));
         }
 
         if (redmule_id < ne_used) {
@@ -137,8 +139,8 @@ static inline void llm_classic_ffn_f16(
 
       {
         const mempool_timer_t stage_start = llm_stage_timer_start();
-        if (core_id == 0)
-          dma_wait();
+        if (mempool_is_group_coordinator())
+          dma_collective_all_wait();
         mempool_barrier(num_cores);
         llm_stage_timer_stop(stage_start, &perf->prefetch_wait);
       }
@@ -146,9 +148,9 @@ static inline void llm_classic_ffn_f16(
 
     {
       const mempool_timer_t stage_start = llm_stage_timer_start();
-      if (core_id == 0)
-        dma_memcpy_blocking(l2_out + row0 * dmodel, l1_out,
-                            row_tile * dmodel * sizeof(__fp16));
+      if (mempool_is_group_coordinator())
+        dma_collective_all_memcpy_blocking(l2_out + row0 * dmodel, l1_out,
+                                           row_tile * dmodel * sizeof(__fp16));
       mempool_barrier(num_cores);
       llm_stage_timer_stop(stage_start, &perf->store_y);
     }

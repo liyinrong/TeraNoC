@@ -47,9 +47,11 @@ int main() {
   mempool_barrier_init(core_id);
 
   // Initialize Matrices
-  if (core_id == 0) {
-    dma_memcpy_blocking(matrix_a, l2_A, 2 * dim_M * dim_N * sizeof(int16_t));
-    dma_memcpy_blocking(matrix_b, l2_B, 2 * dim_N * dim_P * sizeof(int16_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(matrix_a, l2_A,
+                                       2 * dim_M * dim_N * sizeof(int16_t));
+    dma_collective_all_memcpy_blocking(matrix_b, l2_B,
+                                       2 * dim_N * dim_P * sizeof(int16_t));
   }
   // Wait at barrier until everyone is ready
   mempool_barrier(num_cores);
@@ -71,9 +73,9 @@ int main() {
   mempool_barrier(num_cores);
 #endif
 
-  if (core_id == 0) {
-    dma_memcpy_blocking(l2_C_check, matrix_c,
-                        2 * dim_M * dim_P * sizeof(int16_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(l2_C_check, matrix_c,
+                                       2 * dim_M * dim_P * sizeof(int16_t));
   }
   mempool_check_dpi_i16(l2_C_check, l2_C, 2 * dim_M * dim_P, 16, 0);
   mempool_barrier(num_cores);

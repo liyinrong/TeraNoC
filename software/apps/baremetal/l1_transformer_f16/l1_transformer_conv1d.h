@@ -5,8 +5,10 @@
 // Author: Marco Bertuletti, ETH Zurich
 
 #pragma once
-#include "archi_redmule.h"
+#include "async_task.h"
 #include "dma.h"
+
+#include "archi_redmule.h"
 #include "hal_redmule.h"
 
 #include "baremetal/mempool_conv1d_f16.h"
@@ -76,12 +78,11 @@ void conv1d(__fp16 const *__restrict__ X, __fp16 const *__restrict__ F,
       uint16_t M = (uint16_t)(ChOut);
       uint16_t N = (uint16_t)(ChInp * Wf);
       uint16_t P = (uint16_t)(tdSamples);
-      hwpe_soft_clear();
-      mempool_wait(10);
+      const int32_t target = tnc_redmule_acquire_target();
       redmule_cfg(I_ptr, W_ptr, O_ptr, M, N, P, 0, GEMM, Float16);
       mempool_wait(10);
-      hwpe_trigger_job();
-      mempool_wfi();
+      tnc_redmule_trigger();
+      tnc_redmule_wait((uint8_t)target);
     }
   }
   mempool_barrier(num_cores);
@@ -146,9 +147,10 @@ void *layernorm_conv1d(__fp16 const *__restrict__ l2_F,
 
   static __fp16 *F = l1_F; // Should be allocated dinamically
   static __fp16 *b = l1_b; // Should be allocated dinamically
-  if (core_id == 0) {
-    dma_memcpy_nonblocking(F, l2_F, ChOut * ChInp * Wf * sizeof(int16_t));
-    dma_memcpy_nonblocking(b, l2_b, ChOut * sizeof(int16_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_nonblocking(F, l2_F,
+                                          ChOut * ChInp * Wf * sizeof(int16_t));
+    dma_collective_all_memcpy_nonblocking(b, l2_b, ChOut * sizeof(int16_t));
   }
 
 #if defined(VERBOSE)
@@ -200,8 +202,8 @@ void *layernorm_conv1d(__fp16 const *__restrict__ l2_F,
   /**************************************************************************/
 
   mempool_start_benchmark();
-  if (core_id == 0) {
-    dma_wait();
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_wait();
   }
   mempool_barrier(num_cores);
   mempool_stop_benchmark();

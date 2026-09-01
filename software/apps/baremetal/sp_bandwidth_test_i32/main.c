@@ -140,8 +140,8 @@ int main() {
   mempool_barrier(num_cores);
 
   // Initialize data
-  if (core_id == 0) {
-    dma_memcpy_blocking(data_l1, data_dram, dim * sizeof(int));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(data_l1, data_dram, dim * sizeof(int));
     init_offsets(offset_l1, num_cores * measure_iterations, dim, v_len);
   }
 

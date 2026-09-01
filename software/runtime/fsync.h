@@ -22,9 +22,9 @@
 //
 // USAGE is two-level, because the hardware's finest scope is a PAIR of tiles
 // and a single leaf is refused outright:
-//   1. all compute cores of a tile meet at a software barrier in local L1;
+//   1. the selected compute cores of a tile meet at a polling barrier in L1;
 //   2. the tile leader calls fsync_barrier() -- ONE arrival per tile;
-//   3. every core of the tile is released by the wake broadcast.
+//   3. the last arrival polls the response and release-publishes a done epoch.
 // A dedicated DMA/control core simply stays out of step 1, which is why it
 // does not perturb the scope.
 
@@ -47,6 +47,17 @@
 #define FSYNC_STATUS_ERROR_MASK (1u << 1)
 // Bit 2, matching MAGIA's FSYNC_MM_STATUS_BUSY_MASK.
 #define FSYNC_STATUS_BUSY_MASK (1u << 2)
+#define FSYNC_STATUS_LEVEL_SHIFT 4u
+#define FSYNC_STATUS_LEVEL_MASK (0xfu << FSYNC_STATUS_LEVEL_SHIFT)
+#define FSYNC_STATUS_ID_SHIFT 8u
+
+static inline uint32_t fsync_status_level(uint32_t status) {
+  return (status & FSYNC_STATUS_LEVEL_MASK) >> FSYNC_STATUS_LEVEL_SHIFT;
+}
+
+static inline uint32_t fsync_status_id(uint32_t status) {
+  return status >> FSYNC_STATUS_ID_SHIFT;
+}
 
 // id bit 0 selects the network. 0/1 are the 1D tree nodes, 2/3 the neighbour
 // links used when two adjacent tiles sit under DIFFERENT sibling nodes.
@@ -81,6 +92,10 @@ static inline uint32_t fsync_aggr_of_side(uint32_t side) {
   for (uint32_t s = side; s > 1; s >>= 1)
     levels += 2;
   return (1u << levels) - 1u;
+}
+
+static inline uint32_t fsync_level_of_aggr(uint32_t aggr) {
+  return aggr == 0u ? 0u : 31u - (uint32_t)__builtin_clz(aggr);
 }
 
 // General pow2-aligned RECTANGLE of tiles, w wide by h tall. This is what
@@ -184,15 +199,28 @@ static inline void fsync_trigger(uint32_t id, uint32_t aggr) {
       FSYNC_CONTROL_TRIGGER;
 }
 
-// Poll until the barrier resolves. Returns non-zero if the tree reported an
-// error (RF/CAM overflow), which must NOT be ignored: the scope did not
-// synchronise and the caller has to trap rather than proceed.
-static inline uint32_t fsync_wait(void) {
+// Observe BUSY assertion before accepting its deassertion. The MMIO trigger
+// can take several cycles to reach the shim, so polling only for an idle level
+// can mistake the pre-issue state for completion.
+static inline uint32_t fsync_wait_response(void) {
   uint32_t status;
   do {
     status = fsync_status();
-  } while (status & FSYNC_STATUS_BUSY_MASK);
-  return status & FSYNC_STATUS_ERROR_MASK;
+    if ((status & FSYNC_STATUS_BUSY_MASK) == 0u)
+      mempool_wait(4u);
+  } while ((status & FSYNC_STATUS_BUSY_MASK) == 0u);
+  do {
+    status = fsync_status();
+    if ((status & FSYNC_STATUS_BUSY_MASK) != 0u)
+      mempool_wait(4u);
+  } while ((status & FSYNC_STATUS_BUSY_MASK) != 0u);
+  return status;
+}
+
+// Returns non-zero if the tree reported an error (RF/CAM overflow), which
+// must NOT be ignored: the scope did not synchronise.
+static inline uint32_t fsync_wait(void) {
+  return fsync_wait_response() & FSYNC_STATUS_ERROR_MASK;
 }
 
 static inline void fsync_clear_error(void) {
@@ -203,35 +231,102 @@ static inline void fsync_clear_error(void) {
 // ---------------------------------------------------------------------------
 // Two-level barrier. EVERY core of the tile calls these.
 //
-// The core that arrives LAST triggers the tree and then waits with the rest;
-// the tree's wake releases the whole tile at once. Nobody polls and nobody
-// spins. Each tile counter occupies one full tile-bank stripe: address bits
+// The core that arrives LAST publishes an issue epoch, triggers the tree, polls
+// BUSY, validates the returned level/id, and publishes the done epoch. Earlier
+// cores poll those epochs, so an idle shim before issue cannot release them.
+// Each tile counter occupies one full tile-bank stripe: address bits
 // immediately above the bank select encode the tile, so adjacent words would
 // all live in the first tile instead of beside their users. The array base must
 // also be aligned to a complete all-tile bank stripe so entry zero maps to tile
 // zero. Counters MUST be zeroed before first use (`.l1` is NOBITS and powers up
 // X).
 //
-// These do not return a status: nobody polls, so an error is observed with
-// fsync_status() afterwards rather than per barrier.
+// A tree error or mismatched response traps before any participant proceeds.
 // ---------------------------------------------------------------------------
 
 typedef struct {
-  uint32_t count;
-  uint32_t padding[NUM_BANKS_PER_TILE - 1];
+  volatile uint32_t count;
+  volatile uint32_t issue_epoch;
+  volatile uint32_t done_epoch;
+  volatile uint32_t status_error;
+  volatile uint32_t expected_level;
+  volatile uint32_t expected_id;
+  uint32_t padding[NUM_BANKS_PER_TILE > 6 ? NUM_BANKS_PER_TILE - 6 : 1];
 } fsync_tile_counter_t;
 
 #define FSYNC_TILE_COUNTER_ALIGNMENT (NUM_BANKS * sizeof(uint32_t))
 
+static inline void
+fsync_tile_counter_init(volatile fsync_tile_counter_t *tile_cnt) {
+  tile_cnt->count = 0u;
+  tile_cnt->issue_epoch = 0u;
+  tile_cnt->done_epoch = 0u;
+  tile_cnt->status_error = 0u;
+  tile_cnt->expected_level = 0u;
+  tile_cnt->expected_id = 0u;
+  for (uint32_t i = 0u;
+       i < (NUM_BANKS_PER_TILE > 6 ? NUM_BANKS_PER_TILE - 6 : 1); ++i)
+    tile_cnt->padding[i] = 0u;
+}
+
+static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
+                                   uint32_t tile, uint32_t id, uint32_t aggr,
+                                   uint32_t participants) {
+  if (participants == 0u || participants > (uint32_t)NUM_CORES_PER_TILE)
+    __builtin_trap();
+  const uint32_t expected =
+      __atomic_load_n(&tile_cnt[tile].done_epoch, __ATOMIC_ACQUIRE);
+  if (__atomic_fetch_add(&tile_cnt[tile].count, 1, __ATOMIC_RELAXED) ==
+      participants - 1u) {
+    __atomic_store_n(&tile_cnt[tile].count, 0, __ATOMIC_RELAXED);
+    tile_cnt[tile].expected_level = fsync_level_of_aggr(aggr);
+    tile_cnt[tile].expected_id = id;
+    tile_cnt[tile].status_error = 0;
+    __atomic_store_n(&tile_cnt[tile].issue_epoch, expected + 1u,
+                     __ATOMIC_RELEASE);
+    fsync_trigger(id, aggr);
+    uint32_t status;
+    do {
+      status = fsync_status();
+      if ((status & FSYNC_STATUS_BUSY_MASK) == 0u)
+        mempool_wait(4u);
+    } while ((status & FSYNC_STATUS_BUSY_MASK) == 0u);
+    do {
+      status = fsync_status();
+      if ((status & FSYNC_STATUS_BUSY_MASK) != 0u)
+        mempool_wait(4u);
+    } while ((status & FSYNC_STATUS_BUSY_MASK) != 0u);
+    if ((status & FSYNC_STATUS_ERROR_MASK) != 0u ||
+        fsync_status_level(status) != tile_cnt[tile].expected_level ||
+        fsync_status_id(status) != tile_cnt[tile].expected_id)
+      tile_cnt[tile].status_error = status | 0x80000000u;
+    __atomic_store_n(&tile_cnt[tile].done_epoch, expected + 1u,
+                     __ATOMIC_RELEASE);
+  } else {
+#ifdef FSYNC_NEGATIVE_SKIP_ISSUE_EPOCH
+    // Deliberate gate falsification: an idle pre-issue shim releases early.
+    // Production builds never define this macro.
+    while ((fsync_status() & FSYNC_STATUS_BUSY_MASK) != 0u) {
+      mempool_wait(4u);
+    }
+#else
+    while (__atomic_load_n(&tile_cnt[tile].issue_epoch, __ATOMIC_ACQUIRE) <=
+           expected) {
+      mempool_wait(4u);
+    }
+    while (__atomic_load_n(&tile_cnt[tile].done_epoch, __ATOMIC_ACQUIRE) <=
+           expected) {
+      mempool_wait(4u);
+    }
+#endif
+  }
+  if (__atomic_load_n(&tile_cnt[tile].status_error, __ATOMIC_ACQUIRE) != 0u)
+    __builtin_trap();
+}
+
 static inline void fsync_barrier(volatile fsync_tile_counter_t *tile_cnt,
                                  uint32_t tile, uint32_t id, uint32_t aggr) {
-  if (__atomic_fetch_add(&tile_cnt[tile].count, 1, __ATOMIC_RELAXED) ==
-      (uint32_t)(NUM_CORES_PER_TILE - 1)) {
-    __atomic_store_n(&tile_cnt[tile].count, 0, __ATOMIC_RELAXED);
-    __sync_synchronize();
-    fsync_trigger(id, aggr);
-  }
-  mempool_wfi();
+  fsync_barrier_n(tile_cnt, tile, id, aggr, NUM_CORES_PER_TILE);
 }
 
 static inline void fsync_barrier_vc(volatile fsync_tile_counter_t *tile_cnt,
@@ -262,12 +357,22 @@ static inline void fsync_barrier_all(volatile fsync_tile_counter_t *tile_cnt,
   fsync_barrier(tile_cnt, tile, FSYNC_ID_H, fsync_aggr_global());
 }
 
+static inline void fsync_barrier_all_n(volatile fsync_tile_counter_t *tile_cnt,
+                                       uint32_t tile, uint32_t participants) {
+  fsync_barrier_n(tile_cnt, tile, FSYNC_ID_H, fsync_aggr_global(),
+                  participants);
+}
+
 // Single-arrival form, for a caller that has ALREADY established that exactly
-// one core per tile reaches it. Polls, so it must not be used while tile-mates
-// sit in WFI -- they would consume the wake.
+// one core per tile reaches it. Other tile cores must not enter this helper.
 static inline uint32_t fsync_barrier_global(void) {
   fsync_trigger(FSYNC_ID_H, fsync_aggr_global());
-  return fsync_wait();
+  const uint32_t status = fsync_wait_response();
+  if ((status & FSYNC_STATUS_ERROR_MASK) != 0u ||
+      fsync_status_level(status) != fsync_level_of_aggr(fsync_aggr_global()) ||
+      fsync_status_id(status) != FSYNC_ID_H)
+    return status | 0x80000000u;
+  return 0u;
 }
 
 #endif // FSYNC_BASE

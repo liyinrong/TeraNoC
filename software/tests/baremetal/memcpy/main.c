@@ -74,7 +74,7 @@ int main() {
   // Initialize barrier and synchronize
   mempool_barrier_init(core_id);
 
-  if (core_id == 0) {
+  if (mempool_is_group_coordinator()) {
     // Benchmark
     dump_addr((uint32_t)l2_data);
     dump_addr((uint32_t)l2_data_move_out);
@@ -82,17 +82,19 @@ int main() {
 
     // Copy in
     uint32_t time = mempool_get_timer();
-    dma_memcpy_blocking(l1_data, l2_data, SIZE * sizeof(int32_t));
+    dma_collective_all_memcpy_blocking(l1_data, l2_data,
+                                       SIZE * sizeof(int32_t));
     time = mempool_get_timer() - time;
     dump_end(time);
   }
 
   mempool_barrier(num_cores);
 
-  if (core_id == 0) {
+  if (mempool_is_group_coordinator()) {
     // Copy out
     uint32_t time = mempool_get_timer();
-    dma_memcpy_blocking(l2_data_move_out, l1_data, SIZE * sizeof(int32_t));
+    dma_collective_all_memcpy_blocking(l2_data_move_out, l1_data,
+                                       SIZE * sizeof(int32_t));
     time = mempool_get_timer() - time;
     dump_end(time);
   }

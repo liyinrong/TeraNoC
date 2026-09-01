@@ -18,28 +18,20 @@
 //
 //   GLOBAL   sw_log : mempool_log_barrier(2, core_id)   -- every core
 //            sw_lin : mempool_barrier(num_cores)        -- every core
-//            hw     : fsync_barrier_all() -- last arrival triggers, all wfi
+//            hw     : fsync_barrier_all() -- last arrival triggers, all poll
 //   MECHONLY hw     : one core per tile driving the tree directly
-//     (the software half of this pair is omitted: mempool_strided_barrier has
-//      no prototype in synchronization.h, and adding one to shared runtime was
-//      not worth doing mid-handoff. Re-add it for a mechanism-only comparison.)
+//     (the software half is omitted because this benchmark only records the
+//      hardware tree's one-arrival-per-tile mechanism cost.)
 //
 // The MECHONLY pair has the same participant set on both sides and no
 // intra-tile term on either, so it isolates the barrier MECHANISM. The GLOBAL
 // pair is what a kernel would actually pay, including the intra-tile arrival
 // rendezvous that one-arrival-per-tile forces.
 //
-// PHASE DISCIPLINE. Both mechanisms drive wake_up_sync_i, the only wake a
-// Snitch has, and the software barriers end in an unconditional wfi. So every
-// software barrier here runs BEFORE any fsync is triggered, and nothing after
-// the hardware phase uses one.
-//
-// No core polls in the GLOBAL path. The core that arrives LAST in a tile
-// triggers the tree and then waits with the others, so every core is already
-// in WFI when the wake arrives. A FIXED leader would have to stay awake to
-// poll, which would force its tile-mates to spin so they could not steal its
-// wake -- a spin barrier plus a poll loop plus a release barrier, all to avoid
-// a problem that disappears when the last arrival does the trigger.
+// PHASE DISCIPLINE. Phase 1 barriers poll generation-tagged state; no
+// steady-state path sleeps under the shared wake source. The software phase is
+// kept before the hardware phase so the reported sections remain comparable
+// with earlier measurements.
 
 #include <stdint.h>
 
@@ -78,9 +70,8 @@ int main() {
   mempool_timer_t t0, t1;
 
   mempool_barrier_init(core_id);
-  for (uint32_t t = core_id; t < NUM_TILES; t += num_cores) {
-    tile_cnt[t].count = 0;
-  }
+  for (uint32_t t = core_id; t < NUM_TILES; t += num_cores)
+    fsync_tile_counter_init(&tile_cnt[t]);
   if (core_id == 0) {
     sw_bar = 0;
     mech_done = 0;
@@ -110,9 +101,8 @@ int main() {
   mempool_barrier(num_cores);
 
   // ============ HARDWARE PHASE (no software barrier past here) ==========
-  // One call, every core. The last arrival in each tile triggers the tree and
-  // then waits with the rest; the wake releases the whole tile. No spin, no
-  // poll, no designated leader.
+  // One call, every core. The last arrival in each tile triggers the tree; all
+  // participants poll the issue/done epochs and validate the returned status.
   for (uint32_t i = 0; i < WARMUP; i++)
     fsync_barrier_all(tile_cnt, tile);
   t0 = mempool_get_timer();
@@ -123,8 +113,8 @@ int main() {
     c_hw = (uint32_t)(t1 - t0);
 
   // Mechanism only: ONE core per tile drives the tree directly, so there is no
-  // intra-tile term on either side of the MECHONLY comparison. Tile-mates spin
-  // on a flag rather than WFI so they cannot swallow the leader's wake.
+  // intra-tile term in the measured tree cost. Tile-mates poll a flag while
+  // the leader drives the tree.
   if (is_leader) {
     t0 = mempool_get_timer();
     for (uint32_t i = 0; i < ITERS; i++)

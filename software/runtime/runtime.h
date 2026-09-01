@@ -85,6 +85,28 @@ static inline uint32_t mempool_get_group_id() {
   return mempool_get_core_id() / (NUM_CORES / NUM_GROUPS);
 }
 
+/// Return whether the current core owns its group's control-plane work.
+static inline uint32_t mempool_is_group_coordinator() {
+  return mempool_get_core_id() % (uint32_t)NUM_CORES_PER_GROUP == 0u;
+}
+
+/// Return whether the current core owns its tile-local engine controls.
+static inline uint32_t mempool_is_tile_agent() {
+  return mempool_get_core_id() % (uint32_t)NUM_CORES_PER_TILE == 0u;
+}
+
+/// Return whether the current tile instantiates a RedMulE engine.
+static inline uint32_t mempool_tile_has_redmule() {
+  if (NUM_REDMULE_TILES == 0)
+    return 0u;
+  const uint32_t tiles_per_group =
+      (uint32_t)NUM_CORES_PER_GROUP / (uint32_t)NUM_CORES_PER_TILE;
+  const uint32_t redmules_per_group =
+      (uint32_t)NUM_REDMULE_TILES / (uint32_t)NUM_GROUPS;
+  return (uint32_t)(mempool_get_tile_id() % tiles_per_group <
+                    redmules_per_group);
+}
+
 /// Obtain the number of cores per tile in the current cluster
 static inline uint32_t mempool_get_core_count_per_tile() {
   return NUM_CORES_PER_TILE;
@@ -103,11 +125,14 @@ static inline uint32_t mempool_get_redmule_id() {
   if (NUM_REDMULE_TILES == 0) {
     return (uint32_t)(-1);
   } else {
-    uint32_t x = NUM_REDMULE_TILES > 0 ? NUM_CORES / NUM_REDMULE_TILES : 1;
-    uint32_t redmule_id = (mempool_get_core_id() % x) != 0
-                              ? (uint32_t)(-1)
-                              : (mempool_get_core_id() / x);
-    return redmule_id;
+    if (!mempool_is_tile_agent() || !mempool_tile_has_redmule())
+      return (uint32_t)(-1);
+    const uint32_t tiles_per_group =
+        (uint32_t)NUM_CORES_PER_GROUP / (uint32_t)NUM_CORES_PER_TILE;
+    const uint32_t redmules_per_group =
+        (uint32_t)NUM_REDMULE_TILES / (uint32_t)NUM_GROUPS;
+    const uint32_t local_tile = mempool_get_tile_id() % tiles_per_group;
+    return mempool_get_group_id() * redmules_per_group + local_tile;
   }
 }
 

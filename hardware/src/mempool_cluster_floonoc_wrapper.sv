@@ -115,7 +115,25 @@ module mempool_cluster_floonoc_wrapper
   assign fsync_h_root_rsp[0][0] = '0;
   assign fsync_v_root_rsp[0][0] = '0;
 
-  if (FSyncTileSide == 4) begin : gen_fsync_4x4
+  if (FSyncTileSide == 2) begin : gen_fsync_2x2
+    fractal_sync_2x2 #(
+      .AGGREGATE_WIDTH(FSyncAggrWidth),
+      .ID_WIDTH       (FSyncIdWidth  ),
+      .fsync_in_req_t (fsync_req_t   ),
+      .fsync_out_req_t(fsync_out_req_t),
+      .fsync_rsp_t    (fsync_rsp_t   ),
+      .fsync_nbr_req_t(fsync_nbr_req_t),
+      .fsync_nbr_rsp_t(fsync_nbr_rsp_t)
+    ) i_fsync_tree (
+      .clk_i, .rst_ni,
+      .h_1d_fsync_req_i (fsync_h_leaf    ), .h_1d_fsync_rsp_o (fsync_h_leaf_rsp),
+      .v_1d_fsync_req_i (fsync_v_leaf    ), .v_1d_fsync_rsp_o (fsync_v_leaf_rsp),
+      .h_nbr_fsycn_req_i(fsync_h_nbr_req ), .h_nbr_fsycn_rsp_o(fsync_h_nbr_rsp ),
+      .v_nbr_fsycn_req_i(fsync_v_nbr_req ), .v_nbr_fsycn_rsp_o(fsync_v_nbr_rsp ),
+      .h_2d_fsync_req_o (fsync_h_root_req), .h_2d_fsync_rsp_i (fsync_h_root_rsp),
+      .v_2d_fsync_req_o (fsync_v_root_req), .v_2d_fsync_rsp_i (fsync_v_root_rsp)
+    );
+  end else if (FSyncTileSide == 4) begin : gen_fsync_4x4
     fractal_sync_4x4 i_fsync_tree (
       .clk_i, .rst_ni,
       .h_1d_fsync_req_i (fsync_h_leaf    ), .h_1d_fsync_rsp_o (fsync_h_leaf_rsp),

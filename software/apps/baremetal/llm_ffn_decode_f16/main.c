@@ -80,8 +80,17 @@ int main() {
   }
   mempool_barrier(num_cores);
 
+#ifdef LLM_FFN_NEGATIVE_CORRUPT_WEIGHT
+  // Deliberate G2.7 falsification: the DPI golden must reject this panel.
+  if (core_id == 0)
+    ((uint16_t *)l2_wg)[0] ^= 0x7bffu;
+  mempool_barrier(num_cores);
+#endif
+
   uint32_t time_init = mempool_get_timer();
+#ifndef LLM_FFN_DISABLE_TRACE
   mempool_start_benchmark();
+#endif
 
 #if ROW_TILE == S
   llm_ffn_swiglu_f16(l2_x, l2_gamma, l2_wg, l2_wu, l2_wd, l1_x, l1_gamma, l1_h,
@@ -94,14 +103,18 @@ int main() {
                                num_cores, redmule_id);
 #endif
 
+#ifndef LLM_FFN_DISABLE_TRACE
   mempool_stop_benchmark();
+#endif
   uint32_t time_end = mempool_get_timer();
 
-  if (core_id == 0) {
-    printf("[llm_ffn_decode_f16] kernel takes %d cycles\n",
-           time_end - time_init);
+  if (mempool_is_group_coordinator()) {
+    if (core_id == 0)
+      printf("[llm_ffn_decode_f16] kernel takes %d cycles\n",
+             time_end - time_init);
 #if ROW_TILE == S
-    dma_memcpy_blocking(l2_check, l1_out, S * D * sizeof(__fp16));
+    dma_collective_all_memcpy_blocking(l2_check, l1_out,
+                                       S * D * sizeof(__fp16));
 #endif
   }
   mempool_barrier(num_cores);

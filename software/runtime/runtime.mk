@@ -209,6 +209,7 @@ endif
 LINKER_SCRIPT ?= $(ROOT_DIR)/arch.ld
 
 RUNTIME += $(ROOT_DIR)/alloc.c.o
+RUNTIME += $(ROOT_DIR)/async_task.c.o
 RUNTIME += $(ROOT_DIR)/crt0.S.o
 RUNTIME += $(ROOT_DIR)/dma_collective.c.o
 RUNTIME += $(ROOT_DIR)/mempool_checks.c.o

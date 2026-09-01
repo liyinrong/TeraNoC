@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "async_task.h"
 #include "dma.h"
 #include "encoding.h"
 #include "printf.h"
@@ -140,9 +141,10 @@ int main() {
   for (uint32_t col0 = 0; col0 < matrix_P; col0 += COL_TILE) {
     const uint32_t col_panel = col0 / COL_TILE;
     uint32_t stage_start = mempool_get_timer();
-    if (core_id == 0) {
-      dma_memcpy_blocking(l1_W, l2_W + col_panel * matrix_N * COL_TILE,
-                          matrix_N * COL_TILE * sizeof(__fp16));
+    if (mempool_is_group_coordinator()) {
+      dma_collective_all_memcpy_blocking(l1_W,
+                                         l2_W + col_panel * matrix_N * COL_TILE,
+                                         matrix_N * COL_TILE * sizeof(__fp16));
     }
     mempool_barrier(num_cores);
     stage_cycles += mempool_get_timer() - stage_start;
@@ -153,11 +155,11 @@ int main() {
           (row_panel * num_col_panels + col_panel) * tile_elems;
 
       stage_start = mempool_get_timer();
-      if (core_id == 0) {
-        dma_memcpy_blocking(l1_X, l2_X + row0 * matrix_N,
-                            ROW_TILE * matrix_N * sizeof(__fp16));
-        dma_memcpy_blocking(l1_Y, l2_Y + output_tile,
-                            tile_elems * sizeof(__fp16));
+      if (mempool_is_group_coordinator()) {
+        dma_collective_all_memcpy_blocking(
+            l1_X, l2_X + row0 * matrix_N, ROW_TILE * matrix_N * sizeof(__fp16));
+        dma_collective_all_memcpy_blocking(l1_Y, l2_Y + output_tile,
+                                           tile_elems * sizeof(__fp16));
       }
       mempool_barrier(num_cores);
       stage_cycles += mempool_get_timer() - stage_start;
@@ -173,22 +175,21 @@ int main() {
         unsigned int Y_ptr =
             (unsigned int)(l1_Y +
                            redmule_id * rows_per_engine * cols_per_engine);
-        hwpe_soft_clear();
-        mempool_wait(10);
+        const int32_t target = tnc_redmule_acquire_target();
         redmule_cfg(X_ptr, W_ptr, Y_ptr, (uint16_t)rows_per_engine,
                     (uint16_t)matrix_N, (uint16_t)cols_per_engine, 0, GEMM,
                     Float16);
         mempool_wait(10);
-        hwpe_trigger_job();
-        mempool_wfi();
+        tnc_redmule_trigger();
+        tnc_redmule_wait((uint8_t)target);
       }
       mempool_log_barrier(2, core_id);
       gemm_cycles += mempool_get_timer() - gemm_start;
 
       stage_start = mempool_get_timer();
-      if (core_id == 0) {
-        dma_memcpy_blocking(l2_Z_check + output_tile, l1_Y,
-                            tile_elems * sizeof(__fp16));
+      if (mempool_is_group_coordinator()) {
+        dma_collective_all_memcpy_blocking(l2_Z_check + output_tile, l1_Y,
+                                           tile_elems * sizeof(__fp16));
       }
       mempool_barrier(num_cores);
       stage_cycles += mempool_get_timer() - stage_start;
@@ -200,10 +201,13 @@ int main() {
 
 #ifdef SINGLE
   // Transfer
-  if (redmule_id == 0) {
-    dma_memcpy_blocking(l1_X, l2_X, (matrix_M * matrix_N) * sizeof(int16_t));
-    dma_memcpy_blocking(l1_W, l2_W, (matrix_N * matrix_P) * sizeof(int16_t));
-    dma_memcpy_blocking(l1_Y, l2_Y, (matrix_M * matrix_P) * sizeof(int16_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(l1_X, l2_X,
+                                       (matrix_M * matrix_N) * sizeof(int16_t));
+    dma_collective_all_memcpy_blocking(l1_W, l2_W,
+                                       (matrix_N * matrix_P) * sizeof(int16_t));
+    dma_collective_all_memcpy_blocking(l1_Y, l2_Y,
+                                       (matrix_M * matrix_P) * sizeof(int16_t));
   }
   mempool_barrier(num_cores);
   // Compute
@@ -213,13 +217,12 @@ int main() {
     unsigned int X_ptr = (unsigned int)(l1_X);
     unsigned int Y_ptr = (unsigned int)(l1_Y);
     unsigned int W_ptr = (unsigned int)(l1_W);
-    hwpe_soft_clear();
-    mempool_wait(10);
+    const int32_t target = tnc_redmule_acquire_target();
     redmule_cfg(X_ptr, W_ptr, Y_ptr, matrix_M, matrix_N, matrix_P, 0, GEMM,
                 Float16);
     mempool_wait(10);
-    hwpe_trigger_job();
-    mempool_wfi();
+    tnc_redmule_trigger();
+    tnc_redmule_wait((uint8_t)target);
   }
   mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
@@ -233,16 +236,18 @@ int main() {
   uint32_t W_shift;
 
   // Transfer
-  if (redmule_id == 0) {
+  if (mempool_is_group_coordinator()) {
     for (uint32_t i = 0; i < num_redmules; i++) {
       X_shift = (XSHIFT == 1) ? (i * PORT_WIDTH) % matrix_N : 0;
-      dma_memcpy_blocking(
+      dma_collective_all_memcpy_blocking(
           l1_X + i * (matrix_M * matrix_N / num_redmules) + X_shift,
           l2_X + i * (matrix_M * matrix_N / num_redmules),
           (matrix_M * matrix_N / num_redmules) * sizeof(int16_t));
     }
-    dma_memcpy_blocking(l1_W, l2_W, (matrix_N * matrix_P) * sizeof(int16_t));
-    dma_memcpy_blocking(l1_Y, l2_Y, (matrix_M * matrix_P) * sizeof(int16_t));
+    dma_collective_all_memcpy_blocking(l1_W, l2_W,
+                                       (matrix_N * matrix_P) * sizeof(int16_t));
+    dma_collective_all_memcpy_blocking(l1_Y, l2_Y,
+                                       (matrix_M * matrix_P) * sizeof(int16_t));
   }
   mempool_barrier(num_cores);
 
@@ -260,13 +265,12 @@ int main() {
         (unsigned int)(l1_Y +
                        redmule_id * (matrix_M * matrix_P / num_redmules));
     unsigned int W_ptr = (unsigned int)(l1_W);
-    hwpe_soft_clear();
-    mempool_wait(10);
+    const int32_t target = tnc_redmule_acquire_target();
     redmule_cfg(X_ptr, W_ptr, Y_ptr, (matrix_M / num_redmules), matrix_N,
                 matrix_P, W_shift, GEMM, Float16);
     mempool_wait(10);
-    hwpe_trigger_job();
-    mempool_wfi();
+    tnc_redmule_trigger();
+    tnc_redmule_wait((uint8_t)target);
   }
   mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
@@ -284,9 +288,9 @@ int main() {
 #endif
   }
 #if !RM_GEMM_TILED_2D
-  if (core_id == 0) {
-    dma_memcpy_blocking(l2_Z_check, l1_Y,
-                        matrix_M * matrix_P * sizeof(int16_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(l2_Z_check, l1_Y,
+                                       matrix_M * matrix_P * sizeof(int16_t));
   }
 #endif
 #if !LLM_PERF_ONLY

@@ -90,28 +90,34 @@ int main() {
   /* INITIALIZATION */
 
 #if (defined(SINGLE) || defined(PARALLEL))
-  if (core_id == 0) {
-    dma_memcpy_blocking(l1_pSrc, l2_pSrc, N_CSAMPLES * sizeof(int32_t));
-    dma_memcpy_blocking(l1_twiddleCoef_q16_src, l2_twiddleCoef_q16,
-                        3 * (N_CSAMPLES / 4) * sizeof(int32_t));
-    dma_memcpy_blocking(l1_BitRevIndexTable, l2_BitRevIndexTable,
-                        BITREVINDEXTABLE_LENGTH * sizeof(int16_t));
-    printf("01: END INITIALIZATION\n");
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(l1_pSrc, l2_pSrc,
+                                       N_CSAMPLES * sizeof(int32_t));
+    dma_collective_all_memcpy_blocking(l1_twiddleCoef_q16_src,
+                                       l2_twiddleCoef_q16,
+                                       3 * (N_CSAMPLES / 4) * sizeof(int32_t));
+    dma_collective_all_memcpy_blocking(l1_BitRevIndexTable, l2_BitRevIndexTable,
+                                       BITREVINDEXTABLE_LENGTH *
+                                           sizeof(int16_t));
+    if (core_id == 0)
+      printf("01: END INITIALIZATION\n");
   }
   mempool_barrier(num_cores);
 #endif
 
 #if (defined(SCHEDULED) || defined(FOLDED))
 
-  if (core_id == 0) {
+  if (mempool_is_group_coordinator()) {
     for (uint32_t j = 0; j < N_FFTs_ROW; j++) {
       for (uint32_t i = 0; i < N_FFTs_COL; i++) {
-        dma_memcpy_blocking(l1_pSrc + i * 2 * N_CSAMPLES + j * (8 * NUM_BANKS),
-                            l2_pSrc, N_CSAMPLES * sizeof(int32_t));
+        dma_collective_all_memcpy_blocking(
+            l1_pSrc + i * 2 * N_CSAMPLES + j * (8 * NUM_BANKS), l2_pSrc,
+            N_CSAMPLES * sizeof(int32_t));
       }
     }
-    dma_memcpy_blocking(l1_BitRevIndexTable, l2_BitRevIndexTable,
-                        BITREVINDEXTABLE_LENGTH * sizeof(int32_t));
+    dma_collective_all_memcpy_blocking(l1_BitRevIndexTable, l2_BitRevIndexTable,
+                                       BITREVINDEXTABLE_LENGTH *
+                                           sizeof(int32_t));
   }
   mempool_barrier(num_cores);
 
@@ -130,9 +136,10 @@ int main() {
     }
   }
 #else
-  if (core_id == 0) {
-    dma_memcpy_blocking(l1_twiddleCoef_q16_src, l2_twiddleCoef_q16,
-                        3 * (N_CSAMPLES / 4) * sizeof(int32_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(l1_twiddleCoef_q16_src,
+                                       l2_twiddleCoef_q16,
+                                       3 * (N_CSAMPLES / 4) * sizeof(int32_t));
   }
 #endif
   mempool_barrier(num_cores);
@@ -238,8 +245,9 @@ int main() {
     printf("02: END COMPUTATION\n");
   }
 
-  if (core_id == 0) {
-    dma_memcpy_blocking(l2_pRes_check, pRes, 2 * N_CSAMPLES * sizeof(int16_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(l2_pRes_check, pRes,
+                                       2 * N_CSAMPLES * sizeof(int16_t));
   }
   mempool_check_dpi_i16(l2_pRes_check, l2_pRes, 2 * N_CSAMPLES, TOLERANCE, 0);
   mempool_barrier(num_cores);

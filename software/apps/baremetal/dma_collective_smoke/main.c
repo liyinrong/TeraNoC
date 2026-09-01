@@ -244,6 +244,7 @@ int main() {
            (unsigned)COLLECTIVE_BYTES, (unsigned)data_errors[0],
            (unsigned)data_errors[1], (unsigned)issuer_errors,
            (unsigned)total_errors);
+#ifndef DMA_COLLECTIVE_SMOKE_NO_LAUNCH
     for (uint32_t group = 0; group < (uint32_t)NUM_GROUPS; ++group) {
       for (uint32_t slot = 0; slot < DMA_COLLECTIVE_SLOTS; ++slot) {
         const dma_collective_slot_state_t *const state =
@@ -256,6 +257,7 @@ int main() {
                (unsigned)state->error);
       }
     }
+#endif
   }
   mempool_barrier(num_cores);
   return (int)total_errors;

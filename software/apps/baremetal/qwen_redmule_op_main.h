@@ -291,18 +291,19 @@ int main() {
   const uint32_t redmule_id = mempool_get_redmule_id();
   mempool_barrier_init(core_id);
 
-  if (core_id == 0) {
-    printf("\n[%s] logical=%dx%dx%d tile=%dx%dx%d map=%dx%d "
-           "engines=%d/%d port=%d xshift=%d\n",
-           QWEN_BENCHMARK_NAME, QWEN_LOGICAL_M, QWEN_LOGICAL_N, QWEN_LOGICAL_P,
-           QWEN_TILE_M, QWEN_TILE_N, QWEN_TILE_P, QWEN_NE_R, QWEN_NE_C,
-           QWEN_ACTIVE_ENGINES, NUM_REDMULE_TILES, QWEN_PORT_WIDTH,
-           LLM_RM_X_SHIFT);
-    dma_memcpy_blocking(qwen_l1_x, qwen_l2_x,
-                        sizeof(__fp16) * QWEN_TILE_M * QWEN_TILE_N);
+  if (mempool_is_group_coordinator()) {
+    if (core_id == 0)
+      printf("\n[%s] logical=%dx%dx%d tile=%dx%dx%d map=%dx%d "
+             "engines=%d/%d port=%d xshift=%d\n",
+             QWEN_BENCHMARK_NAME, QWEN_LOGICAL_M, QWEN_LOGICAL_N,
+             QWEN_LOGICAL_P, QWEN_TILE_M, QWEN_TILE_N, QWEN_TILE_P, QWEN_NE_R,
+             QWEN_NE_C, QWEN_ACTIVE_ENGINES, NUM_REDMULE_TILES, QWEN_PORT_WIDTH,
+             LLM_RM_X_SHIFT);
+    dma_collective_all_memcpy_blocking(
+        qwen_l1_x, qwen_l2_x, sizeof(__fp16) * QWEN_TILE_M * QWEN_TILE_N);
 #ifndef QWEN_VC_W_LEVEL
-    dma_memcpy_blocking(qwen_l1_w, qwen_l2_w,
-                        sizeof(__fp16) * QWEN_TILE_N * QWEN_TILE_P);
+    dma_collective_all_memcpy_blocking(
+        qwen_l1_w, qwen_l2_w, sizeof(__fp16) * QWEN_TILE_N * QWEN_TILE_P);
 #endif
   }
   mempool_barrier(num_cores);
@@ -494,13 +495,15 @@ int main() {
   mempool_stop_benchmark();
   const uint32_t time_end = mempool_get_timer();
 
-  if (core_id == 0) {
-    dma_memcpy_blocking(qwen_l2_z, qwen_l1_z,
-                        sizeof(__fp16) * QWEN_TILE_M * QWEN_TILE_P);
-    printf("[%s] stage=gemm cycles=%u\n", QWEN_BENCHMARK_NAME,
-           time_end - time_init);
-    printf("[%s] kernel takes %u clock cycles\n", QWEN_BENCHMARK_NAME,
-           time_end - time_init);
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(
+        qwen_l2_z, qwen_l1_z, sizeof(__fp16) * QWEN_TILE_M * QWEN_TILE_P);
+    if (core_id == 0) {
+      printf("[%s] stage=gemm cycles=%u\n", QWEN_BENCHMARK_NAME,
+             time_end - time_init);
+      printf("[%s] kernel takes %u clock cycles\n", QWEN_BENCHMARK_NAME,
+             time_end - time_init);
+    }
   }
   mempool_barrier(num_cores);
   return 0;

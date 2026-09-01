@@ -99,11 +99,18 @@ module terapool_cluster_floonoc_wrapper
 
   for (genvar g = 0; unsigned'(g) < NumGroups; g++) begin : gen_fsync_leaf_map
     for (genvar t = 0; unsigned'(t) < NumTilesPerGroup; t++) begin
-      localparam int unsigned L = fsync_leaf_of(g, t);
-      assign fsync_h_leaf[L][0] = fsync_h_req[g][t];
-      assign fsync_v_leaf[L][0] = fsync_v_req[g][t];
-      assign fsync_h_rsp[g][t]  = fsync_h_leaf_rsp[L][0];
-      assign fsync_v_rsp[g][t]  = fsync_v_leaf_rsp[L][0];
+      if (t < FSyncTpgSide * FSyncTpgSide) begin : gen_supported_tile
+        localparam int unsigned L = fsync_leaf_of(g, t);
+        assign fsync_h_leaf[L][0] = fsync_h_req[g][t];
+        assign fsync_v_leaf[L][0] = fsync_v_req[g][t];
+        assign fsync_h_rsp[g][t]  = fsync_h_leaf_rsp[L][0];
+        assign fsync_v_rsp[g][t]  = fsync_v_leaf_rsp[L][0];
+      end else begin : gen_unsupported_tile
+        // A non-square tile block has no complete fractal subtree. Keep its
+        // extra leaves disconnected instead of aliasing a supported leaf.
+        assign fsync_h_rsp[g][t] = '0;
+        assign fsync_v_rsp[g][t] = '0;
+      end
     end
   end
 
@@ -164,7 +171,8 @@ module terapool_cluster_floonoc_wrapper
     automatic int unsigned seen[] = new[FSyncLeaves];
     for (int unsigned l = 0; l < FSyncLeaves; l++) seen[l] = 0;
     for (int unsigned g = 0; g < NumGroups; g++)
-      for (int unsigned t = 0; t < NumTilesPerGroup; t++)
+      for (int unsigned t = 0;
+           t < NumTilesPerGroup && t < FSyncTpgSide * FSyncTpgSide; t++)
         seen[fsync_leaf_of(g, t)]++;
     for (int unsigned l = 0; l < FSyncLeaves; l++)
       if (seen[l] != 1)

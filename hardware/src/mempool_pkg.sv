@@ -675,7 +675,8 @@ package mempool_pkg;
   localparam integer unsigned FSyncTileSide = NumX * FSyncTpgSide;
   localparam integer unsigned FSyncItlLevels = 2 * $clog2(FSyncTileSide) - 1;
   localparam integer unsigned FSyncAggrWidth = FSyncItlLevels + 2;
-  localparam integer unsigned FSyncIdWidth   = FSyncItlLevels;
+  // The 2x2 tree reserves two ID bits for the neighbour-network selectors.
+  localparam integer unsigned FSyncIdWidth   = FSyncItlLevels < 2 ? 2 : FSyncItlLevels;
   localparam integer unsigned FSyncLvlWidth  = $clog2(FSyncAggrWidth - 1);
 
   // Built from the dependency's own macro rather than retyped, so the layout

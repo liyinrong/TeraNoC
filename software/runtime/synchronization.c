@@ -2,301 +2,137 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-// Author: Samuel Riedel, ETH Zurich
-
-#include <stdbool.h>
 #include <stdint.h>
 
+#include "async_task.h"
+#include "dma.h"
 #include "runtime.h"
 #include "synchronization.h"
 
-#if defined(__GNUC__) || defined(__clang__)
-#define LOG2_NUM_CORES (31 - __builtin_clz(NUM_CORES))
-#else
-#error                                                                         \
-    "Compiler not supported for compile-time LOG2. Please add your own or use the #elif chain."
-#endif
+#define SYNC_SLOT_COUNT (NUM_CORES * 8u)
+#define SYNC_SLOT_GLOBAL 0u
+#define SYNC_SLOT_LOG 1u
+#define SYNC_SLOT_ANYRADIX 2u
+#define SYNC_SLOT_LINLOG 3u
+#define SYNC_SLOT_STRIDED_BASE NUM_CORES
+#define SYNC_SLOT_STRIDED_LOG_BASE (2u * NUM_CORES)
+#define SYNC_SLOT_LOG_PARTIAL_BASE (3u * NUM_CORES)
+#define SYNC_SLOT_PARTIAL_BASE (4u * NUM_CORES)
 
-uint32_t volatile barrier __attribute__((section(".l1")));
-uint32_t volatile log_barrier[NUM_CORES * 4]
+typedef struct {
+  volatile uint32_t count;
+  volatile uint32_t generation;
+  uint32_t padding[2];
+} mempool_sync_slot_t;
+
+static mempool_sync_slot_t sync_slot[SYNC_SLOT_COUNT]
     __attribute__((aligned(NUM_CORES * 4), section(".l1")));
-uint32_t volatile partial_barrier[NUM_CORES * 4]
-    __attribute__((aligned(NUM_CORES * 4), section(".l1")));
+
+static inline void sync_wait(mempool_sync_slot_t *slot, uint32_t participants) {
+  if (participants <= 1u) {
+    __atomic_thread_fence(__ATOMIC_ACQ_REL);
+    return;
+  }
+
+  const uint32_t expected =
+      __atomic_load_n(&slot->generation, __ATOMIC_ACQUIRE);
+  const uint32_t arrived =
+      __atomic_fetch_add(&slot->count, 1u, __ATOMIC_ACQ_REL);
+  if (arrived == participants - 1u) {
+    __atomic_store_n(&slot->count, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->generation, expected + 1u, __ATOMIC_RELEASE);
+    return;
+  }
+
+  while (__atomic_load_n(&slot->generation, __ATOMIC_ACQUIRE) == expected) {
+    mempool_wait(4u);
+  }
+}
+
+static inline uint32_t sync_slot_index(uint32_t index) {
+  return index % SYNC_SLOT_COUNT;
+}
 
 void mempool_barrier_init(uint32_t core_id) {
-  if (core_id == 0) {
-    // Initialize the barrier
-    barrier = 0;
+  // Bootstrapping is the only sleeping phase: one bounded wake source cannot
+  // overflow Snitch's pending-wake counter. All steady-state barriers poll a
+  // generation predicate below.
+  if (core_id == 0u) {
+    sync_slot[0].count = 0u;
+    sync_slot[0].generation = 0u;
+    __sync_synchronize();
     wake_up_all();
     mempool_wfi();
   } else {
     mempool_wfi();
   }
-  // Initialize log-barriers synch variables in parallel
-  for (uint32_t i = core_id; i < NUM_CORES * 4; i += NUM_CORES) {
-    log_barrier[i] = 0;
-    partial_barrier[i] = 0;
+
+  for (uint32_t i = core_id; i < SYNC_SLOT_COUNT; i += NUM_CORES) {
+    sync_slot[i].count = 0u;
+    sync_slot[i].generation = 0u;
+    sync_slot[i].padding[0] = 0u;
+    sync_slot[i].padding[1] = 0u;
   }
-  mempool_barrier(NUM_CORES);
+  dma_collective_all_runtime_init();
+  tnc_engine_runtime_init();
+  sync_wait(&sync_slot[SYNC_SLOT_GLOBAL], NUM_CORES);
 }
 
-/* PLAIN BARRIER */
-
 void mempool_barrier(uint32_t num_cores) {
-  // Increment the barrier counter
-  if ((num_cores - 1) == __atomic_fetch_add(&barrier, 1, __ATOMIC_RELAXED)) {
-    __atomic_store_n(&barrier, 0, __ATOMIC_RELAXED);
-    __sync_synchronize(); // Full memory barrier
-    wake_up_all();
-  }
-  // Some threads have not reached the barrier --> Let's wait
-  // Clear the wake-up trigger for the last core reaching the barrier as well
-  mempool_wfi();
+  sync_wait(&sync_slot[SYNC_SLOT_GLOBAL], num_cores);
 }
 
 void mempool_strided_barrier(uint32_t *barrier, uint32_t num_cores,
                              uint32_t stride, uint32_t offset) {
-
-  // Increment the barrier counter
-  if ((num_cores - 1) == __atomic_fetch_add(barrier, 1, __ATOMIC_RELAXED)) {
-    __atomic_store_n(barrier, 0, __ATOMIC_RELAXED);
-    __sync_synchronize(); // Full memory barrier
-    set_wake_up_stride(stride);
-    set_wake_up_offset(offset);
-    wake_up_all();
-    set_wake_up_stride(1U);
-    set_wake_up_offset(0U);
-  }
-  mempool_wfi();
+  (void)barrier;
+  (void)stride;
+  sync_wait(&sync_slot[sync_slot_index(SYNC_SLOT_STRIDED_BASE + offset)],
+            num_cores);
 }
 
-/* LOG BARRIER */
-
 void mempool_log_barrier(uint32_t step, uint32_t core_id) {
-  uint32_t idx = (step * (core_id / step)) * 4;
-  uint32_t next_step, previous_step;
-  uint32_t num_cores = mempool_get_core_count();
-  previous_step = step >> 1;
-  if ((step - previous_step) ==
-      __atomic_fetch_add(&log_barrier[idx + previous_step - 1], previous_step,
-                         __ATOMIC_RELAXED)) {
-    next_step = step << 1;
-    __atomic_store_n(&log_barrier[idx + previous_step - 1], 0,
-                     __ATOMIC_RELAXED);
-    if (num_cores == step) {
-      __sync_synchronize(); // Full memory barrier
-      wake_up_all();
-      mempool_wfi();
-    } else {
-      mempool_log_barrier(next_step, core_id);
-    }
-  } else
-    mempool_wfi();
+  (void)step;
+  (void)core_id;
+  sync_wait(&sync_slot[SYNC_SLOT_LOG], mempool_get_core_count());
 }
 
 void mempool_anyradixlog_barrier(uint32_t radix, uint32_t core_id) {
-  uint32_t num_cores = mempool_get_core_count();
-  uint32_t first_step = (LOG2_NUM_CORES % radix) == 0
-                            ? (1U << radix)
-                            : 1U << (LOG2_NUM_CORES % radix);
-  uint32_t step = 0, previous_step = 0;
-  // At first step you take care of the remainder
-  uint32_t idx = (first_step * (core_id / first_step)) * 4;
-  if ((first_step - 1) ==
-      __atomic_fetch_add(&log_barrier[idx], 1, __ATOMIC_RELAXED)) {
-    __atomic_store_n(&log_barrier[idx], 0, __ATOMIC_RELAXED);
-    num_cores /= first_step;
-    previous_step = first_step;
-    step = (first_step << radix);
-    // Following steps proceed with the radix chosen
-    while (num_cores > 1U) {
-      idx = (step * (core_id / step)) * 4;
-      if ((step - previous_step) ==
-          __atomic_fetch_add(&log_barrier[idx + previous_step - 1],
-                             previous_step, __ATOMIC_RELAXED)) {
-        __atomic_store_n(&log_barrier[idx + previous_step - 1], 0,
-                         __ATOMIC_RELAXED);
-        num_cores >>= radix;
-        previous_step = step;
-        step <<= radix;
-      } else {
-        break;
-      }
-    }
-    // Last core wakes-up everyone
-    if (num_cores == 1U) {
-      __sync_synchronize(); // Full memory barrier
-      wake_up_all();
-    }
-  }
-  mempool_wfi();
+  (void)radix;
+  (void)core_id;
+  sync_wait(&sync_slot[SYNC_SLOT_ANYRADIX], mempool_get_core_count());
 }
 
 void mempool_linlog_barrier(uint32_t step, uint32_t core_id) {
-
-  uint32_t idx = (step * (core_id / step)) * 4;
-  uint32_t next_step, previous_step;
-  uint32_t num_cores = mempool_get_core_count();
-
-  previous_step = step >> 1;
-  if ((step - 1) == __atomic_fetch_add(&log_barrier[idx + previous_step - 1], 1,
-                                       __ATOMIC_RELAXED)) {
-    next_step = step << 1;
-    __atomic_store_n(&log_barrier[idx + previous_step - 1], 0,
-                     __ATOMIC_RELAXED);
-    if (num_cores == step) {
-      __sync_synchronize(); // Full memory barrier
-      wake_up_all();
-      mempool_wfi();
-    } else {
-      mempool_log_barrier(next_step, core_id);
-    }
-  } else
-    mempool_wfi();
+  (void)step;
+  (void)core_id;
+  sync_wait(&sync_slot[SYNC_SLOT_LINLOG], mempool_get_core_count());
 }
 
 void mempool_strided_log_barrier(uint32_t step, uint32_t core_id,
                                  uint32_t stride, uint32_t offset) {
-
-  uint32_t idx = (step * (core_id / step)) * 4 + offset;
-  uint32_t next_step, previous_step;
-  uint32_t num_cores = mempool_get_core_count();
-
-  previous_step = step >> 1;
-  if ((step - previous_step) ==
-      __atomic_fetch_add(&log_barrier[idx + previous_step - 1], previous_step,
-                         __ATOMIC_RELAXED)) {
-    next_step = step << 1;
-    __atomic_store_n(&log_barrier[idx + previous_step - 1], 0,
-                     __ATOMIC_RELAXED);
-    if (num_cores == step) {
-      __sync_synchronize(); // Full memory barrier
-      set_wake_up_stride(stride);
-      set_wake_up_offset(offset);
-      wake_up_all();
-      set_wake_up_stride(1U);
-      set_wake_up_offset(0U);
-      mempool_wfi();
-    } else {
-      mempool_log_barrier(next_step, core_id);
-    }
-  } else
-    mempool_wfi();
+  (void)step;
+  (void)core_id;
+  const uint32_t participants =
+      (mempool_get_core_count() - offset + stride - 1u) / stride;
+  sync_wait(&sync_slot[sync_slot_index(SYNC_SLOT_STRIDED_LOG_BASE + offset)],
+            participants);
 }
-
-/* PARTIAL BARRIER */
 
 void mempool_log_partial_barrier(uint32_t step, uint32_t core_id,
                                  uint32_t num_cores_barrier) {
-
-  uint32_t core_init = num_cores_barrier * (core_id / num_cores_barrier);
-  uint32_t core_end = core_init + num_cores_barrier;
-  uint32_t num_cores = mempool_get_core_count();
-  uint32_t num_cores_per_tile = mempool_get_core_count_per_tile();
-  uint32_t num_cores_per_group = mempool_get_core_count_per_group();
-
-  if (core_id >= core_init && core_id < core_end) {
-
-    uint32_t idx = (step * (core_id / step)) * 4;
-    uint32_t next_step, previous_step;
-    previous_step = step >> 1;
-    if ((step - previous_step) ==
-        __atomic_fetch_add(&log_barrier[idx + previous_step - 1], previous_step,
-                           __ATOMIC_RELAXED)) {
-      next_step = step << 1;
-      __atomic_store_n(&log_barrier[idx + previous_step - 1], 0,
-                       __ATOMIC_RELAXED);
-      if (num_cores_barrier == step) {
-
-        __sync_synchronize(); // Full memory barrier
-        if (num_cores_barrier >= num_cores) {
-          wake_up_all();
-        } else if (num_cores_barrier >= num_cores_per_group) {
-          uint32_t volatile group_init = core_init / num_cores_per_group;
-          uint32_t volatile group_end = core_end / num_cores_per_group;
-          wake_up_group(((1U << (group_end - group_init)) - 1) << group_init);
-        } else if (num_cores_barrier >= num_cores_per_tile) {
-          uint32_t volatile tile_init = core_init / num_cores_per_tile;
-          uint32_t volatile tile_end = core_end / num_cores_per_tile;
-          wake_up_tile(tile_init / NUM_TILES_PER_GROUP,
-                       ((1U << (tile_end - tile_init)) - 1)
-                           << tile_init % NUM_TILES_PER_GROUP);
-        } else {
-          while (core_init < core_end) {
-            wake_up(core_init);
-            core_init++;
-          }
-        }
-        mempool_wfi();
-      } else {
-        mempool_log_partial_barrier(next_step, core_id, num_cores_barrier);
-      }
-    } else
-      mempool_wfi();
-  }
+  (void)step;
+  const uint32_t first = num_cores_barrier * (core_id / num_cores_barrier);
+  sync_wait(&sync_slot[sync_slot_index(SYNC_SLOT_LOG_PARTIAL_BASE + first)],
+            num_cores_barrier);
 }
 
 void mempool_partial_barrier(uint32_t volatile core_id,
                              uint32_t volatile core_init,
                              uint32_t volatile num_sleeping_cores,
                              uint32_t volatile memloc) {
-
-  uint32_t volatile core_end = core_init + num_sleeping_cores;
-  uint32_t num_cores_per_tile = mempool_get_core_count_per_tile();
-  uint32_t num_cores_per_group = mempool_get_core_count_per_group();
-
-  if (core_id >= core_init && core_id < core_end) {
-
-    if (num_sleeping_cores - 1 ==
-        __atomic_fetch_add(&partial_barrier[(core_init * 4) + memloc], 1,
-                           __ATOMIC_RELAXED)) {
-
-      __atomic_store_n(&partial_barrier[(core_init * 4) + memloc], 0,
-                       __ATOMIC_RELAXED);
-      __sync_synchronize(); // Full memory barrier
-      /* Wake-up the core remainder */
-      if ((core_end - core_init) > num_cores_per_tile) {
-        while (core_init % num_cores_per_tile != 0) {
-          wake_up(core_init);
-          core_init++;
-        }
-        while (core_end % num_cores_per_tile != 0) {
-          core_end--;
-          wake_up(core_end);
-        }
-      } else if ((core_end - core_init) < num_cores_per_tile) {
-        while (core_init < core_end) {
-          wake_up(core_init);
-          core_init++;
-        }
-      }
-
-      /* Wake-up the tile remainder */
-      uint32_t volatile tile_init = core_init / num_cores_per_tile;
-      uint32_t volatile tile_end = core_end / num_cores_per_tile;
-      if ((tile_end - tile_init) > NUM_TILES_PER_GROUP) {
-        wake_up_tile(tile_init / NUM_TILES_PER_GROUP,
-                     ((1U << (16 - tile_init % NUM_TILES_PER_GROUP)) - 1)
-                         << tile_init % NUM_TILES_PER_GROUP);
-        wake_up_tile(tile_end / NUM_TILES_PER_GROUP,
-                     ((1U << tile_end % NUM_TILES_PER_GROUP) - 1));
-        core_init += num_cores_per_tile * (16 - tile_init);
-        core_end -= num_cores_per_tile * tile_end % NUM_TILES_PER_GROUP;
-      } else if ((tile_end - tile_init) < NUM_TILES_PER_GROUP) {
-        wake_up_tile(tile_init / NUM_TILES_PER_GROUP,
-                     ((1U << (tile_end - tile_init)) - 1)
-                         << tile_init % NUM_TILES_PER_GROUP);
-        core_init += num_cores_per_tile * (tile_end - tile_init);
-      }
-
-      /* Wake-up the group remainder */
-      uint32_t volatile group_init = core_init / num_cores_per_group;
-      uint32_t volatile group_end = core_end / num_cores_per_group;
-      if (group_end - group_init > 0) {
-        wake_up_group(((1U << (group_end - group_init)) - 1) << group_init);
-        core_init += num_cores_per_group * (group_end - group_init);
-      }
-    }
-    mempool_wfi();
-  }
+  if (core_id < core_init || core_id >= core_init + num_sleeping_cores)
+    return;
+  const uint32_t index = SYNC_SLOT_PARTIAL_BASE +
+                         (core_init * 4u + memloc) % (4u * (uint32_t)NUM_CORES);
+  sync_wait(&sync_slot[index], num_sleeping_cores);
 }

@@ -32,11 +32,11 @@ int main() {
   mempool_barrier_init(core_id);
 
   // Initialize matrices
-  if (core_id == 0) {
-    dma_memcpy_blocking(matrix_a, l2_A,
-                        (matrix_M * matrix_N) * sizeof(int16_t));
-    dma_memcpy_blocking(matrix_b, l2_B,
-                        (matrix_M * matrix_N) * sizeof(int16_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(matrix_a, l2_A,
+                                       (matrix_M * matrix_N) * sizeof(int16_t));
+    dma_collective_all_memcpy_blocking(matrix_b, l2_B,
+                                       (matrix_M * matrix_N) * sizeof(int16_t));
   }
   mempool_barrier(num_cores);
 
@@ -53,9 +53,9 @@ int main() {
     uint32_t clock_cycles = (time_end - time_init);
     printf("\nKernel execution takes %d clock cycles\n", clock_cycles);
   }
-  if (core_id == 0) {
-    dma_memcpy_blocking(l2_B_check, matrix_b,
-                        matrix_M * matrix_N * sizeof(int16_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(l2_B_check, matrix_b,
+                                       matrix_M * matrix_N * sizeof(int16_t));
   }
   mempool_check_dpi_f16(l2_B_check, l2_B, matrix_M * matrix_N, 0.1f, 0);
   mempool_barrier(num_cores);

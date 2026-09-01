@@ -67,10 +67,13 @@ int main() {
   mempool_barrier_init(core_id); // Initialize barrier and synchronize//
 
   /* Initialize matrices */
-  if (core_id == 0) {
-    dma_memcpy_blocking(l1_H, l2_H, 2 * N_ITR * N_RX * N_TX * sizeof(int32_t));
-    dma_memcpy_blocking(l1_y, l2_y, 2 * N_ITR * N_RX * sizeof(int32_t));
-    dma_memcpy_blocking(l1_S, l2_S, 2 * N_ITR * N_TX * sizeof(int32_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(
+        l1_H, l2_H, 2 * N_ITR * N_RX * N_TX * sizeof(int32_t));
+    dma_collective_all_memcpy_blocking(l1_y, l2_y,
+                                       2 * N_ITR * N_RX * sizeof(int32_t));
+    dma_collective_all_memcpy_blocking(l1_S, l2_S,
+                                       2 * N_ITR * N_TX * sizeof(int32_t));
   }
   mempool_barrier(num_cores);
 
@@ -171,8 +174,9 @@ int main() {
 #endif
 
   // Check the result
-  if (core_id == 0) {
-    dma_memcpy_blocking(l2_x_check, l1_x, 2 * N_TX * sizeof(int32_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(l2_x_check, l1_x,
+                                       2 * N_TX * sizeof(int32_t));
   }
   mempool_check_dpi_f32(l2_x_check, l2_x, 2 * N_TX, 0.01f, 0);
   mempool_barrier(num_cores);

@@ -88,6 +88,7 @@ static inline uint32_t dma_local_wait_id(uint32_t stream, dma_id_t id) {
     const uint32_t error = dma_local_error(stream);
     if (error != 0)
       return error;
+    mempool_wait(4u);
   }
   __sync_synchronize();
   return 0;
@@ -103,10 +104,22 @@ static inline uint32_t dma_local_wait(uint32_t stream) {
     const uint32_t error = dma_local_error(stream);
     if (error != 0)
       return error;
+    mempool_wait(4u);
   }
   __sync_synchronize();
   return 0;
 }
+
+// Whole-cluster compatibility path for applications whose L1 objects use the
+// ordinary global interleave. Exactly one coordinator per group calls these
+// functions in the same program order. The implementation remains distributed:
+// every coordinator programs only its own group-local frontend.
+void dma_collective_all_runtime_init(void);
+uint32_t dma_collective_all_memcpy_nonblocking(void *dest, const void *src,
+                                               size_t len);
+uint32_t dma_collective_all_wait(void);
+uint32_t dma_collective_all_memcpy_blocking(void *dest, const void *src,
+                                            size_t len);
 
 static inline dma_id_t
 dma_local_memcpy_nd_nonblocking(uint32_t stream, void *dest, const void *src,

@@ -40,9 +40,10 @@ int main() {
   uint32_t time_init, time_end;
   mempool_barrier_init(core_id);
 
-  if (core_id == 0) {
-    dma_memcpy_blocking(l1_A, l2_A, matrix_N * matrix_M * sizeof(int32_t));
-    dma_memcpy_blocking(l1_X, l2_X, matrix_N * sizeof(int32_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(l1_A, l2_A,
+                                       matrix_N * matrix_M * sizeof(int32_t));
+    dma_collective_all_memcpy_blocking(l1_X, l2_X, matrix_N * sizeof(int32_t));
   }
   for (uint32_t k = core_id; k < NUM_BANKS; k += num_cores) {
     sum[k] = 0;
@@ -61,8 +62,9 @@ int main() {
     printf("\nKernel execution takes %d clock cycles\n", clock_cycles);
   }
   // Check results
-  if (core_id == 0) {
-    dma_memcpy_blocking(l2_Y_check, l1_Y, matrix_M * sizeof(int32_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(l2_Y_check, l1_Y,
+                                       matrix_M * sizeof(int32_t));
   }
   mempool_check_dpi_f32(l2_Y_check, l2_Y, matrix_M, 0.01f, 0);
   mempool_barrier(num_cores);

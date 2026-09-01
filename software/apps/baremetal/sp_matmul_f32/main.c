@@ -81,9 +81,11 @@ int main() {
   }
 
   // Initialize data
-  if (core_id == 0) {
-    dma_memcpy_blocking(l1_A, l2_A, (matrix_M * matrix_N) * sizeof(float));
-    dma_memcpy_blocking(l1_B, l2_B, (matrix_N * matrix_P) * sizeof(float));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(l1_A, l2_A,
+                                       (matrix_M * matrix_N) * sizeof(float));
+    dma_collective_all_memcpy_blocking(l1_B, l2_B,
+                                       (matrix_N * matrix_P) * sizeof(float));
   }
   mempool_barrier(num_cores);
 
@@ -120,8 +122,9 @@ int main() {
     printf("The performance is %u OP/1000cycle (%u%%o utilization).\n",
            performance, utilization);
   }
-  if (core_id == 0) {
-    dma_memcpy_blocking(l2_C_check, l1_C, matrix_M * matrix_P * sizeof(float));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(l2_C_check, l1_C,
+                                       matrix_M * matrix_P * sizeof(float));
   }
   mempool_check_dpi_f32(l2_C_check, l2_C, matrix_M * matrix_P, 0.01f, 0);
   mempool_barrier(num_cores);

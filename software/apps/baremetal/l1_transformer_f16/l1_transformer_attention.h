@@ -5,8 +5,10 @@
 // Author: Marco Bertuletti, ETH Zurich
 
 #pragma once
-#include "archi_redmule.h"
+#include "async_task.h"
 #include "dma.h"
+
+#include "archi_redmule.h"
 #include "hal_redmule.h"
 
 #include "baremetal/mempool_matmul_f16.h"
@@ -55,12 +57,11 @@ void attention_block(__fp16 const *__restrict__ Q,
       uint16_t M = (uint16_t)SeqLen;
       uint16_t N = (uint16_t)tdEmbed;
       uint16_t P = (uint16_t)SeqLen;
-      hwpe_soft_clear();
-      mempool_wait(10);
+      const int32_t target = tnc_redmule_acquire_target();
       redmule_cfg(I_ptr, W_ptr, O_ptr, M, N, P, 0, GEMM, Float16);
       mempool_wait(10);
-      hwpe_trigger_job();
-      mempool_wfi();
+      tnc_redmule_trigger();
+      tnc_redmule_wait((uint8_t)target);
     }
   }
   mempool_barrier(num_cores);
@@ -90,12 +91,11 @@ void attention_block(__fp16 const *__restrict__ Q,
       uint16_t M = (uint16_t)SeqLen;
       uint16_t N = (uint16_t)SeqLen;
       uint16_t P = (uint16_t)tdEmbed;
-      hwpe_soft_clear();
-      mempool_wait(10);
+      const int32_t target = tnc_redmule_acquire_target();
       redmule_cfg(I_ptr, W_ptr, O_ptr, M, N, P, 0, GEMM, Float16);
       mempool_wait(10);
-      hwpe_trigger_job();
-      mempool_wfi();
+      tnc_redmule_trigger();
+      tnc_redmule_wait((uint8_t)target);
     }
   }
   mempool_barrier(num_cores);
@@ -285,8 +285,9 @@ void *attention(__fp16 const *__restrict__ l2_I,
   static __fp16 *I = l1_I;   // Should be allocated dinamically
   static __fp16 *T1 = l1_T1; // Should be allocated dinamically
   static __fp16 *T2 = l1_T2; // Should be allocated dinamically
-  if (core_id == 0) {
-    dma_memcpy_blocking(I, l2_I, Embed * Beam * tdSamples * sizeof(int16_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_blocking(
+        I, l2_I, Embed * Beam * tdSamples * sizeof(int16_t));
   }
   mempool_barrier(num_cores);
   mempool_stop_benchmark();
@@ -364,9 +365,10 @@ void *attention(__fp16 const *__restrict__ l2_I,
 
   static __fp16 *F = l1_F; // Should be allocated dinamically
   static __fp16 *b = l1_b; // Should be allocated dinamically
-  if (core_id == 0) {
-    dma_memcpy_nonblocking(F, l2_F, Embed * Embed * Wf * sizeof(int16_t));
-    dma_memcpy_nonblocking(b, l2_b, Embed * sizeof(int16_t));
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_memcpy_nonblocking(F, l2_F,
+                                          Embed * Embed * Wf * sizeof(int16_t));
+    dma_collective_all_memcpy_nonblocking(b, l2_b, Embed * sizeof(int16_t));
   }
 
 #if defined(VERBOSE)
@@ -402,8 +404,8 @@ void *attention(__fp16 const *__restrict__ l2_I,
   /**************************************************************************/
 
   mempool_start_benchmark();
-  if (core_id == 0) {
-    dma_wait();
+  if (mempool_is_group_coordinator()) {
+    dma_collective_all_wait();
   }
   mempool_barrier(num_cores);
   mempool_stop_benchmark();
