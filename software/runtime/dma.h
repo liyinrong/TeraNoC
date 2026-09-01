@@ -91,7 +91,10 @@ static inline uint32_t dma_local_wait_id(uint32_t stream, dma_id_t id) {
     mempool_wait(4u);
   }
   __sync_synchronize();
-  return 0;
+  // Error and retirement can become visible together. Re-read the sticky
+  // status after observing the target ID so that completion cannot bypass an
+  // error which landed between the loop's last two MMIO reads.
+  return dma_local_error(stream);
 }
 
 // Wait until every request accepted by one stream has landed. The hardware
@@ -107,7 +110,7 @@ static inline uint32_t dma_local_wait(uint32_t stream) {
     mempool_wait(4u);
   }
   __sync_synchronize();
-  return 0;
+  return dma_local_error(stream);
 }
 
 // Whole-cluster compatibility path for applications whose L1 objects use the
