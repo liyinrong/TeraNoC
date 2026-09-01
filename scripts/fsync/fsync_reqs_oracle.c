@@ -23,6 +23,7 @@
 // The RUNTIME's own implementation, not a copy of it. Checking a duplicated
 // formula would only prove the duplicate is self-consistent; this makes the
 // reference generator the oracle for the code that actually ships.
+static inline void mempool_wfi(void) {}
 #include "fsync.h"
 
 #define N __FSYNC_N_CU_X__

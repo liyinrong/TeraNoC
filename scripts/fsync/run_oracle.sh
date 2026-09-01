@@ -35,6 +35,7 @@ for n in 4 8 16 32; do
   cc -O1 -Wall -Wextra -I"$OUT" -I"$(dirname "$0")" \
      -I"$ROOT/software/runtime" \
      -DNUM_TILES_PER_GROUP=4 -DNUM_X=4 \
+     -DNUM_BANKS_PER_TILE=1 -DNUM_CORES_PER_TILE=1 \
      -D__FSYNC_N_CU_X__="$n" -D__FSYNC_N_CU_Y__="$n" -D__FSYNC_N_LVL__="$lvl" \
      -o "$OUT/oracle_$n" "$(dirname "$0")/fsync_reqs_oracle.c" \
      "$OUT/fractal_sync_req_gen.c"
