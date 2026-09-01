@@ -4,6 +4,9 @@
 
 install/*
 .bender
+# The legacy iDMA snapshot used to be tracked here. v0.6.5 is now a
+# Bender-managed checkout, like the other external dependencies.
+/hardware/deps/idma/
 .ctags
 gmon.out
 # Backup files

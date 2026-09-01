@@ -1,6 +1,7 @@
 apb/
 axi/
 axi_riscv_atomics/
+axi_stream/
 cluster_icache/
 cluster_interconnect/
 common_cells/

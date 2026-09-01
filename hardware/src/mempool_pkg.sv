@@ -13,6 +13,8 @@ package mempool_pkg;
   `include "axi/assign.svh"
   `include "axi/typedef.svh"
   `include "fractal_sync/typedef.svh"
+  `include "idma/typedef.svh"
+  `include "register_interface/typedef.svh"
 
   localparam integer unsigned NumCores                = `ifdef NUM_CORES `NUM_CORES `else 0 `endif;
   localparam integer unsigned NumCoresPerTile         = `ifdef NUM_CORES_PER_TILE `NUM_CORES_PER_TILE `else 0 `endif;
@@ -273,28 +275,50 @@ package mempool_pkg;
   localparam int unsigned NumSuperbanks         = NumBanksPerTile/DmaNumWords;
   localparam int unsigned DmaBurstLen           = (NumBanksPerGroup / NumDmasPerGroup) / DmaNumWords;
   localparam int unsigned NumAXIMastersPerGroup = `ifdef AXI_MASTERS_PER_GROUP `AXI_MASTERS_PER_GROUP `else 1 `endif;
+  localparam int unsigned IdmaNumDim            = 3;
+  localparam int unsigned IdmaIdWidth           = 32;
+  localparam int unsigned IdmaRegSize           = 32'h0001_0000;
+  // Second 64 KiB of the peripheral window (config/config.mk periph_base).
+  localparam addr_t      DMABaseAddr            =
+      (`ifdef PERIPH_BASE `PERIPH_BASE `else 32'h7000_0000 `endif) + 32'h0001_0000;
+  localparam addr_t      DMAMask                = ~(IdmaRegSize - 1);
+  localparam addr_t      IdmaErrorStatusOffset  = 32'h0000_0120;
+  localparam addr_t      IdmaErrorAddressOffset = 32'h0000_0160;
 
   typedef logic [DmaNumWords*DataWidth-1:0] dma_data_t;
   typedef logic [DmaNumWords*DataWidth/8-1:0] dma_strb_t;
+  typedef logic [31:0] idma_tf_len_t;
+  typedef logic [31:0] idma_reps_t;
+  typedef logic [31:0] idma_strides_t;
+  typedef logic [IdmaIdWidth-1:0] idma_counter_t;
+
+  `REG_BUS_TYPEDEF_ALL(idma_reg, addr_t, data_t, strb_t)
+  `IDMA_TYPEDEF_OPTIONS_T(idma_options_t, axi_tile_id_t)
+  `IDMA_TYPEDEF_ERR_PAYLOAD_T(idma_err_payload_t, addr_t)
+  `IDMA_TYPEDEF_REQ_T(idma_req_t, idma_tf_len_t, addr_t, idma_options_t)
+  `IDMA_TYPEDEF_RSP_T(idma_rsp_t, idma_err_payload_t)
+  `IDMA_TYPEDEF_D_REQ_T(idma_d_req_t, idma_reps_t, idma_strides_t)
 
   typedef struct packed {
-    axi_tile_id_t id;
-    addr_t src;
-    addr_t dst;
-    logic [31:0] num_bytes;
-    axi_pkg::cache_t cache_src;
-    axi_pkg::cache_t cache_dst;
-    axi_pkg::burst_t burst_src;
-    axi_pkg::burst_t burst_dst;
-    logic decouple_rw;
-    logic deburst;
-    logic serialize;
-  } dma_req_t;
+    idma_req_t burst_req;
+    idma_d_req_t [IdmaNumDim-2:0] d_req;
+  } idma_nd_req_t;
 
   typedef struct packed {
-    logic backend_idle;
-    logic trans_complete;
-  } dma_meta_t;
+    axi_tile_ar_t ar_chan;
+  } idma_axi_read_meta_channel_t;
+
+  typedef struct packed {
+    idma_axi_read_meta_channel_t axi;
+  } idma_read_meta_channel_t;
+
+  typedef struct packed {
+    axi_tile_aw_t aw_chan;
+  } idma_axi_write_meta_channel_t;
+
+  typedef struct packed {
+    idma_axi_write_meta_channel_t axi;
+  } idma_write_meta_channel_t;
 
   /***********************
    *  REDMULE PARAMETERS *

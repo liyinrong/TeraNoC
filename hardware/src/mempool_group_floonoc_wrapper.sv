@@ -57,15 +57,7 @@ module mempool_group_floonoc_wrapper
   input  fsync_rsp_t        [NumTilesPerGroup-1:0]      fsync_v_rsp_i,
 
   // RO-Cache configuration
-  input  `STRUCT_PORT(ro_cache_ctrl_t)                  ro_cache_ctrl_i,
-
-  // DMA request
-  input  `STRUCT_PORT(dma_req_t)                        dma_req_i,
-  input  logic                                          dma_req_valid_i,
-  output logic                                          dma_req_ready_o,
-
-  // DMA status
-  output `STRUCT_PORT(dma_meta_t)                       dma_meta_o
+  input  `STRUCT_PORT(ro_cache_ctrl_t)                  ro_cache_ctrl_i
 );
 
 // narrow RO request NoC
@@ -210,10 +202,6 @@ mempool_group #(
   .fsync_v_req_o            (fsync_v_req_o                  ),
   .fsync_v_rsp_i            (fsync_v_rsp_i                  ),
   .ro_cache_ctrl_i          (ro_cache_ctrl_i                ),
-  .dma_req_i                (dma_req_i                      ),
-  .dma_req_valid_i          (dma_req_valid_i                ),
-  .dma_req_ready_o          (dma_req_ready_o                ),
-  .dma_meta_o               (dma_meta_o                     ),
   `ifdef USE_WIDE_TCDM_PLANE
   .tcdm_wide_master_req_o        (tcdm_wide_master_req        ),
   .tcdm_wide_master_req_valid_o  (tcdm_wide_master_req_valid  ),

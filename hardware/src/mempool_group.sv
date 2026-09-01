@@ -70,12 +70,6 @@ module mempool_group
   input  fsync_rsp_t                      [NumTilesPerGroup-1:0]                                 fsync_v_rsp_i,
   // RO-Cache configuration
   input  `STRUCT_PORT(ro_cache_ctrl_t)                                                           ro_cache_ctrl_i,
-  // DMA request
-  input  `STRUCT_PORT(dma_req_t)                                                                 dma_req_i,
-  input  logic                                                                                   dma_req_valid_i,
-  output logic                                                                                   dma_req_ready_o,
-  // DMA status
-  output `STRUCT_PORT(dma_meta_t)                                                                dma_meta_o,
    // AXI Interface
   output `STRUCT_VECT(axi_tile_req_t,     [NumAXIMastersPerGroup-1:0])                           axi_mst_req_o,
   input  `STRUCT_VECT(axi_tile_resp_t,    [NumAXIMastersPerGroup-1:0])                           axi_mst_resp_i
@@ -146,6 +140,8 @@ module mempool_group
   axi_tile_resp_t [NumTilesPerGroup-1:0] axi_tile_resp;
   axi_tile_req_t  [NumDmasPerGroup-1:0]  axi_dma_req;
   axi_tile_resp_t [NumDmasPerGroup-1:0]  axi_dma_resp;
+  idma_reg_req_t  [NumTilesPerGroup-1:0] idma_ctrl_req;
+  idma_reg_rsp_t  [NumTilesPerGroup-1:0] idma_ctrl_rsp;
 
   for (genvar t = 0; unsigned'(t) < NumTilesPerGroup; t++) begin: gen_tiles
     tile_id_t id;
@@ -234,6 +230,8 @@ module mempool_group
       // AXI interface
       .axi_mst_req_o           (axi_tile_req[t]                                ),
       .axi_mst_resp_i          (axi_tile_resp[t]                               ),
+      .idma_ctrl_req_o         (idma_ctrl_req[t]                               ),
+      .idma_ctrl_rsp_i         (idma_ctrl_rsp[t]                               ),
       // Wake up interface
       .wake_up_i               (wake_up_q[t*NumCoresPerTile +: NumCoresPerTile]),
       // fractal_sync leaf, carried straight out to the cluster tree.
@@ -579,50 +577,27 @@ module mempool_group
   /*********
    *  DMA  *
    *********/
-  dma_req_t  dma_req_cut;
-  logic      dma_req_cut_valid;
-  logic      dma_req_cut_ready;
-  dma_meta_t dma_meta_cut;
+  axi_tile_req_t  [NumDmasPerGroup-1:0] axi_dma_premux_req;
+  axi_tile_resp_t [NumDmasPerGroup-1:0] axi_dma_premux_resp;
+  logic           [NumDmasPerGroup-1:0] idma_error;
+  idma_err_payload_t [NumDmasPerGroup-1:0] idma_error_payload;
+  logic           [NumDmasPerGroup-1:0] idma_busy;
 
-  spill_register #(
-    .T(dma_req_t)
-  ) i_dma_req_register (
-    .clk_i  (clk_i            ),
-    .rst_ni (rst_ni           ),
-    .data_i (dma_req_i        ),
-    .valid_i(dma_req_valid_i  ),
-    .ready_o(dma_req_ready_o  ),
-    .data_o (dma_req_cut      ),
-    .valid_o(dma_req_cut_valid),
-    .ready_i(dma_req_cut_ready)
-  );
-
-  `FF(dma_meta_o, dma_meta_cut, '0, clk_i, rst_ni);
-
-  dma_req_t  [NumDmasPerGroup-1:0] dma_req;
-  logic      [NumDmasPerGroup-1:0] dma_req_valid;
-  logic      [NumDmasPerGroup-1:0] dma_req_ready;
-  dma_meta_t [NumDmasPerGroup-1:0] dma_meta;
-
-  idma_distributed_midend #(
-    .NoMstPorts     (NumDmasPerGroup                   ),
-    .DmaRegionWidth (NumBanksPerGroup*4/NumDmasPerGroup),
-    .DmaRegionStart (TCDMBaseAddr                      ),
-    .DmaRegionEnd   (TCDMBaseAddr+TCDMSize             ),
-    .TransFifoDepth (16                                ),
-    .burst_req_t    (dma_req_t                         ),
-    .meta_t         (dma_meta_t                        )
-  ) i_idma_distributed_midend (
-    .clk_i       (clk_i            ),
-    .rst_ni      (rst_ni           ),
-    .burst_req_i (dma_req_cut      ),
-    .valid_i     (dma_req_cut_valid),
-    .ready_o     (dma_req_cut_ready),
-    .meta_o      (dma_meta_cut     ),
-    .burst_req_o (dma_req          ),
-    .valid_o     (dma_req_valid    ),
-    .ready_i     (dma_req_ready    ),
-    .meta_i      (dma_meta         )
+  mempool_idma_group #(
+    .NumRegs    (NumTilesPerGroup ),
+    .NumStreams (NumDmasPerGroup  )
+  ) i_mempool_idma_group (
+    .clk_i,
+    .rst_ni,
+    .testmode_i,
+    .ctrl_req_i      (idma_ctrl_req        ),
+    .ctrl_rsp_o      (idma_ctrl_rsp        ),
+    .axi_req_o       (axi_dma_premux_req   ),
+    .axi_rsp_i       (axi_dma_premux_resp  ),
+    .error_clear_i   ('0                    ),
+    .error_o         (idma_error           ),
+    .error_payload_o (idma_error_payload   ),
+    .busy_o          (idma_busy            )
   );
 
   // xbar
@@ -647,38 +622,8 @@ module mempool_group
   for (genvar d = 0; unsigned'(d) < NumDmasPerGroup; d++) begin: gen_dmas
     localparam int unsigned a = NumTilesPerGroup + d;
 
-    axi_tile_req_t  axi_dma_premux_req;
-    axi_tile_resp_t axi_dma_premux_resp;
     axi_tile_req_t  tcdm_req;
     axi_tile_resp_t tcdm_resp;
-
-    logic backend_idle;
-    logic trans_complete;
-
-    axi_dma_backend #(
-      .DataWidth       (AxiDataWidth   ),
-      .AddrWidth       (AddrWidth      ),
-      .IdWidth         (AxiTileIdWidth ),
-      .AxReqFifoDepth  (8              ),
-      .TransFifoDepth  (1              ),
-      .BufferDepth     (4              ),
-      .axi_req_t       (axi_tile_req_t ),
-      .axi_res_t       (axi_tile_resp_t),
-      .burst_req_t     (dma_req_t      ),
-      .DmaIdWidth      (1              ),
-      .DmaTracing      (0              )
-    ) i_axi_dma_backend (
-      .clk_i            (clk_i                     ),
-      .rst_ni           (rst_ni                    ),
-      .dma_id_i         (1'b0                      ),
-      .axi_dma_req_o    (axi_dma_premux_req        ),
-      .axi_dma_res_i    (axi_dma_premux_resp       ),
-      .burst_req_i      (dma_req[d]                ),
-      .valid_i          (dma_req_valid[d]          ),
-      .ready_o          (dma_req_ready[d]          ),
-      .backend_idle_o   (dma_meta[d].backend_idle  ),
-      .trans_complete_o (dma_meta[d].trans_complete)
-    );
 
     // ------------------------------------------------------
     // AXI connection to EXT/TCDM
@@ -720,8 +665,8 @@ module mempool_group
       .clk_i                (clk_i                        ),
       .rst_ni               (rst_ni                       ),
       .test_i               (1'b0                         ),
-      .slv_ports_req_i      (axi_dma_premux_req           ),
-      .slv_ports_resp_o     (axi_dma_premux_resp          ),
+      .slv_ports_req_i      (axi_dma_premux_req[d]        ),
+      .slv_ports_resp_o     (axi_dma_premux_resp[d]       ),
       .mst_ports_req_o      ({tcdm_req,axi_dma_req[d]}    ),
       .mst_ports_resp_i     ({tcdm_resp,axi_dma_resp[d]}  ),
       .addr_map_i           (addr_map                     ),

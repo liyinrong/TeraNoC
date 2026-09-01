@@ -84,6 +84,10 @@ module mempool_tile
   // AXI Interface
   output `STRUCT_PORT(axi_tile_req_t)                                             axi_mst_req_o,
   input  `STRUCT_PORT(axi_tile_resp_t)                                            axi_mst_resp_i,
+  // Group-local mainstream iDMA register port. Every tile has one independent
+  // configuration context in its group's frontend.
+  output `STRUCT_PORT(idma_reg_req_t)                                             idma_ctrl_req_o,
+  input  `STRUCT_PORT(idma_reg_rsp_t)                                             idma_ctrl_rsp_i,
   // Wake up interface
   input  logic                            [NumCoresPerTile-1:0]                   wake_up_i,
   // fractal_sync leaf: one pair per TILE, h and v, selected by id[0]
@@ -1302,16 +1306,19 @@ module mempool_tile
   logic   [NumSoCPorts-1:0] soc_data_pvalid;
   logic   [NumSoCPorts-1:0] soc_data_pready;
   // Post-demux SoC channels (gen_redmule may divert core 0's to redmule_rmcfg).
-  // Post-fsync remainder: everything that is NOT a tile-local barrier access.
-  // The fsync window is split off BEFORE the RedMulE/passthrough logic so that
-  // EVERY core reaches it, not just core 0 -- which core is the tile leader is
-  // a software choice and must not be wired in.
+  // The tile-local fsync and group-local DMA windows are split off before the
+  // RedMulE/passthrough logic so every core can win the software election.
   dreq_t  [NumSoCPorts-1:0] soc_nofs_q;
   logic   [NumSoCPorts-1:0] soc_nofs_qvalid;
   logic   [NumSoCPorts-1:0] soc_nofs_qready;
   dresp_t [NumSoCPorts-1:0] soc_nofs_p;
   logic   [NumSoCPorts-1:0] soc_nofs_pvalid;
   logic   [NumSoCPorts-1:0] soc_nofs_pready;
+
+  dreq_t  [NumSoCPorts-1:0] dma_ctrl_q;
+  logic   [NumSoCPorts-1:0] dma_ctrl_qvalid, dma_ctrl_qready;
+  dresp_t [NumSoCPorts-1:0] dma_ctrl_p;
+  logic   [NumSoCPorts-1:0] dma_ctrl_pvalid, dma_ctrl_pready;
 
   dreq_t  [NumSoCPorts-1:0] soc_mux_q;
   logic   [NumSoCPorts-1:0] soc_mux_qvalid;
@@ -1955,16 +1962,17 @@ module mempool_tile
   logic   [NumSoCPorts-1:0] fs_pvalid, fs_pready;
 
   for (genvar c = 0; c < NumSoCPorts; c++) begin: gen_fsync_demux
-    address_map_t [1:0] fs_map;
+    address_map_t [2:0] fs_map;
     assign fs_map = '{
-      '{slave_idx: 32'd1, mask: '0,                  value: '0                     },
-      '{slave_idx: 32'd0, mask: addr_t'(FSyncMask),  value: addr_t'(FSyncBaseAddr) }
+      '{slave_idx: 32'd2, mask: '0,                  value: '0                     },
+      '{slave_idx: 32'd1, mask: addr_t'(FSyncMask),  value: addr_t'(FSyncBaseAddr) },
+      '{slave_idx: 32'd0, mask: addr_t'(DMAMask),    value: addr_t'(DMABaseAddr)   }
     };
 
     snitch_addr_demux #(
-      .NrOutput     (2                   ),
+      .NrOutput     (3                   ),
       .AddressWidth (AddrWidth           ),
-      .NumRules     (2                   ),
+      .NumRules     (3                   ),
       .req_t        (snitch_pkg::dreq_t  ),
       .resp_t       (snitch_pkg::dresp_t )
     ) i_fsync_demux (
@@ -1977,14 +1985,93 @@ module mempool_tile
       .resp_payload_o (soc_data_p[c]                       ),
       .resp_valid_o   (soc_data_pvalid[c]                  ),
       .resp_ready_i   (soc_data_pready[c]                  ),
-      .req_payload_o  ({soc_nofs_q[c],      fs_q[c]      } ),
-      .req_valid_o    ({soc_nofs_qvalid[c], fs_qvalid[c] } ),
-      .req_ready_i    ({soc_nofs_qready[c], fs_qready[c] } ),
-      .resp_payload_i ({soc_nofs_p[c],      fs_p[c]      } ),
-      .resp_valid_i   ({soc_nofs_pvalid[c], fs_pvalid[c] } ),
-      .resp_ready_o   ({soc_nofs_pready[c], fs_pready[c] } ),
+      .req_payload_o  ({soc_nofs_q[c],      fs_q[c],      dma_ctrl_q[c]      } ),
+      .req_valid_o    ({soc_nofs_qvalid[c], fs_qvalid[c], dma_ctrl_qvalid[c] } ),
+      .req_ready_i    ({soc_nofs_qready[c], fs_qready[c], dma_ctrl_qready[c] } ),
+      .resp_payload_i ({soc_nofs_p[c],      fs_p[c],      dma_ctrl_p[c]      } ),
+      .resp_valid_i   ({soc_nofs_pvalid[c], fs_pvalid[c], dma_ctrl_pvalid[c] } ),
+      .resp_ready_o   ({soc_nofs_pready[c], fs_pready[c], dma_ctrl_pready[c] } ),
       .address_map_i  (fs_map                              )
     );
+  end
+
+  /************************************
+   *  Group-local iDMA register port  *
+   ************************************/
+  dreq_t                             dma_ctrl_arb_q;
+  logic                              dma_ctrl_arb_valid;
+  logic [idx_width(NumSoCPorts)-1:0] dma_ctrl_arb_idx;
+  logic                              dma_ctrl_resp_valid_q;
+  logic [idx_width(NumSoCPorts)-1:0] dma_ctrl_resp_idx_q;
+  logic [31:0]                       dma_ctrl_resp_data_q;
+  logic                              dma_ctrl_resp_error_q;
+  logic                              dma_ctrl_resp_write_q;
+  meta_id_t                          dma_ctrl_resp_id_q;
+  logic                              dma_ctrl_resp_ready;
+  logic                              dma_ctrl_can_accept;
+  logic                              dma_ctrl_req_fire;
+
+  assign dma_ctrl_resp_ready = dma_ctrl_pready[dma_ctrl_resp_idx_q];
+  assign dma_ctrl_can_accept = !dma_ctrl_resp_valid_q || dma_ctrl_resp_ready;
+  assign dma_ctrl_req_fire =
+      dma_ctrl_arb_valid & dma_ctrl_can_accept & idma_ctrl_rsp_i.ready;
+
+  rr_arb_tree #(
+    .NumIn     (NumSoCPorts        ),
+    .DataType  (snitch_pkg::dreq_t ),
+    .AxiVldRdy (1'b1               )
+  ) i_dma_ctrl_arb (
+    .clk_i,
+    .rst_ni,
+    .flush_i (1'b0                  ),
+    .rr_i    ('0                    ),
+    .req_i   (dma_ctrl_qvalid       ),
+    .gnt_o   (dma_ctrl_qready       ),
+    .data_i  (dma_ctrl_q            ),
+    .req_o   (dma_ctrl_arb_valid    ),
+    .gnt_i   (idma_ctrl_rsp_i.ready & dma_ctrl_can_accept),
+    .data_o  (dma_ctrl_arb_q        ),
+    .idx_o   (dma_ctrl_arb_idx      )
+  );
+
+  assign idma_ctrl_req_o = '{
+    addr  : dma_ctrl_arb_q.addr - DMABaseAddr,
+    write : dma_ctrl_arb_q.write,
+    wdata : dma_ctrl_arb_q.data,
+    wstrb : dma_ctrl_arb_q.strb,
+    valid : dma_ctrl_arb_valid & dma_ctrl_can_accept
+  };
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      dma_ctrl_resp_valid_q <= 1'b0;
+      dma_ctrl_resp_idx_q   <= '0;
+      dma_ctrl_resp_data_q  <= '0;
+      dma_ctrl_resp_error_q <= 1'b0;
+      dma_ctrl_resp_write_q <= 1'b0;
+      dma_ctrl_resp_id_q    <= '0;
+    end else begin
+      if (dma_ctrl_resp_valid_q && dma_ctrl_resp_ready)
+        dma_ctrl_resp_valid_q <= 1'b0;
+      if (dma_ctrl_req_fire) begin
+        dma_ctrl_resp_valid_q <= 1'b1;
+        dma_ctrl_resp_idx_q   <= dma_ctrl_arb_idx;
+        dma_ctrl_resp_data_q  <= idma_ctrl_rsp_i.rdata;
+        dma_ctrl_resp_error_q <= idma_ctrl_rsp_i.error;
+        dma_ctrl_resp_write_q <= dma_ctrl_arb_q.write;
+        dma_ctrl_resp_id_q    <= dma_ctrl_arb_q.id;
+      end
+    end
+  end
+
+  for (genvar c = 0; c < NumSoCPorts; c++) begin: gen_dma_ctrl_resp
+    assign dma_ctrl_pvalid[c] = dma_ctrl_resp_valid_q & (dma_ctrl_resp_idx_q == c);
+    assign dma_ctrl_p[c] = '{
+      data  : dma_ctrl_resp_data_q,
+      id    : dma_ctrl_resp_id_q,
+      write : dma_ctrl_resp_write_q,
+      error : dma_ctrl_resp_error_q
+    };
   end
 
   dreq_t                             fs_arb_q;

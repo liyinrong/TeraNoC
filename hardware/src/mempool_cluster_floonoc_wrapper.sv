@@ -36,14 +36,6 @@ module mempool_cluster_floonoc_wrapper
   // RO-Cache configuration
   input  ro_cache_ctrl_t               ro_cache_ctrl_i,
 
-  // DMA request
-  input  dma_req_t     [NumGroups-1:0] dma_req_i,
-  input  logic         [NumGroups-1:0] dma_req_valid_i,
-  output logic         [NumGroups-1:0] dma_req_ready_o,
-
-  // DMA status
-  output dma_meta_t    [NumGroups-1:0] dma_meta_o,
-
   // AXI Interface
   input  floo_req_t    [NumAXIMasters:0] floo_axi_req_i,
   input  floo_rsp_t    [NumAXIMasters:0] floo_axi_rsp_i,
@@ -183,36 +175,6 @@ module mempool_cluster_floonoc_wrapper
   for (genvar g = 0; unsigned'(g) < NumGroups; g++) begin : gen_ro_cache_ctrl_q
     `FF(ro_cache_ctrl_q[g], ro_cache_ctrl_i, ro_cache_ctrl_default, clk_i, rst_ni);
   end : gen_ro_cache_ctrl_q
-
-  /*********
-   *  DMA  *
-   *********/
-  dma_req_t  [NumGroups-1:0] dma_req_group, dma_req_group_q;
-  logic      [NumGroups-1:0] dma_req_group_valid, dma_req_group_q_valid;
-  logic      [NumGroups-1:0] dma_req_group_ready, dma_req_group_q_ready;
-  dma_meta_t [NumGroups-1:0] dma_meta, dma_meta_q;
-
-  assign dma_req_group = dma_req_i;
-  assign dma_req_group_valid = dma_req_valid_i;
-  assign dma_req_ready_o = dma_req_group_ready;
-  assign dma_meta_o = dma_meta_q;
-
-  `FF(dma_meta_q, dma_meta, '0, clk_i, rst_ni);
-
-  for (genvar g = 0; unsigned'(g) < NumGroups; g++) begin: gen_dma_req_group_register
-    spill_register #(
-      .T(dma_req_t)
-    ) i_dma_req_group_register (
-      .clk_i  (clk_i                   ),
-      .rst_ni (rst_ni                  ),
-      .data_i (dma_req_group[g]        ),
-      .valid_i(dma_req_group_valid[g]  ),
-      .ready_o(dma_req_group_ready[g]  ),
-      .data_o (dma_req_group_q[g]      ),
-      .valid_o(dma_req_group_q_valid[g]),
-      .ready_i(dma_req_group_q_ready[g])
-    );
-  end : gen_dma_req_group_register
 
   /************
    *  Groups  *
@@ -390,13 +352,6 @@ module mempool_cluster_floonoc_wrapper
           .fsync_v_req_o              (fsync_v_req[GId]),
           .fsync_v_rsp_i              (fsync_v_rsp[GId]),
           .ro_cache_ctrl_i            (ro_cache_ctrl_q[GId]),
-          // DMA request
-          .dma_req_i                  (dma_req_group_q[GId]),
-          .dma_req_valid_i            (dma_req_group_q_valid[GId]),
-          .dma_req_ready_o            (dma_req_group_q_ready[GId]),
-          // DMA status
-          .dma_meta_o_backend_idle_   (dma_meta[GId][1]),
-          .dma_meta_o_trans_complete_ (dma_meta[GId][0]),
           // AXI Router interfac
           .floo_axi_req_o             (floo_axi_req_out[x][y]),
           .floo_axi_rsp_o             (floo_axi_rsp_out[x][y]),
@@ -429,12 +384,6 @@ module mempool_cluster_floonoc_wrapper
           .fsync_v_req_o              (fsync_v_req[GId]),
           .fsync_v_rsp_i              (fsync_v_rsp[GId]),
           .ro_cache_ctrl_i            (ro_cache_ctrl_q[GId]),
-          // DMA request
-          .dma_req_i                  (dma_req_group_q[GId]),
-          .dma_req_valid_i            (dma_req_group_q_valid[GId]),
-          .dma_req_ready_o            (dma_req_group_q_ready[GId]),
-          // DMA status
-          .dma_meta_o                 (dma_meta[GId]),
           // AXI Router interfac
           .floo_axi_req_o             (floo_axi_req_out[x][y]),
           .floo_axi_rsp_o             (floo_axi_rsp_out[x][y]),
