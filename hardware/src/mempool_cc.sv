@@ -62,6 +62,11 @@ module mempool_cc
   // >1 only on a Spatz vector port whose VLSU chose the burst path, and then only
   // on its port 0. The tile uses it to divert the request onto the wide plane.
   output logic     [TCDMPorts-1:0][spatz_pkg::BurstLenWidth-1:0] data_qburst_len_o,
+  // Per-lane reorder-buffer base ids of the burst on each port's request. Meaningful
+  // only where data_qburst_len_o > 1. Sourced from the request itself so it is
+  // synchronous with it (the VLSU's own registers run ahead of the spill register).
+  output logic [TCDMPorts-1:0][spatz_pkg::N_FU-1:0][spatz_pkg::MemRspIdWidth-1:0]
+      data_qburst_base_ids_o,
   output logic     [TCDMPorts-1:0]          data_qvalid_o,
   input  logic     [TCDMPorts-1:0]          data_qready_i,
   input  logic     [TCDMPorts-1:0][31:0]    data_pdata_i,
@@ -521,6 +526,7 @@ needs %0d b -- lower spatz_rob_depth or widen MetaIdWidth.",
                                       spatz_mem_req[i].write,
                                       spatz_mem_req[i].id[WrFlagBit-1:0]};
     assign data_qburst_len_o[i+1]  = spatz_mem_req[i].burst_len;
+    assign data_qburst_base_ids_o[i+1] = spatz_mem_req[i].burst_base_ids;
     assign data_qvalid_o[i+1]      = spatz_mem_req_valid[i];
     assign spatz_mem_req_ready[i]  = data_qready_i[i+1];
     assign spatz_mem_rsp[i].data   = data_pdata_i[i+1];
@@ -626,6 +632,7 @@ needs %0d b -- lower spatz_rob_depth or widen MetaIdWidth.",
   // Driving the whole vector here and letting the Spatz loop override its own
   // slots would be two drivers, so drive only what this branch owns.
   assign data_qburst_len_o[0] = spatz_pkg::BurstLenWidth'(1);
+  assign data_qburst_base_ids_o[0] = '0;   // the scalar/FP port never bursts
   assign data_qvalid_o[0]     = data_req_q_valid;
   assign data_req_q_ready     = data_qready_i[0];
   assign data_resp_d.data     = data_pdata_i[0];
@@ -860,6 +867,8 @@ needs %0d b -- lower spatz_rob_depth or widen MetaIdWidth.",
   // Driving the whole vector here and letting the Spatz loop override its own
   // slots would be two drivers, so drive only what this branch owns.
   assign data_qburst_len_o[0] = spatz_pkg::BurstLenWidth'(1);
+  // No VLSU in this branch, so no burst and no reorder-buffer bases.
+  assign data_qburst_base_ids_o = '0;
   assign data_qvalid_o[0]     = data_req_qvalid;
   assign data_req_qready   = data_qready_i[0];
   assign data_resp_d.data  = data_pdata_i[0];
