@@ -200,7 +200,7 @@ vlog_defs += -DRVF=$(rvf) -DRVD=$(rvd)
 # regenerating and committing generated/spatz_pkg.sv in the SAME commit, or the
 # two silently drift.
 SPATZ_DIR := $(shell $(bender) path spatz)
-SPATZ_PKG := $(SPATZ_DIR)/hw/ip/spatz/src/generated/spatz_pkg.sv
+SPATZ_PKG := $(SPATZ_DIR)/hw/src/generated/spatz_pkg.sv
 
 ifeq ($(spatz), 1)
 # Burst emission needs a memory side that expands a burst_len>1 request into that many
