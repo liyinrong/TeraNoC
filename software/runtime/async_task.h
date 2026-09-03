@@ -42,6 +42,13 @@ typedef enum {
   TNC_GRANULARITY_WORKER = 2,
 } tnc_granularity_t;
 
+// aligned(4) is load-bearing, not cosmetic: with xpulpvect in the -march
+// string clang makes v2i16 a legal type, and a whole-struct copy of adjacent
+// uint16_t fields becomes a v2i16 load/store pair. The backend has a pattern
+// for the load but not the store, so selection aborts with
+// "Cannot select: ... store<(store (s32) ...)>". Raising the alignment keeps
+// the copy on i32 accesses. Size stays 12 B and every field offset is
+// unchanged, so this is layout-neutral.
 typedef struct {
   uint16_t task_id;
   uint16_t generation;
@@ -50,7 +57,7 @@ typedef struct {
   uint16_t tile_mask;
   uint8_t granularity;
   uint8_t reserved;
-} tnc_task_key_t;
+} __attribute__((aligned(4))) tnc_task_key_t;
 
 typedef struct {
   uint8_t kind;
