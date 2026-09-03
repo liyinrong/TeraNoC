@@ -114,10 +114,24 @@ uint32_t tnc_redmule_done(uint8_t target) {
   return tnc_counter8_done(tnc_redmule_completed(), target);
 }
 
+// Sleep on RedMulE's EOC rather than polling RUNNING_JOB.
+//
+// This is not only cheaper, it is required for the sleeping barriers to stay
+// safe. redmule_evt is OR-ed into the wake of core 0 of every RedMulE tile
+// (mempool_tile.sv:1745). Polling here left every completion pulse banked and
+// unspent in Snitch's 3-bit wake counter, so eight jobs between two sleeps
+// wrapped it and destroyed seven pending wakes -- after which the next barrier
+// wake could be lost outright.
+//
+// do/while, not while/do: entering the loop body first means the wfi always
+// runs, so a pulse that already landed is SPENT (wfi returns immediately when
+// the counter is non-zero) instead of being left as a credit. Spurious wakes
+// are harmless -- each spends exactly the credit that caused it, and the
+// predicate is re-checked every turn.
 void tnc_redmule_wait(uint8_t target) {
-  while (!tnc_redmule_done(target)) {
-    tnc_poll_backoff();
-  }
+  do {
+    mempool_wfi();
+  } while (!tnc_redmule_done(target));
   __atomic_thread_fence(__ATOMIC_ACQUIRE);
 }
 
