@@ -315,6 +315,12 @@ endif
 ifneq (0, $(strip $(noc_wide_router_remapping)))
 $(error noc_wide_router_remapping is set but the wide plane is off: set noc_req_wide_rw_channel_num >= 1)
 endif
+# A Spatz burst is serviced ONLY by the wide-plane adapter. With the plane off the VLSU
+# still emits burst_len>1 requests; they take the narrow path and each returns a SINGLE
+# beat where the VLSU is waiting for burst_len of them, so the core wedges silently.
+ifeq (1, $(strip $(spatz_burst)))
+$(error spatz_burst=1 needs the wide TCDM plane: set noc_req_wide_rw_channel_num >= 1 and noc_resp_wide_rw_channel_num >= 1)
+endif
 else
 	vlog_defs += -DUSE_WIDE_TCDM_PLANE
 # The plane needs at least one wide CLIENT. RedMulE was the only one; the Spatz

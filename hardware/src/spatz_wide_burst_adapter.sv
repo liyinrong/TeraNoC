@@ -327,13 +327,16 @@ module spatz_wide_burst_adapter
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin adpw_cnt <= 0; adpw_fired <= 1'b0; end
     else begin
-      if (state_q == Idle) adpw_cnt <= 0; else adpw_cnt <= adpw_cnt + 1;
+      if ((state_q == Idle) && !(wide_req_valid_o && !wide_req_ready_i))
+        adpw_cnt <= 0;
+      else
+        adpw_cnt <= adpw_cnt + 1;
       if ((adpw_cnt > 20000) && !adpw_fired) begin
         adpw_fired <= 1'b1;
-        $display("[ADP-WEDGE] %m t=%0t state=%0d len=%0d beats=%0d/%0d/%0d/%0d bases=%0d/%0d/%0d/%0d stall=%b wrv=%b wrr=%b",
+        $display("[ADP-WEDGE] %m t=%0t state=%0d len=%0d beats=%0d/%0d/%0d/%0d base=%0d stall=%b req_v=%b req_r=%b rsp_v=%b",
                  $time, state_q, len_q, beat_q[0], beat_q[1], beat_q[2], beat_q[3],
-                 base_id_q[0], base_id_q[1], base_id_q[2], base_id_q[3],
-                 drain_stall_i, wide_resp_valid_i, wide_req_ready_i);
+                 base_id_q, drain_stall_i, wide_req_valid_o, wide_req_ready_i,
+                 wide_resp_valid_i);
       end
     end
   end

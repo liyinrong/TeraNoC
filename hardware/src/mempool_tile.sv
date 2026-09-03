@@ -95,6 +95,12 @@ module mempool_tile
 
   typedef logic [idx_width(NumNarrowRemoteReqPortsPerTile)-1:0] remote_ports_index_t;
   typedef logic [idx_width(NumWideRemoteReqPortsPerTile)-1:0] wide_remote_ports_index_t;
+  // The wide RESPONSE select indexes the tile's LOCAL wide clients -- the demux outputs --
+  // which is a different space from the remote request ports. They coincide only while
+  // there are at most two clients; with RedMulE at slot 0 and a Spatz core at each of
+  // 1..NumCoresPerTile, reusing the remote type truncated core_id and made slots 2 and
+  // above unreachable, so those cores never received a wide response.
+  typedef logic [idx_width(NumWideLocalPorts)-1:0] wide_local_ports_index_t;
 
   typedef logic [idx_width(NumLocalPorts + NumNarrowRemoteReqPortsPerTile)-1:0] local_req_interco_addr_t;
   typedef logic [idx_width(NumLocalPorts + NumNarrowRemoteRespPortsPerTile)-1:0] local_resp_interco_addr_t;
@@ -799,10 +805,10 @@ module mempool_tile
   // tile has ONE physical wide master link, so these two crossbars -- and only these
   // -- are shared. They live at module scope rather than inside a client's generate
   // so a second client can be added without moving them again.
-  wide_remote_ports_index_t [NumWideRemoteRespPortsPerTile-1:0] remote_wide_resp_sel;
+  wide_local_ports_index_t [NumWideRemoteRespPortsPerTile-1:0] remote_wide_resp_sel;
   for (genvar r = 0; r < NumWideRemoteRespPortsPerTile; r++) begin : gen_wide_resp_sel
     assign remote_wide_resp_sel[r] =
-        wide_remote_ports_index_t'(postreg_tcdm_wide_master_resp[r].rdata.core_id);
+        wide_local_ports_index_t'(postreg_tcdm_wide_master_resp[r].rdata.core_id);
   end : gen_wide_resp_sel
 
   stream_xbar #(
