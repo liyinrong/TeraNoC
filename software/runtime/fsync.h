@@ -278,7 +278,8 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
       __atomic_load_n(&tile_cnt[tile].done_epoch, __ATOMIC_ACQUIRE);
   if (__atomic_fetch_add(&tile_cnt[tile].count, 1, __ATOMIC_RELAXED) ==
       participants - 1u) {
-    __atomic_store_n(&tile_cnt[tile].count, 0, __ATOMIC_RELAXED);
+    // Ordered by the issue_epoch release below, like the three stores after it.
+    tile_cnt[tile].count = 0;
     tile_cnt[tile].expected_level = fsync_level_of_aggr(aggr);
     tile_cnt[tile].expected_id = id;
     tile_cnt[tile].status_error = 0;

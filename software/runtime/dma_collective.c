@@ -173,12 +173,15 @@ static void dma_collective_publish(dma_collective_handle_t *handle,
                                    uint32_t descriptors) {
   dma_collective_slot_state_t *const slot_state =
       &handle->state->group[handle->group_id].slot[handle->slot];
-  __atomic_store_n(&slot_state->local_id, local_id, __ATOMIC_RELAXED);
-  __atomic_store_n(&slot_state->error, error, __ATOMIC_RELAXED);
-  __atomic_store_n(&slot_state->descriptors, descriptors, __ATOMIC_RELAXED);
-  __atomic_store_n(&slot_state->issuer_core, mempool_get_core_id(),
-                   __ATOMIC_RELAXED);
-  __atomic_store_n(&slot_state->stream, handle->stream, __ATOMIC_RELAXED);
+  // Plain volatile stores: the release store on issued_epoch below orders all
+  // of them, and every reader reaches them only after acquiring that word. A
+  // relaxed __atomic_store_n would add no ordering here but does compile to
+  // amoswap.w, which blocks the bank for an extra cycle (tcdm_adapter.sv:262).
+  slot_state->local_id = local_id;
+  slot_state->error = error;
+  slot_state->descriptors = descriptors;
+  slot_state->issuer_core = mempool_get_core_id();
+  slot_state->stream = handle->stream;
   __atomic_store_n(&slot_state->issued_epoch, handle->generation,
                    __ATOMIC_RELEASE);
   handle->local_id = local_id;
@@ -468,8 +471,8 @@ uint32_t dma_collective_wait_local(const dma_collective_handle_t *handle) {
     if (__atomic_compare_exchange_n(&slot_state->wait_epoch, &expected,
                                     handle->generation, false, __ATOMIC_ACQ_REL,
                                     __ATOMIC_ACQUIRE)) {
-      __atomic_store_n(&slot_state->poller_core, mempool_get_core_id(),
-                       __ATOMIC_RELAXED);
+      // Ordered by the ready_epoch release at the end of the drain loop.
+      slot_state->poller_core = mempool_get_core_id();
       uint32_t error = __atomic_load_n(&slot_state->error, __ATOMIC_RELAXED);
       dma_id_t completed_id = 0;
       if (handle->local_id != 0) {
@@ -479,7 +482,7 @@ uint32_t dma_collective_wait_local(const dma_collective_handle_t *handle) {
           error = wait_error;
         completed_id = dma_local_completed_id(handle->stream);
       }
-      __atomic_store_n(&slot_state->error, error, __ATOMIC_RELAXED);
+      slot_state->error = error;
 
       // Completion ids are cumulative. Retiring the named request therefore
       // also retires every older slot on the same stream, which makes an
@@ -501,7 +504,7 @@ uint32_t dma_collective_wait_local(const dma_collective_handle_t *handle) {
               !dma_local_id_done(completed_id, local_id))))
           continue;
         if (__atomic_load_n(&completed->error, __ATOMIC_RELAXED) == 0)
-          __atomic_store_n(&completed->error, error, __ATOMIC_RELAXED);
+          completed->error = error;
         __atomic_store_n(&completed->ready_epoch, issued, __ATOMIC_RELEASE);
       }
       return error;
