@@ -171,8 +171,6 @@ module mempool_tile
   // these are wires.
   logic [NumCorePorts-1:0][spatz_pkg::BurstLenWidth-1:0] cc_data_qburst_len;
   // Per-core, per-lane ROB base ids for the in-flight burst (mempool_cc.burst_base_id_o).
-  logic [NumCorePorts-1:0][spatz_pkg::N_FU-1:0][spatz_pkg::MemRspIdWidth-1:0]
-      cc_data_qburst_base_ids;
   logic     [NumCorePorts-1:0] cc_data_qvalid;
   logic     [NumCorePorts-1:0] cc_data_qready;
   data_t    [NumCorePorts-1:0] cc_data_pdata;
@@ -297,7 +295,6 @@ module mempool_tile
         .data_qstrb_o  (snitch_data_qstrb [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
         .data_qid_o    (snitch_data_qid   [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
         .data_qburst_len_o(cc_data_qburst_len[NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qburst_base_ids_o(cc_data_qburst_base_ids[NumDataPortsPerCore*c +: NumDataPortsPerCore]),
         .data_qvalid_o (cc_data_qvalid    [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
         .data_qready_i (cc_data_qready    [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
         .data_pdata_i  (cc_data_pdata     [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
@@ -1221,15 +1218,6 @@ module mempool_tile
         assign drain_stall[l] = snitch_data_pvalid[P0 + l];
       end : gen_drain_stall
 
-      // Per-lane ROB base ids. In burst mode only port P0 issues a request, so the
-      // sibling receive ports' qid lines are free -- the VLSU drives each one with
-      // that lane's own reorder-buffer base, which is what lets the lanes allocate
-      // independently (no cross-ROB id alignment invariant).
-      meta_id_t [RecvPorts-1:0] lane_base_id;
-      for (genvar l = 0; l < RecvPorts; l++) begin : gen_lane_base
-        assign lane_base_id[l] = meta_id_t'(cc_data_qburst_base_ids[P0][l]);
-      end : gen_lane_base
-
       spatz_wide_burst_adapter #(
         .RecvPorts  (RecvPorts               ),
         .RobIdWidth (spatz_pkg::MemRspIdWidth),
@@ -1242,7 +1230,6 @@ module mempool_tile
         // identically, so reuse the narrow port's rather than adding a second.
         .spatz_req_addr_i     (snitch_data_qaddr_scrambled[P0]),
         .spatz_req_id_i       (snitch_data_qid[P0]      ),
-        .spatz_req_base_id_i  (lane_base_id             ),
         .spatz_req_burst_len_i(cc_data_qburst_len[P0]   ),
         .spatz_req_valid_i    (cc_data_qvalid[P0]       ),
         .spatz_req_ready_o    (req_ready                ),

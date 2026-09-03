@@ -61,14 +61,6 @@ module spatz_wide_burst_adapter
   // ---- Spatz side: the burst-capable port (port 0) of each core ----
   input  addr_t                                    spatz_req_addr_i,
   input  meta_id_t                                 spatz_req_id_i,
-  // Per-lane reorder-buffer base ids, one per receive lane. Lane l's beats occupy
-  // ITS OWN ROB's entries base_id[l], base_id[l]+1, ... A single shared base is only
-  // correct while every ROB has allocated the same number of ids, which stops being
-  // true the moment a burst is not a whole multiple of RecvPorts (a tail) or an
-  // earlier op distributed an uneven element count across the ports (indexed and
-  // strided both do). Carrying all four bases removes that coupling: the lanes may
-  // allocate independently and no alignment invariant has to be maintained.
-  input  meta_id_t [RecvPorts-1:0]                 spatz_req_base_id_i,
   input  logic     [BurstLenWidth-1:0]             spatz_req_burst_len_i,
   input  logic                                     spatz_req_valid_i,
   output logic                                     spatz_req_ready_o,
@@ -108,7 +100,7 @@ module spatz_wide_burst_adapter
 
   state_e state_d, state_q;
 
-  meta_id_t [RecvPorts-1:0]     base_id_d, base_id_q;  // per-lane ROB id of that lane's beat 0
+  meta_id_t                     base_id_d, base_id_q;  // ROB id of every lane's beat 0
   logic [BurstLenWidth-1:0]     len_d, len_q;          // beats to return
   // Per-lane beat index. Lane l owns beats l, l+RecvPorts, l+2*RecvPorts ... -- its
   // own ROB's consecutive entries -- so each lane drains INDEPENDENTLY. A shared
@@ -180,7 +172,7 @@ module spatz_wide_burst_adapter
           // rsp==push==8 but valid_o low. Depths 16 and 32 hid it because 4 and 5 both fit.
           // The cast zero-extends (or truncates) to the id width, and the add still wraps
           // within RobIdWidth as the reorder buffer's ring requires.
-          beat_id               = base_id_q[l][RobIdWidth-1:0] + RobIdWidth'(beat_q[l]);
+          beat_id               = base_id_q[RobIdWidth-1:0] + RobIdWidth'(beat_q[l]);
           spatz_resp_valid_o[l] = 1'b1;
           spatz_resp_data_o[l]  = rdata_q[k[idx_width(WideWords)-1:0]];
           spatz_resp_id_o[l]    = meta_id_t'(beat_id);
@@ -210,7 +202,7 @@ module spatz_wide_burst_adapter
     unique case (state_q)
       Idle: begin
         if (wide_req_valid_o && wide_req_ready_i) begin
-          base_id_d = spatz_req_base_id_i;
+          base_id_d = spatz_req_id_i;
           len_d     = spatz_req_burst_len_i;
           for (int unsigned l = 0; l < RecvPorts; l++) beat_d[l] = '0;
           state_d   = Await;
@@ -290,7 +282,7 @@ module spatz_wide_burst_adapter
             if ((k < len_q) && !seen_d[k]) begin
               dbg_short_q <= dbg_short_q + 1;
               $display("[BURST-DBG] %m MISSING beat k=%0d of len=%0d (base_id=%0d)",
-                       k, len_q, base_id_q[0]);
+                       k, len_q, base_id_q);
             end
         end
         // First burst of this adapter: full picture, beat by beat.
@@ -303,7 +295,7 @@ module spatz_wide_burst_adapter
         end
         if ((dbg_bursts_q == 0) && (state_q == Await) && wide_resp_valid_i)
           $display("[BURST-DBG] %m WIDE base_id=%0d len=%0d data=%0h",
-                   base_id_q[0], len_q, wide_resp_i.data);
+                   base_id_q, len_q, wide_resp_i.data);
         if ((dbg_bursts_q == 0) && (state_q == Idle) && wide_req_valid_o && wide_req_ready_i)
           $display("[BURST-DBG] %m REQ addr=%08x id=%0d len=%0d",
                    spatz_req_addr_i, spatz_req_id_i,
