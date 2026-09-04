@@ -242,6 +242,12 @@ spatz_burst ?= 0
 # wide+burst run can be diffed by address. Debug only -- one line per load.
 spatz_ld_trace ?= 0
 
+# Single-cycle reservation of each lane's reorder-buffer id window for a burst. 0 = the
+# allocator walks one id per lane per cycle, putting that latency in front of every burst
+# request; 1 = every lane is granted its whole window at once. The window is one lane's
+# share of a full burst, so the buffer depth must be at least two windows.
+spatz_block_alloc ?= 0
+
 # Words (32 bit) in one vector-load burst. A burst is unpacked from a SINGLE wide
 # access, so this is a property of the wide plane, not of Spatz: it must be
 # wide_tcdm_data_width / 32. Derived by default; override only to burst narrower
