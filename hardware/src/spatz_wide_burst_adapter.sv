@@ -47,6 +47,9 @@ module spatz_wide_burst_adapter
   // store-ack flag mempool_cc packs directly above it -- which would make a load
   // beat look like a write acknowledgement.
   parameter int unsigned RobIdWidth    = 4,
+  // Wide accesses this adapter may keep in flight. 1 reproduces the serialised
+  // behaviour exactly; 2 is enough to overlap one round trip with the next issue.
+  parameter int unsigned NumOutstanding = 2,
   // 32-bit words in one wide access.
   parameter int unsigned WideWords     = NumSuperbankWords,
   parameter int unsigned BurstLenWidth = idx_width(WideWords + 1),
@@ -92,16 +95,19 @@ module spatz_wide_burst_adapter
   // Every lane has delivered its share of the burst.
   logic drain_done;
 
-  typedef enum logic [1:0] {
-    Idle,     // arbitrate, issue the wide request
-    Await,    // wide access outstanding
-    Drain     // unpack the wide response into beats
-  } state_e;
+  // In-flight bursts. One slot per outstanding wide access: the round trip is the
+  // expensive part, and serialising it exposed that latency on EVERY burst while the
+  // narrow path kept many word requests outstanding and hid it. Slots are issued and
+  // drained in order; a response finds its slot by the id it round-trips, so the wide
+  // plane may answer them out of order.
+  localparam int unsigned SlotSel = idx_width(NumOutstanding);
 
-  state_e state_d, state_q;
-
-  meta_id_t                     base_id_d, base_id_q;  // ROB id of every lane's beat 0
-  logic [BurstLenWidth-1:0]     len_d, len_q;          // beats to return
+  meta_id_t                   base_id_d [NumOutstanding], base_id_q [NumOutstanding];
+  logic [BurstLenWidth-1:0]   len_d     [NumOutstanding], len_q     [NumOutstanding];
+  logic [NumOutstanding-1:0]  issued_d, issued_q;   // slot holds a request in flight
+  logic [NumOutstanding-1:0]  filled_d, filled_q;   // its response has landed
+  logic [SlotSel-1:0]         wr_ptr_d, wr_ptr_q;   // next slot to issue into
+  logic [SlotSel-1:0]         rd_ptr_d, rd_ptr_q;   // slot currently draining
   // Per-lane beat index. Lane l owns beats l, l+RecvPorts, l+2*RecvPorts ... -- its
   // own ROB's consecutive entries -- so each lane drains INDEPENDENTLY. A shared
   // counter would force one stalled lane to hold up the others, and the tile must
@@ -110,7 +116,7 @@ module spatz_wide_burst_adapter
   // drain for as long as any ack is in flight.
   logic [BeatCntWidth-1:0]      beat_d [RecvPorts];
   logic [BeatCntWidth-1:0]      beat_q [RecvPorts];
-  logic [WideWords-1:0][31:0]   rdata_d, rdata_q;      // the captured wide beat
+  logic [WideWords-1:0][31:0]   rdata_d [NumOutstanding], rdata_q [NumOutstanding];
 
   // ------------------------------------------------------------------
   //  Request admission
@@ -123,7 +129,11 @@ module spatz_wide_burst_adapter
   assign burst_req = spatz_req_valid_i &&
                      (spatz_req_burst_len_i > BurstLenWidth'(1));
 
-  assign spatz_req_ready_o = burst_req && (state_q == Idle) && wide_req_ready_i;
+  // A free slot, not an idle adapter: this is what lets one burst's round trip overlap
+  // the next one's issue.
+  logic slot_free;
+  assign slot_free         = !issued_q[wr_ptr_q];
+  assign spatz_req_ready_o = burst_req && slot_free && wide_req_ready_i;
 
   // ------------------------------------------------------------------
   //  Wide request
@@ -138,11 +148,11 @@ module spatz_wide_burst_adapter
     wide_req_o.amo    = '0;
     wide_req_o.strb   = '1;
     wide_req_o.id     = spatz_req_id_i;
-    wide_req_valid_o  = (state_q == Idle) && burst_req;
+    wide_req_valid_o  = slot_free && burst_req;
   end
 
   // Accept the response only while draining is possible, i.e. not mid-drain.
-  assign wide_resp_ready_o = (state_q == Await);
+  assign wide_resp_ready_o = 1'b1;
 
   // ------------------------------------------------------------------
   //  Response unpack
@@ -153,12 +163,12 @@ module spatz_wide_burst_adapter
     spatz_resp_valid_o = '0;
     spatz_resp_data_o  = '0;
     spatz_resp_id_o    = '0;
-    if (state_q == Drain) begin
+    if (issued_q[rd_ptr_q] && filled_q[rd_ptr_q]) begin
       for (int unsigned l = 0; l < RecvPorts; l++) begin
         automatic logic [BeatCntWidth-1:0] k = BeatCntWidth'(l) +
                                                beat_q[l] * BeatCntWidth'(RecvPorts);
         automatic logic [RobIdWidth-1:0]   beat_id;
-        if (!drain_stall_i[l] && (k < BeatCntWidth'(len_q))) begin
+        if (!drain_stall_i[l] && (k < BeatCntWidth'(len_q[rd_ptr_q]))) begin
           // Entry index within THIS lane's ROB is simply the lane's beat count.
           // Truncate by assignment before widening: meta_id_t'(a + b) would evaluate
           // the sum at meta_id width and let the carry reach WrFlagBit, where
@@ -172,9 +182,9 @@ module spatz_wide_burst_adapter
           // rsp==push==8 but valid_o low. Depths 16 and 32 hid it because 4 and 5 both fit.
           // The cast zero-extends (or truncates) to the id width, and the add still wraps
           // within RobIdWidth as the reorder buffer's ring requires.
-          beat_id               = base_id_q[RobIdWidth-1:0] + RobIdWidth'(beat_q[l]);
+          beat_id               = base_id_q[rd_ptr_q][RobIdWidth-1:0] + RobIdWidth'(beat_q[l]);
           spatz_resp_valid_o[l] = 1'b1;
-          spatz_resp_data_o[l]  = rdata_q[k[idx_width(WideWords)-1:0]];
+          spatz_resp_data_o[l]  = rdata_q[rd_ptr_q][k[idx_width(WideWords)-1:0]];
           spatz_resp_id_o[l]    = meta_id_t'(beat_id);
         end
       end
@@ -185,158 +195,91 @@ module spatz_wide_burst_adapter
     drain_done = 1'b1;
     for (int unsigned l = 0; l < RecvPorts; l++)
       drain_done &= ((BeatCntWidth'(l) + beat_q[l] * BeatCntWidth'(RecvPorts)) >=
-                     BeatCntWidth'(len_q));
+                     BeatCntWidth'(len_q[rd_ptr_q]));
   end
 
   // ------------------------------------------------------------------
   //  Control
   // ------------------------------------------------------------------
   always_comb begin
-    state_d   = state_q;
-    for (int unsigned l = 0; l < RecvPorts; l++) beat_d[l] = beat_q[l];
     base_id_d = base_id_q;
     len_d     = len_q;
-    beat_d    = beat_q;
     rdata_d   = rdata_q;
+    issued_d  = issued_q;
+    filled_d  = filled_q;
+    wr_ptr_d  = wr_ptr_q;
+    rd_ptr_d  = rd_ptr_q;
+    for (int unsigned l = 0; l < RecvPorts; l++) beat_d[l] = beat_q[l];
 
-    unique case (state_q)
-      Idle: begin
-        if (wide_req_valid_o && wide_req_ready_i) begin
-          base_id_d = spatz_req_id_i;
-          len_d     = spatz_req_burst_len_i;
-          for (int unsigned l = 0; l < RecvPorts; l++) beat_d[l] = '0;
-          state_d   = Await;
+    // Issue: take a free slot. Independent of what is draining, which is the whole
+    // point -- the next request goes out while an older round trip is still in the air.
+    if (wide_req_valid_o && wide_req_ready_i) begin
+      base_id_d[wr_ptr_q] = spatz_req_id_i;
+      len_d[wr_ptr_q]     = spatz_req_burst_len_i;
+      issued_d[wr_ptr_q]  = 1'b1;
+      filled_d[wr_ptr_q]  = 1'b0;
+      wr_ptr_d            = (wr_ptr_q == SlotSel'(NumOutstanding-1)) ? '0
+                                                                    : wr_ptr_q + SlotSel'(1);
+    end
+
+    // Response: find its slot by the id it round-tripped. The wide plane may answer two
+    // outstanding bursts out of order, so this must not assume the oldest.
+    if (wide_resp_valid_i)
+      for (int unsigned sl = 0; sl < NumOutstanding; sl++)
+        if (issued_q[sl] && !filled_q[sl] &&
+            (base_id_q[sl][RobIdWidth-1:0] == wide_resp_i.id[RobIdWidth-1:0])) begin
+          rdata_d[sl]  = wide_resp_i.data;
+          filled_d[sl] = 1'b1;
         end
+
+    // Drain the oldest filled slot. One slot at a time: the lanes are a shared resource,
+    // and draining costs a few cycles against a round trip of tens.
+    if (issued_q[rd_ptr_q] && filled_q[rd_ptr_q]) begin
+      for (int unsigned l = 0; l < RecvPorts; l++) begin
+        automatic logic [BeatCntWidth-1:0] k = BeatCntWidth'(l) +
+                                               beat_q[l] * BeatCntWidth'(RecvPorts);
+        if (!drain_stall_i[l] && (k < BeatCntWidth'(len_q[rd_ptr_q])))
+          beat_d[l] = beat_q[l] + BeatCntWidth'(1);
       end
-      Await: begin
-        if (wide_resp_valid_i) begin
-          rdata_d = wide_resp_i.data;
-          state_d = Drain;
-        end
+      if (drain_done) begin
+        issued_d[rd_ptr_q] = 1'b0;
+        filled_d[rd_ptr_q] = 1'b0;
+        for (int unsigned l = 0; l < RecvPorts; l++) beat_d[l] = '0;
+        rd_ptr_d = (rd_ptr_q == SlotSel'(NumOutstanding-1)) ? '0 : rd_ptr_q + SlotSel'(1);
       end
-      Drain: begin
-        // Each lane advances only on a cycle whose beat it actually presented.
-        for (int unsigned l = 0; l < RecvPorts; l++) begin
-          automatic logic [BeatCntWidth-1:0] k = BeatCntWidth'(l) +
-                                                 beat_q[l] * BeatCntWidth'(RecvPorts);
-          if (!drain_stall_i[l] && (k < BeatCntWidth'(len_q)))
-            beat_d[l] = beat_q[l] + BeatCntWidth'(1);
-        end
-        // Done when every lane has delivered its whole share.
-        if (drain_done) state_d = Idle;
-      end
-      default: state_d = Idle;
-    endcase
+    end
   end
 
-  `FF(state_q,   state_d,   Idle)
-  `FF(base_id_q, base_id_d, '0  )
-  `FF(len_q,     len_d,     '0  )
+  `FF(issued_q, issued_d, '0)
+  `FF(filled_q, filled_d, '0)
+  `FF(wr_ptr_q, wr_ptr_d, '0)
+  `FF(rd_ptr_q, rd_ptr_d, '0)
+  for (genvar sl = 0; sl < NumOutstanding; sl++) begin : gen_slot_ff
+    `FF(base_id_q[sl], base_id_d[sl], '0)
+    `FF(len_q[sl],     len_d[sl],     '0)
+    `FF(rdata_q[sl],   rdata_d[sl],   '0)
+  end : gen_slot_ff
   for (genvar l = 0; l < RecvPorts; l++) begin : gen_beat_ff
     `FF(beat_q[l], beat_d[l], '0)
   end : gen_beat_ff
-  `FF(rdata_q,   rdata_d,   '0  )
 
-`ifndef SYNTHESIS
-  // pragma translate_off
-  // ------------------------------------------------------------------
-  //  End-to-end burst instrumentation (SPATZ_BURST_DEBUG)
-  // ------------------------------------------------------------------
-  // Self-checking rather than a dump: for each burst, record which beats were
-  // presented and confirm at completion that all len_q of them went out exactly
-  // once. That separates "the adapter mis-delivers" from "the VLSU mishandles a
-  // correctly delivered beat" -- the latter matters because TwinROB0 (receive on
-  // mem port 1) has never actually run in this build until now.
-  localparam bit BurstDbgEn = `ifdef SPATZ_BURST_DEBUG `SPATZ_BURST_DEBUG `else 0 `endif;
-  if (BurstDbgEn) begin : gen_burst_dbg
-    logic [WideWords-1:0] seen_d, seen_q;
-    int unsigned          dbg_bursts_q, dbg_stalls_q, dbg_dups_q, dbg_short_q;
-
-    always_comb begin
-      seen_d = seen_q;
-      if ((state_q == Idle) && wide_req_valid_o && wide_req_ready_i) seen_d = '0;
-      if ((state_q == Drain) && !drain_stall_i)
-        for (int unsigned l = 0; l < RecvPorts; l++) begin
-          automatic logic [BeatCntWidth-1:0] kk = beat_q + BeatCntWidth'(l);
-          if (kk < BeatCntWidth'(len_q)) seen_d[kk[idx_width(WideWords)-1:0]] = 1'b1;
-        end
-    end
-
-    always_ff @(posedge clk_i) begin
-      if (!rst_ni) begin
-        seen_q <= '0; dbg_bursts_q <= 0; dbg_stalls_q <= 0; dbg_dups_q <= 0; dbg_short_q <= 0;
-      end else begin
-        seen_q <= seen_d;
-        if ((state_q == Drain) && drain_stall_i) dbg_stalls_q <= dbg_stalls_q + 1;
-        // A beat presented onto a k already marked is a duplicate delivery.
-        if ((state_q == Drain) && !drain_stall_i)
-          for (int unsigned l = 0; l < RecvPorts; l++) begin
-            automatic logic [BeatCntWidth-1:0] kk = beat_q + BeatCntWidth'(l);
-            if ((kk < BeatCntWidth'(len_q)) && seen_q[kk[idx_width(WideWords)-1:0]])
-              dbg_dups_q <= dbg_dups_q + 1;
-          end
-        // Burst completing: every beat below len_q must have been presented.
-        if ((state_q == Drain) && (state_d == Idle)) begin
-          dbg_bursts_q <= dbg_bursts_q + 1;
-          for (int unsigned k = 0; k < WideWords; k++)
-            if ((k < len_q) && !seen_d[k]) begin
-              dbg_short_q <= dbg_short_q + 1;
-              $display("[BURST-DBG] %m MISSING beat k=%0d of len=%0d (base_id=%0d)",
-                       k, len_q, base_id_q);
-            end
-        end
-        // First burst of this adapter: full picture, beat by beat.
-        if ((dbg_bursts_q == 0) && (state_q == Drain) && !drain_stall_i) begin
-          for (int unsigned l = 0; l < RecvPorts; l++)
-            if ((beat_q + BeatCntWidth'(l)) < BeatCntWidth'(len_q))
-              $display("[BURST-DBG] %m beat k=%0d lane=%0d id=%0d data=%08x",
-                       beat_q + BeatCntWidth'(l), l,
-                       spatz_resp_id_o[l], spatz_resp_data_o[l]);
-        end
-        if ((dbg_bursts_q == 0) && (state_q == Await) && wide_resp_valid_i)
-          $display("[BURST-DBG] %m WIDE base_id=%0d len=%0d data=%0h",
-                   base_id_q, len_q, wide_resp_i.data);
-        if ((dbg_bursts_q == 0) && (state_q == Idle) && wide_req_valid_o && wide_req_ready_i)
-          $display("[BURST-DBG] %m REQ addr=%08x id=%0d len=%0d",
-                   spatz_req_addr_i, spatz_req_id_i,
-                   spatz_req_burst_len_i);
-        // Periodic census so a rare fault is still visible.
-        if (dbg_bursts_q == 64)
-          $display("[BURST-CENSUS] %m bursts=%0d stall_cycles=%0d dup_beats=%0d missing_beats=%0d",
-                   dbg_bursts_q, dbg_stalls_q, dbg_dups_q, dbg_short_q);
-      end
-    end
-  end : gen_burst_dbg
-
-  // A burst longer than one wide access cannot be served: it would need a second
-  // access this adapter never issues, and the VLSU would wait forever for the tail.
-  always_ff @(posedge clk_i) begin
-    if (rst_ni && wide_req_valid_o && wide_req_ready_i &&
-        (spatz_req_burst_len_i > BurstLenWidth'(WideWords)))
-      $fatal(1, "[spatz_wide_burst_adapter] burst_len %0d exceeds one wide access (%0d words).",
-             spatz_req_burst_len_i, WideWords);
-  end
-  // pragma translate_on
-`endif
 
 
 `ifndef SYNTHESIS
 `ifdef SPATZ_VLSU_WEDGE
-  // TEMPORARY: report an adapter that has not returned to Idle for a long time.
+  // Liveness: a slot that has been issued but never drains. Covers both a response that
+  // never arrives and a drain the lanes never let finish.
   int unsigned adpw_cnt; logic adpw_fired;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin adpw_cnt <= 0; adpw_fired <= 1'b0; end
     else begin
-      if ((state_q == Idle) && !(wide_req_valid_o && !wide_req_ready_i))
-        adpw_cnt <= 0;
-      else
-        adpw_cnt <= adpw_cnt + 1;
+      if (issued_q == '0) adpw_cnt <= 0; else adpw_cnt <= adpw_cnt + 1;
       if ((adpw_cnt > 20000) && !adpw_fired) begin
         adpw_fired <= 1'b1;
-        $display("[ADP-WEDGE] %m t=%0t state=%0d len=%0d beats=%0d/%0d/%0d/%0d base=%0d stall=%b req_v=%b req_r=%b rsp_v=%b",
-                 $time, state_q, len_q, beat_q[0], beat_q[1], beat_q[2], beat_q[3],
-                 base_id_q, drain_stall_i, wide_req_valid_o, wide_req_ready_i,
-                 wide_resp_valid_i);
+        $display("[ADP-WEDGE] %m t=%0t issued=%b filled=%b rd=%0d wr=%0d len=%0d beats=%0d/%0d/%0d/%0d base=%0d stall=%b",
+                 $time, issued_q, filled_q, rd_ptr_q, wr_ptr_q, len_q[rd_ptr_q],
+                 beat_q[0], beat_q[1], beat_q[2], beat_q[3], base_id_q[rd_ptr_q],
+                 drain_stall_i);
       end
     end
   end
