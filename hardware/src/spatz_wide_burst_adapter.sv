@@ -47,8 +47,14 @@ module spatz_wide_burst_adapter
   // store-ack flag mempool_cc packs directly above it -- which would make a load
   // beat look like a write acknowledgement.
   parameter int unsigned RobIdWidth    = 4,
-  // Wide accesses this adapter may keep in flight. 1 reproduces the serialised
-  // behaviour exactly; 2 is enough to overlap one round trip with the next issue.
+  // Wide accesses this adapter may keep in flight. This is NOT independent of Spatz:
+  // every in-flight burst holds MaxBurstWords/NrMemPorts reorder-buffer ids in EVERY
+  // lane, so the VLSU can only ever back
+  //     RobDepth * NrMemPorts / MaxBurstWords
+  // of them -- 4 at depth 16 with 16-word bursts on 4 ports. Slots beyond that can
+  // never be filled, and slots below it leave issue capacity Spatz already has unused.
+  // The tile derives the value from those three numbers; the check below enforces it.
+  // 1 reproduces the serialised behaviour exactly.
   parameter int unsigned NumOutstanding = 2,
   // 32-bit words in one wide access.
   parameter int unsigned WideWords     = NumSuperbankWords,
@@ -91,6 +97,11 @@ module spatz_wide_burst_adapter
 );
 
 `include "common_cells/registers.svh"
+
+  // Each slot buffers a whole wide word, so this is not free: it is a joint choice with
+  // the reorder-buffer depth, not a knob to raise on its own.
+  if (NumOutstanding < 1)
+    $error("NumOutstanding must be >= 1.");
 
   // Every lane has delivered its share of the burst.
   logic drain_done;

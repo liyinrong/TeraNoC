@@ -1227,6 +1227,15 @@ module mempool_tile
       spatz_wide_burst_adapter #(
         .RecvPorts  (RecvPorts               ),
         .RobIdWidth (spatz_pkg::MemRspIdWidth),
+        // Jointly determined with Spatz, not chosen freely: every in-flight burst holds
+        // MaxBurstWords/NrMemPorts ids in every lane, so the reorder buffers can back
+        // exactly RobDepth*NrMemPorts/MaxBurstWords of them. More slots could never be
+        // filled; fewer would leave issue capacity Spatz already has unused.
+        .NumOutstanding (((2**spatz_pkg::MemRspIdWidth) * NumMemPortsPerSpatz >
+                          spatz_pkg::MaxBurstWords)
+                         ? ((2**spatz_pkg::MemRspIdWidth) * NumMemPortsPerSpatz /
+                            spatz_pkg::MaxBurstWords)
+                         : 1),
         .wide_req_t (tcdm_wide_rm_req_t      ),
         .wide_resp_t(tcdm_wide_rm_resp_t     )
       ) i_spatz_wide_burst_adapter (
