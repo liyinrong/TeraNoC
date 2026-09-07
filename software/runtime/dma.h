@@ -134,6 +134,17 @@ dma_local_memcpy_nd_nonblocking(uint32_t stream, void *dest, const void *src,
       dimensions > 3 || len > UINT32_MAX || dma_local_error(stream) != 0)
     return 0;
 
+  // Only program the dimensions this descriptor actually uses. CONF's
+  // ENABLE_ND field tells the ND midend how many dimensions to walk, so the
+  // registers above that are dead -- writing them costs an MMIO round trip
+  // each (~8 cycles) for a value the engine ignores. A 1-D transfer needs 3
+  // registers, a 2-D one 6, where the unconditional form always wrote 10.
+  //
+  // The sticky-error read in the guard above is KEPT even though it is another
+  // MMIO round trip: with ErrorCap = ERROR_HANDLING the backend latches and
+  // waits for an ABORT, so pushing descriptors onto an engine that has already
+  // faulted risks a wait that never retires. Failing the launch is worth the
+  // access.
   uint32_t conf = *dma_local_reg(DMA_CONF_OFFSET);
   conf &= ~DMA_CONF_ENABLE_ND_MASK;
   if (dimensions >= 2)
@@ -142,12 +153,16 @@ dma_local_memcpy_nd_nonblocking(uint32_t stream, void *dest, const void *src,
   *dma_local_reg(DMA_SRC_ADDR_OFFSET) = (uint32_t)src;
   *dma_local_reg(DMA_DST_ADDR_OFFSET) = (uint32_t)dest;
   *dma_local_reg(DMA_LENGTH_OFFSET) = (uint32_t)len;
-  *dma_local_reg(DMA_SRC_STRIDE_2_OFFSET) = src_stride_2;
-  *dma_local_reg(DMA_DST_STRIDE_2_OFFSET) = dst_stride_2;
-  *dma_local_reg(DMA_REPS_2_OFFSET) = reps_2;
-  *dma_local_reg(DMA_SRC_STRIDE_3_OFFSET) = src_stride_3;
-  *dma_local_reg(DMA_DST_STRIDE_3_OFFSET) = dst_stride_3;
-  *dma_local_reg(DMA_REPS_3_OFFSET) = reps_3;
+  if (dimensions >= 2) {
+    *dma_local_reg(DMA_SRC_STRIDE_2_OFFSET) = src_stride_2;
+    *dma_local_reg(DMA_DST_STRIDE_2_OFFSET) = dst_stride_2;
+    *dma_local_reg(DMA_REPS_2_OFFSET) = reps_2;
+  }
+  if (dimensions >= 3) {
+    *dma_local_reg(DMA_SRC_STRIDE_3_OFFSET) = src_stride_3;
+    *dma_local_reg(DMA_DST_STRIDE_3_OFFSET) = dst_stride_3;
+    *dma_local_reg(DMA_REPS_3_OFFSET) = reps_3;
+  }
   __sync_synchronize();
   const dma_id_t id = *dma_local_reg(DMA_NEXT_ID_OFFSET(stream));
   __sync_synchronize();
