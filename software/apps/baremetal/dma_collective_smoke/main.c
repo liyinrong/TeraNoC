@@ -17,6 +17,16 @@
 #define COLLECTIVE_ROW_BYTES (NUM_BANKS * sizeof(uint32_t))
 #define COLLECTIVE_GROUP_BYTES (COLLECTIVE_ROW_BYTES / NUM_GROUPS)
 #define COLLECTIVE_OPERATIONS 2u
+
+// The operations are queued back to back and only the LAST is waited on, which
+// is the point -- completion ids are cumulative, so retiring the last retires
+// the earlier ones. That needs a slot per queued transfer. minpool's group bank
+// stripe holds exactly one (see DMA_COLLECTIVE_SLOTS), so this app cannot run
+// there; without this it fails at run time with a wall of data mismatches
+// instead of saying so.
+#if DMA_COLLECTIVE_SLOTS < COLLECTIVE_OPERATIONS
+#error "dma_collective_smoke needs one collective slot per queued operation"
+#endif
 #define COLLECTIVE_OFFSET_BYTES (COLLECTIVE_GROUP_BYTES / 2u)
 #define COLLECTIVE_BYTES                                                       \
   (3u * COLLECTIVE_ROW_BYTES + COLLECTIVE_GROUP_BYTES / 2u)
