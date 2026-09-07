@@ -671,6 +671,15 @@ package mempool_pkg;
   // has 2*log2(N) levels, of which N_ITL_LEVELS = 2*log2(N)-1 are internal;
   // IN_AGGR_WIDTH = OUT(1) + N_ITL_LEVELS + 1 and ID_WIDTH = N_ITL_LEVELS.
   // Checked against the 4x4 tree: levels 4, itl 3, aggr 5, id 3, lvl 2.
+  // KNOWN LIMITATION: this side is exact only when NumTilesPerGroup is a power
+  // of FOUR. The /2 truncates, so an odd $clog2 rounds the side DOWN and the
+  // tree ends up built for fewer tiles than the group actually holds; those
+  // tiles never reach a leaf and any barrier including one hangs silently,
+  // with no error response. 2 tiles/group yields side 1, i.e. half the group
+  // missing. Affects test_4x4noc_64core and test_4x4noc_128core only; every
+  // production flavour is a power of four (minpool 1, tensorpool256 4,
+  // mempool/terapool 16). A fix needs a rectangular leaf grid in the tree
+  // generator, not just a ceiling here.
   localparam integer unsigned FSyncTpgSide  = 1 << ($clog2(NumTilesPerGroup) / 2);
   localparam integer unsigned FSyncTileSide = NumX * FSyncTpgSide;
   localparam integer unsigned FSyncItlLevels = 2 * $clog2(FSyncTileSide) - 1;
