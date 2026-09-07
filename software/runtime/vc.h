@@ -185,6 +185,21 @@ uint32_t vc_dma_memcpy_collective_blocking(dma_collective_state_t *state,
                                            const vc_desc_t *dst,
                                            const vc_desc_t *src);
 
+// Address-derived forms. Stride, rectangle and group scope all follow from
+// the addresses, so the caller passes only (dest, src, len); exactly one side
+// must point into a VC window. Every core of the rectangle calls, with the
+// same nonzero generation, as with the descriptor forms above.
+dma_collective_handle_t
+vc_dma_memcpy_auto_nonblocking(dma_collective_state_t *state,
+                               uint32_t generation, uint32_t stream, void *dest,
+                               const void *src, size_t len);
+uint32_t
+vc_dma_memcpy_auto_wait_through(void *dest, const void *src, size_t len,
+                                const dma_collective_handle_t *last_handle);
+uint32_t vc_dma_memcpy_auto_blocking(dma_collective_state_t *state,
+                                     uint32_t generation, uint32_t stream,
+                                     void *dest, const void *src, size_t len);
+
 // --- allocator -------------------------------------------------------------
 //
 // Per group ONE arena; per level an INDEPENDENT bump pointer, so a level-k

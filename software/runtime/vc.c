@@ -316,6 +316,112 @@ uint32_t vc_dma_memcpy_collective_blocking(dma_collective_state_t *state,
 }
 
 // ---------------------------------------------------------------------------
+// Address-derived entry point
+//
+// Stride is a property of the ADDRESS SPACE, not of the call: a pointer into
+// a level-k window already implies that level's row stride, its rectangle and
+// therefore the set of groups involved. Under virtual addressing the caller
+// cannot know the stride anyway -- it is exactly what the window hides. So
+// these take only (dest, src, len) and derive the rest.
+//
+// Exactly one side must be a VC pointer. VC<->VC has no flat side to give the
+// descriptor its counterpart stride, and flat<->flat is the ordinary global
+// collective, which dma_collective_all_memcpy_* already does more cheaply.
+// ---------------------------------------------------------------------------
+
+// The level whose window contains `addr`, or VC_LEVELS if none does. The
+// windows are disjoint, so the first match is the only one.
+static uint32_t vc_level_of_addr(uint32_t addr) {
+  for (uint32_t k = 0; k < (uint32_t)VC_LEVELS; ++k) {
+    const uint32_t base = vc_window_base(k);
+    const uint32_t size = vc_window_size(k);
+    if (size != 0u && addr >= base && (addr - base) < size)
+      return k;
+  }
+  return (uint32_t)VC_LEVELS;
+}
+
+// Build both descriptors from the two addresses. Returns 0 on success.
+static uint32_t vc_dma_auto_descs(void *dest, const void *src, size_t len,
+                                  vc_desc_t *dst_desc, vc_desc_t *src_desc) {
+  const uint32_t d_addr = (uint32_t)dest;
+  const uint32_t s_addr = (uint32_t)src;
+  const uint32_t d_lvl = vc_level_of_addr(d_addr);
+  const uint32_t s_lvl = vc_level_of_addr(s_addr);
+  const uint32_t d_vc = d_lvl < (uint32_t)VC_LEVELS;
+  const uint32_t s_vc = s_lvl < (uint32_t)VC_LEVELS;
+
+  if (d_vc == s_vc || len == 0u || len > UINT32_MAX)
+    return DMA_COLLECTIVE_ERROR_ARGUMENT;
+
+  const uint32_t level = d_vc ? d_lvl : s_lvl;
+  const uint32_t vc_addr = d_vc ? d_addr : s_addr;
+  const vc_rect_t rect = vc_rect(level);
+  const vc_desc_t vd =
+      vc_descriptor(&rect, vc_addr - vc_window_base(level), (uint32_t)len);
+  if (!vc_desc_valid(&vd))
+    return DMA_COLLECTIVE_ERROR_ARGUMENT;
+
+  // The flat side must be OUTSIDE L1. Cross-group L1<->L1 needs the WP2 wide
+  // plane (see vc.h), and a global-L1 flat pointer would otherwise be accepted
+  // here and produce a transfer the engines cannot make.
+  const uint32_t flat_addr = d_vc ? s_addr : d_addr;
+  if (flat_addr < (uint32_t)NUM_BANKS * (uint32_t)L1_BANK_SIZE)
+    return DMA_COLLECTIVE_ERROR_ARGUMENT;
+
+  // The flat side is one contiguous run; the collective gives it the VC side's
+  // rectangle-row stride, which is what makes VC-local offset o hold flat
+  // byte o.
+  const vc_desc_t fd = {.base = flat_addr,
+                        .len = (uint32_t)len,
+                        .count = {1, 1},
+                        .stride = {0, 0}};
+  *dst_desc = d_vc ? vd : fd;
+  *src_desc = d_vc ? fd : vd;
+  return DMA_COLLECTIVE_OK;
+}
+
+dma_collective_handle_t
+vc_dma_memcpy_auto_nonblocking(dma_collective_state_t *state,
+                               uint32_t generation, uint32_t stream, void *dest,
+                               const void *src, size_t len) {
+  vc_desc_t dst_desc, src_desc;
+  const uint32_t error =
+      vc_dma_auto_descs(dest, src, len, &dst_desc, &src_desc);
+  if (error != DMA_COLLECTIVE_OK)
+    return vc_dma_invalid_handle(state, generation, stream, error);
+  return vc_dma_memcpy_collective_nonblocking(state, generation, stream,
+                                              &dst_desc, &src_desc);
+}
+
+uint32_t
+vc_dma_memcpy_auto_wait_through(void *dest, const void *src, size_t len,
+                                const dma_collective_handle_t *last_handle) {
+  vc_desc_t dst_desc, src_desc;
+  const uint32_t error =
+      vc_dma_auto_descs(dest, src, len, &dst_desc, &src_desc);
+  if (error != DMA_COLLECTIVE_OK)
+    return error;
+  return vc_dma_memcpy_collective_wait_through(&dst_desc, &src_desc,
+                                               last_handle);
+}
+
+uint32_t vc_dma_memcpy_auto_blocking(dma_collective_state_t *state,
+                                     uint32_t generation, uint32_t stream,
+                                     void *dest, const void *src, size_t len) {
+  vc_desc_t dst_desc, src_desc;
+  const uint32_t error =
+      vc_dma_auto_descs(dest, src, len, &dst_desc, &src_desc);
+  if (error != DMA_COLLECTIVE_OK)
+    return error;
+  const dma_collective_handle_t handle = vc_dma_memcpy_collective_nonblocking(
+      state, generation, stream, &dst_desc, &src_desc);
+  if (handle.status != DMA_COLLECTIVE_OK)
+    return handle.status;
+  return vc_dma_memcpy_collective_wait_through(&dst_desc, &src_desc, &handle);
+}
+
+// ---------------------------------------------------------------------------
 // Allocator
 // ---------------------------------------------------------------------------
 
