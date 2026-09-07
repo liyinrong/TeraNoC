@@ -44,13 +44,7 @@ typedef struct {
 } dma_collective_all_group_t;
 
 #ifdef DMA_COLLECTIVE_PROFILE
-// Phase timestamps for the submit path. Debug only; compiled out otherwise.
-uint32_t volatile dma_prof[6] __attribute__((section(".l1")));
-#define DMA_PROF(i) dma_prof[i] = (uint32_t)mempool_get_timer()
-#else
-#define DMA_PROF(i)                                                            \
-  do {                                                                         \
-  } while (0)
+dma_prof_group_t dma_prof[NUM_GROUPS] DMA_COLLECTIVE_STORAGE;
 #endif
 
 static dma_collective_tile_lock_t
@@ -528,11 +522,11 @@ dma_collective_memcpy_common(dma_collective_state_t *state,
                              uint32_t generation, uint32_t stream, void *dest,
                              const void *src, size_t len, uint32_t agent) {
   uint32_t owner = 1u;
-  DMA_PROF(0);
+  DMA_PROF(1);
   dma_collective_handle_t handle =
       agent ? dma_collective_claim_agent(state, scope, generation, stream)
             : dma_collective_claim(state, scope, generation, stream, &owner);
-  DMA_PROF(1);
+  DMA_PROF(2);
   if (handle.status != DMA_COLLECTIVE_OK || !owner)
     return handle;
 
@@ -550,19 +544,21 @@ dma_collective_memcpy_common(dma_collective_state_t *state,
       !dma_collective_scope_covers_range(scope, l1_start,
                                          l1_start + (uint32_t)len)) {
     error = DMA_COLLECTIVE_ERROR_SCOPE;
-    DMA_PROF(2);
     DMA_PROF(3);
+    DMA_PROF(4);
+    DMA_PROF(5);
   } else {
-    DMA_PROF(2);
-    dma_collective_lock();
     DMA_PROF(3);
+    dma_collective_lock();
+    DMA_PROF(4);
     local_id = dma_collective_issue_linear(
         stream, dest, src, len, handle.group_id, &error, &descriptors);
     dma_collective_unlock();
+    DMA_PROF(5);
   }
-  DMA_PROF(4);
+  DMA_PROF(6);
   dma_collective_publish(&handle, local_id, error, descriptors);
-  DMA_PROF(5);
+  DMA_PROF(7);
   return handle;
 }
 
@@ -657,6 +653,7 @@ uint32_t dma_collective_wait_local(const dma_collective_handle_t *handle) {
       if (handle->local_id != 0) {
         const uint32_t wait_error =
             dma_local_wait_id(handle->stream, handle->local_id);
+        DMA_PROF(10);
         if (error == 0)
           error = wait_error;
         completed_id = dma_local_completed_id(handle->stream);
@@ -780,6 +777,7 @@ void dma_collective_all_runtime_init(void) {
 
 uint32_t dma_collective_all_memcpy_nonblocking(void *dest, const void *src,
                                                size_t len) {
+  DMA_PROF(0);
   const uint32_t group = mempool_get_group_id();
   const dma_collective_scope_t scope = dma_collective_scope_all();
   if (!mempool_is_group_coordinator())
@@ -805,6 +803,7 @@ uint32_t dma_collective_all_memcpy_nonblocking(void *dest, const void *src,
   control->handle = handle;
   if (handle.status == DMA_COLLECTIVE_OK)
     control->generation = generation;
+  DMA_PROF(8);
   return handle.status;
 }
 
@@ -826,6 +825,7 @@ uint32_t dma_collective_all_wait(void) {
 // pays 16 remote spin-loops to establish; the tree establishes it in one
 // round trip. Errors ride the per-group report written before the barrier.
 uint32_t dma_collective_all_wait_sync(void) {
+  DMA_PROF(9);
   const uint32_t group = mempool_get_group_id();
   dma_collective_all_group_t *const control = &dma_collective_all_group[group];
   const uint32_t coordinator = mempool_is_group_coordinator();
@@ -843,6 +843,7 @@ uint32_t dma_collective_all_wait_sync(void) {
 #else
   if (coordinator) {
     error = dma_collective_wait_local(&control->handle);
+    DMA_PROF(11);
     if (error != DMA_COLLECTIVE_OK) {
       // Rare path: tell every group, then make the stores visible before the
       // barrier that releases the readers.
@@ -856,6 +857,7 @@ uint32_t dma_collective_all_wait_sync(void) {
   }
 
   fsync_barrier_all(dma_collective_fsync_cnt, mempool_get_tile_id());
+  DMA_PROF(12);
 
   // One load from this group's own banks, not a remote poll of all sixteen.
   if (coordinator && error == DMA_COLLECTIVE_OK &&
@@ -863,6 +865,7 @@ uint32_t dma_collective_all_wait_sync(void) {
           generation)
     error = control->fence_error;
   __sync_synchronize();
+  DMA_PROF(13);
   return error;
 #endif
 }

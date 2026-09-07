@@ -47,6 +47,36 @@
 #define DMA_COLLECTIVE_STORAGE                                                 \
   __attribute__((aligned(DMA_COLLECTIVE_ALIGNMENT), section(".l1")))
 
+#ifdef DMA_COLLECTIVE_PROFILE
+// Timestamps for a whole transfer, submit through fence. Debug only.
+//
+// PER GROUP, one full bank stripe each. A single shared array made every probe
+// a CONTENDED REMOTE store -- sixteen coordinators hitting one bank -- which
+// inflated each phase by tens of cycles and left the phases summing to 449
+// against a measured 708. Each coordinator now writes only its own group's
+// banks.
+//
+//  0 enter _all_ wrapper      7 publish done (leave memcpy_common)
+//  1 enter memcpy_common      8 handle stored (leave wrapper)
+//  2 claim done               9 enter the fence
+//  3 addr + scope done       10 engine reported done
+//  4 tile lock taken         11 wait_local returned (slots drained)
+//  5 descriptors issued      12 fsync barrier done
+//  6 lock released           13 fence returned
+#define DMA_PROF_SLOTS 14u
+typedef struct {
+  volatile uint32_t t[DMA_PROF_SLOTS];
+  uint32_t pad[DMA_COLLECTIVE_GROUP_WORDS - DMA_PROF_SLOTS];
+} dma_prof_group_t;
+extern dma_prof_group_t dma_prof[];
+#define DMA_PROF(i)                                                            \
+  dma_prof[mempool_get_group_id()].t[i] = (uint32_t)mempool_get_timer()
+#else
+#define DMA_PROF(i)                                                            \
+  do {                                                                         \
+  } while (0)
+#endif
+
 enum {
   DMA_COLLECTIVE_OK = 0,
   DMA_COLLECTIVE_ERROR_ARGUMENT = 0x80000001u,
