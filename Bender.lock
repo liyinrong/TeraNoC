@@ -7,8 +7,8 @@ packages:
     dependencies:
     - common_cells
   axi:
-    revision: a256a3b86394fedf19e361047fccfdd7f6ef83e4
-    version: 0.39.9
+    revision: a8c53cee2520d328d390c507c88818e8ac144c8c
+    version: 0.39.10
     source:
       Git: https://github.com/pulp-platform/axi.git
     dependencies:
@@ -25,10 +25,10 @@ packages:
     - common_cells
     - common_verification
   cluster_icache:
-    revision: 1642961b9561513f283674efc2c90f24855e8d39
-    version: 0.3.1
+    revision: null
+    version: null
     source:
-      Git: https://github.com/pulp-platform/cluster_icache.git
+      Path: hardware/deps/cluster_icache
     dependencies:
     - axi
     - common_cells
@@ -42,8 +42,8 @@ packages:
     dependencies:
     - common_cells
   common_cells:
-    revision: 9ca8a7655f741e7dd5736669a20a301325194c28
-    version: 1.39.0
+    revision: 1281545696eb3fcba50ec5b4275993476a3c710e
+    version: 1.40.0
     source:
       Git: https://github.com/pulp-platform/common_cells.git
     dependencies:
@@ -71,10 +71,10 @@ packages:
       Git: https://github.com/pulp-platform/cv32e40x.git
     dependencies: []
   floo_noc:
-    revision: c61284906a0c4d5a4955f35e693e8cc6c93689a0
-    version: 0.8.1
+    revision: null
+    version: null
     source:
-      Git: https://github.com/pulp-platform/FlooNoC.git
+      Path: hardware/deps/floo_noc
     dependencies:
     - axi
     - axi_riscv_atomics
@@ -105,10 +105,10 @@ packages:
     dependencies:
     - common_cells
   hci:
-    revision: a8d8132b7f7839fd55f92df65cdc3e361ea80a6b
-    version: 2.6.1
+    revision: null
+    version: null
     source:
-      Git: https://github.com/pulp-platform/hci.git
+      Path: hardware/deps/hci
     dependencies:
     - cluster_interconnect
     - common_cells
@@ -117,25 +117,24 @@ packages:
     - redundancy_cells
     - register_interface
   hwpe-ctrl:
-    revision: dfcf1cb746709de206377388bbcb4a3571e24f7b
-    version: 3.1.1
+    revision: 3690a3c648f120546d8de2bc583d5170c36d2f20
+    version: 2.0.0
     source:
       Git: https://github.com/pulp-platform/hwpe-ctrl.git
     dependencies:
-    - common_cells
     - tech_cells_generic
   hwpe-stream:
-    revision: 05cb8303693065812e9d6bfe10976220fb455666
-    version: 1.10.0
+    revision: null
+    version: null
     source:
-      Git: https://github.com/pulp-platform/hwpe-stream.git
+      Path: hardware/deps/hwpe-stream
     dependencies:
     - tech_cells_generic
   ibex:
-    revision: b18f7ef178ed07f5085051f96042c670a919fd5c
+    revision: null
     version: null
     source:
-      Git: https://github.com/pulp-platform/ibex.git
+      Path: hardware/deps/ibex
     dependencies:
     - tech_cells_generic
   idma:
@@ -154,11 +153,19 @@ packages:
     source:
       Git: https://github.com/pulp-platform/L2_tcdm_hybrid_interco.git
     dependencies: []
+  obi:
+    revision: 8097928cf1b43712f93d5356f336397879b4ad2c
+    version: 0.1.6
+    source:
+      Git: https://github.com/pulp-platform/obi.git
+    dependencies:
+    - common_cells
+    - common_verification
   redmule:
-    revision: 29fefc29ed4bcef6935a057076a8956b9173c2cc
+    revision: null
     version: null
     source:
-      Git: https://github.com/liyinrong/redmule.git
+      Path: hardware/deps/redmule
     dependencies:
     - common_cells
     - cv32e40p
@@ -168,6 +175,8 @@ packages:
     - hwpe-ctrl
     - hwpe-stream
     - ibex
+    - obi
+    - register_interface
     - tech_cells_generic
   redundancy_cells:
     revision: c37bdb47339bf70e8323de8df14ea8bbeafb6583
@@ -211,40 +220,21 @@ packages:
     dependencies:
     - axi
     - common_cells
-  spatz:
-    revision: 9f00472e0859b3ae1d0b5fd0eca2901166b14f7c
+  spatz_vpu:
+    revision: d8dbeb835189c8c9747e71a96fdf1d1bb7efa27c
     version: null
     source:
       Git: git@github.com:liyinrong/spatz_vpu.git
     dependencies:
-    - axi
-    - axi_riscv_atomics
     - common_cells
     - fpnew
-    - idma
-    - register_interface
-    - riscv-dbg
+    - reqrsp_interface
+    - snitch
     - tech_cells_generic
   tech_cells_generic:
-    revision: 7968dd6e6180df2c644636bc6d2908a49f2190cf
-    version: 0.2.13
+    revision: 3a3de73632a06826b1bd9c65a0a2e92b32016845
+    version: 0.2.14
     source:
       Git: https://github.com/pulp-platform/tech_cells_generic.git
     dependencies:
     - common_verification
-  obi:
-    revision: 8097928cf1b43712f93d5356f336397879b4ad2c
-    version: 0.1.6
-    source:
-      Git: https://github.com/pulp-platform/obi.git
-    dependencies:
-    - common_cells
-    - common_verification
-  riscv-dbg:
-    revision: 122510063a02e0d012f0497ffdbafca53d4e716b
-    version: 0.7.0
-    source:
-      Git: https://github.com/pulp-platform/riscv-dbg.git
-    dependencies:
-    - common_cells
-    - tech_cells_generic

@@ -224,9 +224,14 @@ OMP_RUNTIME := $(addsuffix .o,$(shell find $(OMP_DIR) -name "*.c"))
 llm_l1_bytes ?= $(shell awk 'BEGIN{print $(banking_factor)*$(n_fpu)*$(num_cores)*$(l1_bank_size)}')
 llm_port_width ?= $(shell awk 'BEGIN{print $(redmule_height)*($(redmule_regs)+1)}')
 
-data_%.h: $(DATA_DIR)/gendata_params.hjson $(DATA_DIR)/gendata_header.py \
+# Parameter source for generated data headers. Override it on the command line
+# (gendata_params=<file>) to build apps against a different sizing profile
+# without editing the default one.
+gendata_params ?= $(DATA_DIR)/gendata_params.hjson
+
+data_%.h: $(gendata_params) $(DATA_DIR)/gendata_header.py \
 	$(DATA_DIR)/gendatalib.py $(DATA_DIR)/qmath.py
-	$(python) $(DATA_DIR)/gendata_header.py --app_name $* --params $(DATA_DIR)/gendata_params.hjson --l1-bytes $(llm_l1_bytes) --port-width $(llm_port_width)
+	$(python) $(DATA_DIR)/gendata_header.py --app_name $* --params $(gendata_params) --l1-bytes $(llm_l1_bytes) --port-width $(llm_port_width)
 
 # Bootrom
 %.elf: %.S $(ROOT_DIR)/bootrom.ld $(LINKER_SCRIPT)

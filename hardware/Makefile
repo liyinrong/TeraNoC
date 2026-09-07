@@ -199,7 +199,7 @@ vlog_defs += -DRVF=$(rvf) -DRVD=$(rvd)
 # Consequence to respect: editing spatz_pkg.sv.tpl in the Spatz repository means
 # regenerating and committing generated/spatz_pkg.sv in the SAME commit, or the
 # two silently drift.
-SPATZ_DIR := $(shell $(bender) path spatz)
+SPATZ_DIR := $(shell $(bender) path spatz_vpu)
 SPATZ_PKG := $(SPATZ_DIR)/hw/src/generated/spatz_pkg.sv
 
 ifeq ($(spatz), 1)
@@ -210,7 +210,6 @@ vlog_defs += -DSPATZ_VLSU_BURST=$(spatz_burst)
 vlog_defs += -DSPATZ_LD_TRACE=$(spatz_ld_trace)
 vlog_defs += -DSPATZ_MAX_BURST_WORDS=$(spatz_max_burst_words)
 vlog_defs += -DSPATZ_VLSU_BLOCK_ALLOC=$(spatz_block_alloc)
-vlog_defs += -DSPATZ_VLSU_DUAL_LOAD=$(spatz_dual_load)
 ifeq ($(spatz_vlsu_wedge),1)
 vlog_defs += -DSPATZ_VLSU_WEDGE
 endif
@@ -219,8 +218,11 @@ endif
 vlog_defs += -DSPATZ_VLSU_ROB_DEPTH=$(spatz_rob_depth)
 vlog_defs += -DVLEN=$(vlen) -DN_IPU=$(n_ipu) -DN_FPU=$(n_fpu)
 vlog_defs += -DN_FU=$(shell awk 'BEGIN{print ($(n_ipu) > $(n_fpu)) ? $(n_ipu) : $(n_fpu)}')
-# -t mempool defines TARGET_MEMPOOL, required by the vendored Spatz RTL.
-bender_defs += -t spatz -t mempool
+# -t mempool defines TARGET_MEMPOOL, required by the Spatz RTL. -t spatz_upstream
+# selects the upstream VPU package, which is the only Spatz here, and MEMPOOL_SPATZ
+# selects its MemPool memory interface.
+bender_defs += -t spatz -t mempool -t spatz_upstream
+vlog_defs += -DMEMPOOL_SPATZ
 endif
 # --------------------------
 # AXI & DMA Configuration
