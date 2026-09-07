@@ -100,6 +100,14 @@ dma_collective_memcpy_nonblocking(dma_collective_state_t *state,
                                   uint32_t generation, uint32_t stream,
                                   void *dest, const void *src, size_t len);
 
+// Agent form of the above: the caller asserts it is the SOLE issuer for its
+// group, so the issuer election is skipped. Calling it from more than one core
+// per group is a programming error.
+dma_collective_handle_t dma_collective_memcpy_agent_nonblocking(
+    dma_collective_state_t *state, const dma_collective_scope_t *scope,
+    uint32_t generation, uint32_t stream, void *dest, const void *src,
+    size_t len);
+
 // Submit an already group-specialized 2-D transfer. This is the common lower
 // layer for virtual-cluster descriptors and manually partitioned workloads.
 dma_collective_handle_t dma_collective_submit_2d_nonblocking(

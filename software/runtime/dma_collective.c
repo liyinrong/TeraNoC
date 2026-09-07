@@ -96,6 +96,70 @@ static void dma_collective_unlock(void) {
   __atomic_store_n(&dma_collective_tile_lock[tile].value, 0, __ATOMIC_RELEASE);
 }
 
+// Claim for a caller that is the SOLE issuer of this group -- the agent path.
+//
+// The SPMD claim below must elect one issuer among every core of the group,
+// which costs a CAS plus three fenced acquire loads. dma_collective_all_* is
+// coordinator-only (see dma_collective_all_memcpy_nonblocking), so there is
+// exactly one caller and that election is provably uncontended: the CAS can
+// never fail and the non-owner path can never run.
+//
+// What does NOT go away is the slot-reuse guard. With DMA_COLLECTIVE_SLOTS
+// generations in flight, generation N reuses the slot of N-SLOTS, so that
+// transfer must have landed. A sole issuer is also the sole publisher of
+// submit_epoch/issued_epoch, so `issued == submit` holds by construction and
+// only ready_epoch has to be read -- one acquire load instead of four fenced
+// operations.
+static dma_collective_handle_t
+dma_collective_claim_agent(dma_collective_state_t *state,
+                           const dma_collective_scope_t *scope,
+                           uint32_t generation, uint32_t stream) {
+  if (state == NULL || !dma_collective_scope_valid(scope) || generation == 0 ||
+      stream >= (uint32_t)NUM_DMAS_PER_GROUP)
+    return dma_collective_invalid_handle(state, generation, stream,
+                                         DMA_COLLECTIVE_ERROR_ARGUMENT);
+
+  const uint32_t group = mempool_get_group_id();
+  if (!dma_collective_group_in_scope(scope, group))
+    return dma_collective_invalid_handle(state, generation, stream,
+                                         DMA_COLLECTIVE_ERROR_SCOPE);
+
+  const uint32_t slot = dma_collective_slot_index(generation);
+  dma_collective_slot_state_t *const slot_state =
+      &state->group[group].slot[slot];
+  dma_collective_handle_t handle = {
+      .state = state,
+      .generation = generation,
+      .slot = slot,
+      .group_id = group,
+      .base_group = scope->base_group,
+      .num_groups = scope->num_groups,
+      .stream = stream,
+      .local_id = 0,
+      .status = DMA_COLLECTIVE_OK,
+  };
+
+  const uint32_t submit =
+      __atomic_load_n(&slot_state->submit_epoch, __ATOMIC_RELAXED);
+  if (submit == generation)
+    return handle; // already claimed by this same agent; idempotent
+  if (dma_collective_epoch_done(submit, generation)) {
+    handle.status = DMA_COLLECTIVE_ERROR_STALE;
+    return handle;
+  }
+  if (submit != 0u &&
+      !dma_collective_epoch_done(
+          __atomic_load_n(&slot_state->ready_epoch, __ATOMIC_ACQUIRE),
+          submit)) {
+    handle.status = DMA_COLLECTIVE_ERROR_REUSE;
+    return handle;
+  }
+  // No CAS: a sole issuer has no competitor. Release so the drain and any
+  // observer see a consistent slot before issued_epoch is published.
+  __atomic_store_n(&slot_state->submit_epoch, generation, __ATOMIC_RELEASE);
+  return handle;
+}
+
 static dma_collective_handle_t
 dma_collective_claim(dma_collective_state_t *state,
                      const dma_collective_scope_t *scope, uint32_t generation,
@@ -179,6 +243,8 @@ static void dma_collective_publish(dma_collective_handle_t *handle,
   // amoswap.w, which blocks the bank for an extra cycle (tcdm_adapter.sv:262).
   slot_state->local_id = local_id;
   slot_state->error = error;
+  // No runtime reader for these two: dma_collective_smoke asserts on them, and
+  // a build-time gate would let that check pass vacuously. Two plain stores.
   slot_state->descriptors = descriptors;
   slot_state->issuer_core = mempool_get_core_id();
   slot_state->stream = handle->stream;
@@ -434,14 +500,15 @@ static dma_id_t dma_collective_issue_linear(uint32_t stream, void *dest,
   return last_id;
 }
 
-dma_collective_handle_t
-dma_collective_memcpy_nonblocking(dma_collective_state_t *state,
-                                  const dma_collective_scope_t *scope,
-                                  uint32_t generation, uint32_t stream,
-                                  void *dest, const void *src, size_t len) {
-  uint32_t owner;
+static dma_collective_handle_t
+dma_collective_memcpy_common(dma_collective_state_t *state,
+                             const dma_collective_scope_t *scope,
+                             uint32_t generation, uint32_t stream, void *dest,
+                             const void *src, size_t len, uint32_t agent) {
+  uint32_t owner = 1u;
   dma_collective_handle_t handle =
-      dma_collective_claim(state, scope, generation, stream, &owner);
+      agent ? dma_collective_claim_agent(state, scope, generation, stream)
+            : dma_collective_claim(state, scope, generation, stream, &owner);
   if (handle.status != DMA_COLLECTIVE_OK || !owner)
     return handle;
 
@@ -467,6 +534,29 @@ dma_collective_memcpy_nonblocking(dma_collective_state_t *state,
   }
   dma_collective_publish(&handle, local_id, error, descriptors);
   return handle;
+}
+
+// SPMD form: every core of every group in scope calls this. One wins the
+// election and issues; the others come away with the same handle.
+dma_collective_handle_t
+dma_collective_memcpy_nonblocking(dma_collective_state_t *state,
+                                  const dma_collective_scope_t *scope,
+                                  uint32_t generation, uint32_t stream,
+                                  void *dest, const void *src, size_t len) {
+  return dma_collective_memcpy_common(state, scope, generation, stream, dest,
+                                      src, len, 0u);
+}
+
+// Agent form: the caller asserts it is the SOLE issuer for its group. Skips the
+// election, which is uncontended by construction in that case. Behaviour is
+// otherwise identical; calling it from more than one core per group is a
+// programming error and will corrupt the slot.
+dma_collective_handle_t dma_collective_memcpy_agent_nonblocking(
+    dma_collective_state_t *state, const dma_collective_scope_t *scope,
+    uint32_t generation, uint32_t stream, void *dest, const void *src,
+    size_t len) {
+  return dma_collective_memcpy_common(state, scope, generation, stream, dest,
+                                      src, len, 1u);
 }
 
 dma_collective_handle_t dma_collective_submit_2d_nonblocking(
@@ -663,7 +753,7 @@ uint32_t dma_collective_all_memcpy_nonblocking(void *dest, const void *src,
   if (generation == 0)
     generation = 1;
 
-  dma_collective_handle_t handle = dma_collective_memcpy_nonblocking(
+  dma_collective_handle_t handle = dma_collective_memcpy_agent_nonblocking(
       &dma_collective_all_state, &scope, generation, 0, dest, src, len);
   if (handle.status == DMA_COLLECTIVE_ERROR_REUSE &&
       control->handle.status == DMA_COLLECTIVE_OK) {
@@ -671,7 +761,7 @@ uint32_t dma_collective_all_memcpy_nonblocking(void *dest, const void *src,
         dma_collective_wait_through(&scope, &control->handle);
     if (wait_error != DMA_COLLECTIVE_OK)
       return wait_error;
-    handle = dma_collective_memcpy_nonblocking(
+    handle = dma_collective_memcpy_agent_nonblocking(
         &dma_collective_all_state, &scope, generation, 0, dest, src, len);
   }
 
