@@ -10,13 +10,36 @@
 
 #include "dma.h"
 
-#define DMA_COLLECTIVE_SLOTS 2u
 #define DMA_COLLECTIVE_GROUP_WORDS (NUM_BANKS / NUM_GROUPS)
 #define DMA_COLLECTIVE_SLOT_FIELDS 10u
+
+// One slot per collective that can be in flight at once. The budget is the
+// group's bank stripe: the whole per-group state has to fit inside it so that
+// two groups never share a bank, which is the property the padding exists to
+// keep. A hardcoded 2 did not fit minpool at all (16 words against 20), and
+// because dma_collective.c.o links into every binary that stopped the flavour
+// from building ANY software.
+//
+// The cap stays at 2 until the _all_ API keeps a ring of handles: extra slots
+// buy nothing while each issue overwrites the last handle, and raising it
+// would silently weaken dma_collective_smoke, whose four generations currently
+// wrap the slot index and so cover reuse. Raise it with that change, and
+// lengthen the smoke to keep wrapping. The engine is not the constraint --
+// its request FIFO is 16 deep per stream (mempool_idma_group.sv:12) and every
+// accepted request gets its own id.
+#define DMA_COLLECTIVE_MAX_SLOTS 2u
+#define DMA_COLLECTIVE_SLOTS                                                   \
+  ((DMA_COLLECTIVE_GROUP_WORDS / DMA_COLLECTIVE_SLOT_FIELDS) >                 \
+           DMA_COLLECTIVE_MAX_SLOTS                                            \
+       ? DMA_COLLECTIVE_MAX_SLOTS                                              \
+       : (DMA_COLLECTIVE_GROUP_WORDS / DMA_COLLECTIVE_SLOT_FIELDS))
 #define DMA_COLLECTIVE_STATE_FIELDS                                            \
   (DMA_COLLECTIVE_SLOTS * DMA_COLLECTIVE_SLOT_FIELDS)
 #define DMA_COLLECTIVE_ALIGNMENT (NUM_BANKS * sizeof(uint32_t))
 
+#if DMA_COLLECTIVE_SLOTS < 1u
+#error "A DMA collective slot does not fit in one group bank stripe"
+#endif
 #if DMA_COLLECTIVE_GROUP_WORDS < DMA_COLLECTIVE_STATE_FIELDS
 #error "A DMA collective group state does not fit in one group bank stripe"
 #endif
