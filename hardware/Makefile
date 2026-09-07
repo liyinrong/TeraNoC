@@ -210,6 +210,7 @@ vlog_defs += -DSPATZ_VLSU_BURST=$(spatz_burst)
 vlog_defs += -DSPATZ_LD_TRACE=$(spatz_ld_trace)
 vlog_defs += -DSPATZ_MAX_BURST_WORDS=$(spatz_max_burst_words)
 vlog_defs += -DSPATZ_VLSU_BLOCK_ALLOC=$(spatz_block_alloc)
+vlog_defs += -DSPATZ_VLSU_DUAL_LOAD=$(spatz_dual_load)
 ifeq ($(spatz_vlsu_wedge),1)
 vlog_defs += -DSPATZ_VLSU_WEDGE
 endif

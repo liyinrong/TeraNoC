@@ -242,6 +242,13 @@ spatz_burst ?= 0
 # wide+burst run can be diffed by address. Debug only -- one line per load.
 spatz_ld_trace ?= 0
 
+# Vector memory instructions the VLSU may keep in flight. 1 = advance the request side
+# only when the previous instruction RETIRES, so its whole round trip is exposed between
+# instructions. 2 = advance once all of its requests have ISSUED, overlapping the older
+# instruction's responses with the younger one's issue -- which is what upstream Spatz
+# does unconditionally. Above 2 needs the no_older predicate generalised.
+spatz_dual_load ?= 1
+
 # Single-cycle reservation of each lane's reorder-buffer id window for a burst. 0 = the
 # allocator walks one id per lane per cycle, putting that latency in front of every burst
 # request; 1 = every lane is granted its whole window at once. The window is one lane's
