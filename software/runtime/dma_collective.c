@@ -249,9 +249,35 @@ static uint32_t dma_collective_group_row_range(uint32_t start, uint32_t end,
   return 1;
 }
 
+// Does every group that owns part of [start, end) lie inside the scope?
+//
+// The general answer needs one row-range test per group, which is O(NUM_GROUPS)
+// and grows with the mesh. Two cases settle it in O(1) first:
+//
+//   * a scope covering every group is a tautology -- whatever the range
+//     touches is in scope. This is the whole-cluster collective, i.e. the
+//     common case;
+//   * a range confined to ONE row touches exactly the contiguous group span
+//     [start/GROUP_BYTES, (end-1)/GROUP_BYTES] within that row, so the two
+//     endpoints answer it directly.
+//
+// Anything else (a partial scope spanning rows) falls through to the loop.
 static uint32_t
 dma_collective_scope_covers_range(const dma_collective_scope_t *scope,
                                   uint32_t start, uint32_t end) {
+  if (scope->base_group == 0u && scope->num_groups == (uint32_t)NUM_GROUPS)
+    return 1;
+
+  if (start / DMA_COLLECTIVE_ROW_BYTES ==
+      (end - 1u) / DMA_COLLECTIVE_ROW_BYTES) {
+    const uint32_t g_first =
+        (start % DMA_COLLECTIVE_ROW_BYTES) / DMA_COLLECTIVE_GROUP_BYTES;
+    const uint32_t g_last =
+        ((end - 1u) % DMA_COLLECTIVE_ROW_BYTES) / DMA_COLLECTIVE_GROUP_BYTES;
+    return g_first >= scope->base_group &&
+           g_last < scope->base_group + scope->num_groups;
+  }
+
   for (uint32_t group = 0; group < (uint32_t)NUM_GROUPS; ++group) {
     uint32_t first_row;
     uint32_t last_row;
@@ -329,6 +355,39 @@ static dma_id_t dma_collective_issue_linear(uint32_t stream, void *dest,
     *error = DMA_COLLECTIVE_ERROR_ARGUMENT;
     return 0;
   }
+  // Row-aligned fast path: O(1), one descriptor.
+  //
+  // A buffer that starts on a row boundary and spans a whole number of rows
+  // gives every group the SAME shape -- GROUP_BYTES per row, at stride
+  // ROW_BYTES, for `rows` rows -- so the head/middle/tail split below
+  // degenerates into three descriptors that describe one rectangle. Emit that
+  // rectangle directly and skip the decomposition entirely.
+  //
+  // The L2 side needs no stripe splitting either: L2_STRIPE_BYTES is
+  // groups_per_l2_bank * GROUP_BYTES by construction (config.mk derives
+  // axi_width_interleaved from the group L1 width), so a GROUP_BYTES chunk
+  // starting at a multiple of GROUP_BYTES always lies inside one stripe. The
+  // reps>1 precondition that issue_piece checks is asserted here too.
+  if ((l1_start % DMA_COLLECTIVE_ROW_BYTES) == 0u &&
+      ((uint32_t)len % DMA_COLLECTIVE_ROW_BYTES) == 0u &&
+      (DMA_COLLECTIVE_ROW_BYTES % DMA_COLLECTIVE_L2_PERIOD_BYTES) == 0u &&
+      (DMA_COLLECTIVE_L2_STRIPE_BYTES % DMA_COLLECTIVE_GROUP_BYTES) == 0u) {
+    const uint32_t rows = (uint32_t)len / DMA_COLLECTIVE_ROW_BYTES;
+    const uint32_t off = group * DMA_COLLECTIVE_GROUP_BYTES;
+    void *const piece_dest = (void *)(dest_addr + off);
+    const void *const piece_src = (const void *)(src_addr + off);
+    *descriptors = 1;
+    const dma_id_t id = dma_local_memcpy_2d_nonblocking(
+        stream, piece_dest, piece_src, DMA_COLLECTIVE_GROUP_BYTES,
+        DMA_COLLECTIVE_ROW_BYTES, DMA_COLLECTIVE_ROW_BYTES, rows);
+    if (id == 0) {
+      *error = dma_local_error(stream);
+      if (*error == 0)
+        *error = DMA_COLLECTIVE_ERROR_LAUNCH;
+    }
+    return id;
+  }
+
   if (!dma_collective_group_row_range(l1_start, l1_end, group, &first_row,
                                       &last_row))
     return 0;
