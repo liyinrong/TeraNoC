@@ -321,6 +321,28 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
     }
 #endif
   }
+  // Spend the credit the tree just deposited.
+  //
+  // fs_wake is broadcast to EVERY core of the tile, unmasked
+  // (mempool_tile.sv:1746), and nothing above ever sleeps -- mempool_wait is a
+  // delay loop -- so every core is awake when the response lands and banks a
+  // wake it never asked for (snitch.sv:447). wake_up_q is three bits and wraps
+  // without saturating, so the eighth barrier destroys all eight credits and
+  // the next mempool_wfi() sleeps forever. Measured exactly that way:
+  // dma_dedicated_bench runs 18 of these and the RTL detector fired at barrier
+  // 8 and 16, 256 cores each.
+  //
+  // This wfi cannot block. The credit is banked at the response edge, which is
+  // strictly before the done_epoch handshake above can complete, so wake_up_q
+  // is already nonzero here and wfi returns immediately while decrementing it
+  // (snitch.sv:747-757). Net credit change per barrier: zero.
+  //
+  // NOT covered: a core of this tile that is not a participant still receives
+  // the broadcast and has no drain. Partial-tile barriers (fsync_barrier_n with
+  // participants < NUM_CORES_PER_TILE) therefore still leak into the
+  // non-participants, and mixing those with sleeping barriers is unsafe.
+  mempool_wfi();
+
   if (__atomic_load_n(&tile_cnt[tile].status_error, __ATOMIC_ACQUIRE) != 0u)
     __builtin_trap();
 }
