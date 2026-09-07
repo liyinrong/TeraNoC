@@ -36,6 +36,16 @@ typedef struct {
   uint32_t padding[DMA_COLLECTIVE_GROUP_WORDS - DMA_COLLECTIVE_ALL_FIELDS];
 } dma_collective_all_group_t;
 
+#ifdef DMA_COLLECTIVE_PROFILE
+// Phase timestamps for the submit path. Debug only; compiled out otherwise.
+uint32_t volatile dma_prof[6] __attribute__((section(".l1")));
+#define DMA_PROF(i) dma_prof[i] = (uint32_t)mempool_get_timer()
+#else
+#define DMA_PROF(i)                                                            \
+  do {                                                                         \
+  } while (0)
+#endif
+
 static dma_collective_tile_lock_t
     dma_collective_tile_lock[DMA_COLLECTIVE_NUM_TILES] DMA_COLLECTIVE_STORAGE;
 static dma_collective_state_t dma_collective_all_state DMA_COLLECTIVE_STORAGE;
@@ -506,9 +516,11 @@ dma_collective_memcpy_common(dma_collective_state_t *state,
                              uint32_t generation, uint32_t stream, void *dest,
                              const void *src, size_t len, uint32_t agent) {
   uint32_t owner = 1u;
+  DMA_PROF(0);
   dma_collective_handle_t handle =
       agent ? dma_collective_claim_agent(state, scope, generation, stream)
             : dma_collective_claim(state, scope, generation, stream, &owner);
+  DMA_PROF(1);
   if (handle.status != DMA_COLLECTIVE_OK || !owner)
     return handle;
 
@@ -526,13 +538,19 @@ dma_collective_memcpy_common(dma_collective_state_t *state,
       !dma_collective_scope_covers_range(scope, l1_start,
                                          l1_start + (uint32_t)len)) {
     error = DMA_COLLECTIVE_ERROR_SCOPE;
+    DMA_PROF(2);
+    DMA_PROF(3);
   } else {
+    DMA_PROF(2);
     dma_collective_lock();
+    DMA_PROF(3);
     local_id = dma_collective_issue_linear(
         stream, dest, src, len, handle.group_id, &error, &descriptors);
     dma_collective_unlock();
   }
+  DMA_PROF(4);
   dma_collective_publish(&handle, local_id, error, descriptors);
+  DMA_PROF(5);
   return handle;
 }
 
