@@ -212,15 +212,18 @@ packages:
     - axi
     - common_cells
   spatz:
-    revision: null
+    revision: 9f00472e0859b3ae1d0b5fd0eca2901166b14f7c
     version: null
     source:
-      Path: hardware/deps/spatz
+      Git: git@github.com:liyinrong/spatz_vpu.git
     dependencies:
+    - axi
+    - axi_riscv_atomics
     - common_cells
     - fpnew
-    - reqrsp_interface
-    - snitch
+    - idma
+    - register_interface
+    - riscv-dbg
     - tech_cells_generic
   tech_cells_generic:
     revision: 7968dd6e6180df2c644636bc6d2908a49f2190cf
@@ -229,3 +232,19 @@ packages:
       Git: https://github.com/pulp-platform/tech_cells_generic.git
     dependencies:
     - common_verification
+  obi:
+    revision: 8097928cf1b43712f93d5356f336397879b4ad2c
+    version: 0.1.6
+    source:
+      Git: https://github.com/pulp-platform/obi.git
+    dependencies:
+    - common_cells
+    - common_verification
+  riscv-dbg:
+    revision: 122510063a02e0d012f0497ffdbafca53d4e716b
+    version: 0.7.0
+    source:
+      Git: https://github.com/pulp-platform/riscv-dbg.git
+    dependencies:
+    - common_cells
+    - tech_cells_generic
