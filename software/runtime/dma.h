@@ -121,6 +121,10 @@ void dma_collective_all_runtime_init(void);
 uint32_t dma_collective_all_memcpy_nonblocking(void *dest, const void *src,
                                                size_t len);
 uint32_t dma_collective_all_wait(void);
+// Hardware cross-group fence on the fractal_sync tree. Unlike the rest of the
+// _all_ API this is called by EVERY core, and only group coordinators get a
+// meaningful return code.
+uint32_t dma_collective_all_wait_sync(void);
 uint32_t dma_collective_all_memcpy_blocking(void *dest, const void *src,
                                             size_t len);
 

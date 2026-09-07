@@ -7,7 +7,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "fsync.h"
 #include "runtime.h"
+#include "synchronization.h"
 
 #define DMA_COLLECTIVE_TILE_WORDS NUM_BANKS_PER_TILE
 #define DMA_COLLECTIVE_NUM_TILES (NUM_CORES / NUM_CORES_PER_TILE)
@@ -24,7 +26,7 @@ typedef struct {
   uint32_t padding[DMA_COLLECTIVE_TILE_WORDS - 1];
 } dma_collective_tile_lock_t;
 
-#define DMA_COLLECTIVE_ALL_FIELDS 10u
+#define DMA_COLLECTIVE_ALL_FIELDS 12u
 
 #if DMA_COLLECTIVE_GROUP_WORDS < DMA_COLLECTIVE_ALL_FIELDS
 #error "The default collective control does not fit in one group bank stripe"
@@ -33,6 +35,11 @@ typedef struct {
 typedef struct {
   volatile uint32_t generation;
   dma_collective_handle_t handle;
+  // Failure report for the hardware fence. A group that fails writes its code
+  // into EVERY group's copy before the barrier, so the common path costs each
+  // reader one load from its own group's banks instead of a remote poll.
+  volatile uint32_t fence_error;
+  volatile uint32_t fence_generation;
   uint32_t padding[DMA_COLLECTIVE_GROUP_WORDS - DMA_COLLECTIVE_ALL_FIELDS];
 } dma_collective_all_group_t;
 
@@ -51,6 +58,11 @@ static dma_collective_tile_lock_t
 static dma_collective_state_t dma_collective_all_state DMA_COLLECTIVE_STORAGE;
 static dma_collective_all_group_t
     dma_collective_all_group[NUM_GROUPS] DMA_COLLECTIVE_STORAGE;
+#if FSYNC_TPG_SIDE != 0
+// One full bank stripe per tile, so a tile's counter lands in its own banks.
+static fsync_tile_counter_t dma_collective_fsync_cnt[DMA_COLLECTIVE_NUM_TILES]
+    __attribute__((aligned(FSYNC_TILE_COUNTER_ALIGNMENT), section(".l1")));
+#endif
 
 static uint32_t
 dma_collective_scope_valid(const dma_collective_scope_t *scope) {
@@ -746,12 +758,19 @@ void dma_collective_all_runtime_init(void) {
   const uint32_t group = mempool_get_group_id();
 
   dma_collective_init(&dma_collective_all_state, &scope);
+#if FSYNC_TPG_SIDE != 0
+  for (uint32_t t = mempool_get_core_id(); t < DMA_COLLECTIVE_NUM_TILES;
+       t += (uint32_t)NUM_CORES)
+    fsync_tile_counter_init(&dma_collective_fsync_cnt[t]);
+#endif
   if (mempool_is_group_coordinator()) {
     dma_collective_all_group_t *const control =
         &dma_collective_all_group[group];
     control->generation = 0;
     control->handle = dma_collective_invalid_handle(
         &dma_collective_all_state, 0, 0, DMA_COLLECTIVE_ERROR_STALE);
+    control->fence_error = 0;
+    control->fence_generation = 0;
     for (uint32_t i = 0u;
          i < DMA_COLLECTIVE_GROUP_WORDS - DMA_COLLECTIVE_ALL_FIELDS; ++i)
       control->padding[i] = 0u;
@@ -796,6 +815,56 @@ uint32_t dma_collective_all_wait(void) {
     return DMA_COLLECTIVE_ERROR_ARGUMENT;
   return dma_collective_wait_through(&scope,
                                      &dma_collective_all_group[group].handle);
+}
+
+// Hardware cross-group fence. EVERY core calls this, unlike the rest of the
+// _all_ API: the fractal_sync leaf is a TILE, so a barrier over the cluster
+// only completes if every tile triggers its shim.
+//
+// Each group's coordinator confirms its OWN engine locally, then the whole
+// machine rendezvous on the tree. That is the invariant the software fence
+// pays 16 remote spin-loops to establish; the tree establishes it in one
+// round trip. Errors ride the per-group report written before the barrier.
+uint32_t dma_collective_all_wait_sync(void) {
+  const uint32_t group = mempool_get_group_id();
+  dma_collective_all_group_t *const control = &dma_collective_all_group[group];
+  const uint32_t coordinator = mempool_is_group_coordinator();
+  const uint32_t generation = control->generation;
+  uint32_t error = DMA_COLLECTIVE_OK;
+
+#if FSYNC_TPG_SIDE == 0
+  // No square tile grid, so no tree (see FSyncTpgSide in mempool_pkg.sv).
+  // Keep the all-cores contract with the software fence underneath.
+  const dma_collective_scope_t scope = dma_collective_scope_all();
+  if (coordinator)
+    error = dma_collective_wait_through(&scope, &control->handle);
+  mempool_barrier(NUM_CORES);
+  return error;
+#else
+  if (coordinator) {
+    error = dma_collective_wait_local(&control->handle);
+    if (error != DMA_COLLECTIVE_OK) {
+      // Rare path: tell every group, then make the stores visible before the
+      // barrier that releases the readers.
+      for (uint32_t g = 0; g < (uint32_t)NUM_GROUPS; ++g) {
+        dma_collective_all_group[g].fence_error = error;
+        __atomic_store_n(&dma_collective_all_group[g].fence_generation,
+                         generation, __ATOMIC_RELEASE);
+      }
+      __sync_synchronize();
+    }
+  }
+
+  fsync_barrier_all(dma_collective_fsync_cnt, mempool_get_tile_id());
+
+  // One load from this group's own banks, not a remote poll of all sixteen.
+  if (coordinator && error == DMA_COLLECTIVE_OK &&
+      __atomic_load_n(&control->fence_generation, __ATOMIC_ACQUIRE) ==
+          generation)
+    error = control->fence_error;
+  __sync_synchronize();
+  return error;
+#endif
 }
 
 uint32_t dma_collective_all_memcpy_blocking(void *dest, const void *src,
