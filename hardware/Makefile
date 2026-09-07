@@ -202,26 +202,37 @@ vlog_defs += -DRVF=$(rvf) -DRVD=$(rvd)
 SPATZ_DIR := $(shell $(bender) path spatz_vpu)
 SPATZ_PKG := $(SPATZ_DIR)/hw/src/generated/spatz_pkg.sv
 
+# -t spatz_upstream selects the dependency's package-level sources (rvv_pkg,
+# vtl_pkg, spatz_pkg) and must be UNCONDITIONAL: mempool_cc imports spatz_pkg at
+# module scope and both it and mempool_tile size ports with BurstLenWidth, so a
+# spatz=0 build (terapool) fails to compile without them. Only the VPU RTL itself
+# is gated on `spatz` below (target all(spatz, spatz_upstream) in the manifest).
+bender_defs += -t spatz_upstream
+# The two spatz_pkg constants that reach non-Spatz RTL, therefore also defined in
+# every build: MaxBurstWords sets BurstLenWidth (a port width in mempool_cc and
+# mempool_tile) and the reorder-buffer depth sets MemRspIdWidth, which mempool_pkg
+# mirrors off the same define. The rest of the geometry (VLEN, N_IPU, N_FPU) only
+# reaches the VPU internals, so it keeps the package's own defaults when spatz=0.
+vlog_defs += -DSPATZ_MAX_BURST_WORDS=$(spatz_max_burst_words)
+# Spatz VLSU reorder-buffer depth. This is also the width root of the ROB id that
+# mempool_cc packs into meta_id, so it cannot be raised past what meta_id can carry.
+vlog_defs += -DSPATZ_VLSU_ROB_DEPTH=$(spatz_rob_depth)
+
 ifeq ($(spatz), 1)
 # Burst emission needs a memory side that expands a burst_len>1 request into that many
 # responses. Until the burst expander (narrow plane) or the wide adapter is in place,
 # spatz_burst=0 keeps the VLSU on the word-interleaved path.
 vlog_defs += -DSPATZ_VLSU_BURST=$(spatz_burst)
 vlog_defs += -DSPATZ_LD_TRACE=$(spatz_ld_trace)
-vlog_defs += -DSPATZ_MAX_BURST_WORDS=$(spatz_max_burst_words)
 vlog_defs += -DSPATZ_VLSU_BLOCK_ALLOC=$(spatz_block_alloc)
 ifeq ($(spatz_vlsu_wedge),1)
 vlog_defs += -DSPATZ_VLSU_WEDGE
 endif
-# Spatz VLSU reorder-buffer depth. This is also the width root of the ROB id that
-# mempool_cc packs into meta_id, so it cannot be raised past what meta_id can carry.
-vlog_defs += -DSPATZ_VLSU_ROB_DEPTH=$(spatz_rob_depth)
 vlog_defs += -DVLEN=$(vlen) -DN_IPU=$(n_ipu) -DN_FPU=$(n_fpu)
 vlog_defs += -DN_FU=$(shell awk 'BEGIN{print ($(n_ipu) > $(n_fpu)) ? $(n_ipu) : $(n_fpu)}')
-# -t mempool defines TARGET_MEMPOOL, required by the Spatz RTL. -t spatz_upstream
-# selects the upstream VPU package, which is the only Spatz here, and MEMPOOL_SPATZ
+# -t mempool defines TARGET_MEMPOOL, required by the Spatz RTL, and MEMPOOL_SPATZ
 # selects its MemPool memory interface.
-bender_defs += -t spatz -t mempool -t spatz_upstream
+bender_defs += -t spatz -t mempool
 vlog_defs += -DMEMPOOL_SPATZ
 endif
 # --------------------------
