@@ -144,11 +144,22 @@ dma_local_memcpy_nd_nonblocking(uint32_t stream, void *dest, const void *src,
   // each (~8 cycles) for a value the engine ignores. A 1-D transfer needs 3
   // registers, a 2-D one 6, where the unconditional form always wrote 10.
   //
-  // The sticky-error read in the guard above is KEPT even though it is another
-  // MMIO round trip: with ErrorCap = ERROR_HANDLING the backend latches and
-  // waits for an ABORT, so pushing descriptors onto an engine that has already
-  // faulted risks a wait that never retires. Failing the launch is worth the
-  // access.
+  // The sticky-error read in the guard above is kept, but NOT for the reason
+  // first given here. It is redundant for hang-avoidance: dma_local_wait_id
+  // re-reads the sticky status on every poll iteration and returns it, so a
+  // faulted engine surfaces at the wait rather than hanging it. All the guard
+  // buys is failing earlier.
+  //
+  // It is kept because removing it is free in the wrong direction -- measured
+  // 76 cycles for one 1-D descriptor with it and 76 without. An isolated probe
+  // showed 105 -> 40 for the same removal, but that shape has nothing to
+  // overlap the read; here its latency already hides behind the argument
+  // checks and the CONF access, exactly as the CONF read's own latency hides
+  // behind the address writes (shadowing CONF also gained nothing, 40 vs 44).
+  //
+  // The rule this exposes: on this register file an access is ~4 cycles of
+  // throughput, as cheap as L1. Cost comes from a dependent read with no
+  // independent work behind it, not from distance.
   uint32_t conf = *dma_local_reg(DMA_CONF_OFFSET);
   conf &= ~DMA_CONF_ENABLE_ND_MASK;
   if (dimensions >= 2)
