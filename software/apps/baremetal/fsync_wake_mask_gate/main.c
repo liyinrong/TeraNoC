@@ -42,6 +42,22 @@ static uint32_t volatile done_flag __attribute__((section(".l1")));
 static uint32_t rounds_done[NUM_CORES]
     __attribute__((aligned(NUM_BANKS * sizeof(uint32_t)), section(".l1")));
 static uint32_t volatile progress_errors __attribute__((section(".l1")));
+// Every core waits for core 0 to publish before any of them may return.
+//
+// _eoc runs after main for EVERY core (crt0.S:141) and the TB ends the run on
+// the first nonzero EOC write, so a core that leaves a broken barrier early
+// terminates the simulation while core 0 is still verifying -- traced exactly
+// that: the excluded lane reached _eoc at cycle 3775 and killed the run at
+// 3784, with core 0 stopped mid progress-check at 0x80000400. The result was a
+// silent retval=0, which a runner reads as a pass.
+static uint32_t volatile published __attribute__((section(".l1")));
+// Direct test of the property: did this core leave a software barrier BEFORE
+// every core arrived? Each core counts itself in, then checks the total after
+// the barrier; a core woken by stale pending sees fewer than NUM_CORES. The
+// fsync barriers themselves stay correct without the unsubscribe -- measured --
+// so progress_errors alone cannot see this.
+static uint32_t volatile arrived __attribute__((section(".l1")));
+static uint32_t volatile early_exit_errors __attribute__((section(".l1")));
 static uint32_t volatile rounds __attribute__((section(".l1")));
 
 int main() {
@@ -56,6 +72,9 @@ int main() {
     done_flag = 0u;
     rounds = 0u;
     progress_errors = 0u;
+    published = 0u;
+    arrived = 0u;
+    early_exit_errors = 0u;
   }
   rounds_done[core] = 0u;
   for (uint32_t t = core; t < GATE_TILES; t += NUM_CORES)
@@ -87,6 +106,12 @@ int main() {
   }
   mempool_barrier(NUM_CORES);
 
+  __atomic_fetch_add(&arrived, 1u, __ATOMIC_RELAXED);
+  mempool_barrier(NUM_CORES);
+  if (__atomic_load_n(&arrived, __ATOMIC_ACQUIRE) != (uint32_t)NUM_CORES)
+    __atomic_fetch_add(&early_exit_errors, 1u, __ATOMIC_RELAXED);
+  mempool_barrier(NUM_CORES);
+
   // Every participant must have completed every round. A core that left a
   // barrier early stops short, which is exactly the stale-pending failure.
   if (core == 0u)
@@ -98,12 +123,18 @@ int main() {
   mempool_barrier(NUM_CORES);
 
   if (core == 0u)
-    printf("[fsync_wake_mask] progress_errors=%u\n", (unsigned)progress_errors);
+    printf("[fsync_wake_mask] progress_errors=%u early_exit=%u\n",
+           (unsigned)progress_errors, (unsigned)early_exit_errors);
   if (core == 0u)
     printf("[fsync_wake_mask] barriers=%u participants=%u mask=0x%x "
            "excluded_lane=%u\n",
            (unsigned)rounds, (unsigned)(NUM_CORES_PER_TILE - 1),
            (unsigned)fsync_wake_mask(), (unsigned)(NUM_CORES_PER_TILE - 1));
-  mempool_barrier(NUM_CORES);
-  return (int)progress_errors;
+  if (core == 0u)
+    __atomic_store_n(&published, 1u, __ATOMIC_RELEASE);
+  // Deliberately a spin, not a barrier: a broken barrier is what is under test,
+  // so the exit path must not depend on one.
+  while (__atomic_load_n(&published, __ATOMIC_ACQUIRE) == 0u)
+    mempool_wait(16u);
+  return (int)(progress_errors + early_exit_errors);
 }
