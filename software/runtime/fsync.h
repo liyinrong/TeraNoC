@@ -53,6 +53,8 @@
 #define FSYNC_SUBSCRIBE_REG_OFFSET 0x20u
 #define FSYNC_CAUSE_REG_OFFSET 0x30u
 #define FSYNC_EVT_FSYNC 0x1u
+#define FSYNC_EVT_DMA 0x2u     // group engine went idle (busy falling)
+#define FSYNC_EVT_DMA_ERR 0x4u // group engine latched a fault
 
 #define FSYNC_CONTROL_TRIGGER (1u << 0)
 #define FSYNC_CONTROL_CLEAR (1u << 1)

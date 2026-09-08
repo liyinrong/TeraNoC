@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "addrmap.h"
+#include "fsync.h"
 #include "runtime.h"
 
 // iDMA v0.6.5 reg32_3d register map. Every tile has an independent descriptor
@@ -109,6 +110,39 @@ static inline uint32_t dma_local_wait(uint32_t stream) {
       return error;
     mempool_wait(4u);
   }
+  __sync_synchronize();
+  return dma_local_error(stream);
+}
+
+// Sleep until this group's engine is idle, instead of polling done_id.
+//
+// The iDMA exposes no completion pulse, so the event unit derives one from busy
+// FALLING. That is exact while a single transfer is outstanding -- the solo
+// collective's contract -- and conservative otherwise: it fires when the last
+// queued transfer retires, not a named one. Do not build a per-id sleep on it.
+//
+// Order matters. Subscribe BEFORE testing idle: an edge that lands after the
+// subscribe is recorded in the level-held pending and the wfi returns at once,
+// but one that landed before the subscribe was never recorded and the core
+// would sleep forever. The loop re-tests because a wfi can also return for an
+// unrelated wake.
+//
+// The subscription is restored to the barrier event on the way out. A core that
+// stayed subscribed to a source it no longer sleeps for accumulates pending and
+// wakes early from the next barrier.
+static inline uint32_t dma_local_wait_sleep(uint32_t stream) {
+  if (stream >= (uint32_t)NUM_DMAS_PER_GROUP)
+    return DMA_LOCAL_ERROR_ARGUMENT;
+  fsync_subscribe_self(FSYNC_EVT_DMA | FSYNC_EVT_DMA_ERR);
+  while (!dma_local_idle(stream)) {
+    const uint32_t error = dma_local_error(stream);
+    if (error != 0) {
+      fsync_subscribe_self(FSYNC_EVT_FSYNC);
+      return error;
+    }
+    mempool_wfi();
+  }
+  fsync_subscribe_self(FSYNC_EVT_FSYNC);
   __sync_synchronize();
   return dma_local_error(stream);
 }
