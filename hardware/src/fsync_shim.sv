@@ -31,6 +31,16 @@
 //   +0x04 ID      W   scope id, bit 0 selects h (even) or v (odd)
 //   +0x08 CONTROL W   bit0 = trigger, bit1 = clear sticky error
 //   +0x0C STATUS  R   {rsp_id, lvl, error, BUSY(bit2), done}
+//   +0x10 WAKEMSK RW  one bit per core of the tile; 1 = this core receives the
+//                     tree's wake. Resets to all-ones, which is the historical
+//                     behaviour.
+//
+// WAKEMSK exists because fs_wake is broadcast to every core of the tile and
+// wake_up_q is a saturating-free 3-bit counter: a core that receives the wake
+// without ever sleeping for it banks a credit per barrier, and the eighth wrap
+// destroys all eight. That is harmless while every core of the tile takes part
+// in every barrier, and a latent hang as soon as one does not -- a dedicated
+// DMA/control core in the tile being exactly that case.
 //
 // BUSY deliberately sits at bit 2, matching MAGIA's FSYNC_MM_STATUS_BUSY_MASK.
 // The bus port is intentionally generic (req/we/addr/wdata/rdata) rather than
@@ -41,6 +51,7 @@ module fsync_shim #(
   parameter int unsigned AggrWidth   = 1,
   parameter int unsigned IdWidth     = 1,
   parameter int unsigned LvlWidth    = 1,
+  parameter int unsigned NumCores    = 1,
   parameter type         fsync_req_t = logic,
   parameter type         fsync_rsp_t = logic
 ) (
@@ -49,7 +60,7 @@ module fsync_shim #(
   // Register port. Bus-agnostic on purpose; the tile adapts its own dialect.
   input  logic                 reg_req_i,
   input  logic                 reg_we_i,
-  input  logic [3:0]           reg_addr_i,   // byte offset inside the region
+  input  logic [4:0]           reg_addr_i,   // byte offset inside the region
   input  logic [31:0]          reg_wdata_i,
   output logic [31:0]          reg_rdata_o,
   // Direct trigger, kept for the unit test and for a future in-tile requester
@@ -65,6 +76,7 @@ module fsync_shim #(
   input  fsync_rsp_t           v_rsp_i,
   // To the tile's cores.
   output logic                 wake_o,
+  output logic [NumCores-1:0]  wake_mask_o,
   output logic                 error_o,
   output logic                 busy_o,
   output logic [LvlWidth-1:0]  lvl_o,
@@ -85,13 +97,15 @@ module fsync_shim #(
   assign err  = h_rsp_i.error | v_rsp_i.error;
 
   // Register file, MAGIA-compatible offsets.
-  localparam logic [3:0] REG_AGGR    = 4'h0;
-  localparam logic [3:0] REG_ID      = 4'h4;
-  localparam logic [3:0] REG_CONTROL = 4'h8;
-  localparam logic [3:0] REG_STATUS  = 4'hC;
+  localparam logic [4:0] REG_AGGR     = 5'h00;
+  localparam logic [4:0] REG_ID       = 5'h04;
+  localparam logic [4:0] REG_CONTROL  = 5'h08;
+  localparam logic [4:0] REG_STATUS   = 5'h0C;
+  localparam logic [4:0] REG_WAKE_MSK = 5'h10;
 
   logic [AggrWidth-1:0] reg_aggr_q;
   logic [IdWidth-1:0]   reg_id_q;
+  logic [NumCores-1:0]  reg_wake_mask_q;
   logic                 reg_wr;
   logic                 reg_trigger, reg_clear;
 
@@ -101,11 +115,15 @@ module fsync_shim #(
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      reg_aggr_q <= '0;
-      reg_id_q   <= '0;
+      reg_aggr_q      <= '0;
+      reg_id_q        <= '0;
+      // Every core wakes, so a design that never writes the mask behaves
+      // exactly as before it existed.
+      reg_wake_mask_q <= '1;
     end else if (reg_wr) begin
-      if (reg_addr_i == REG_AGGR) reg_aggr_q <= reg_wdata_i[AggrWidth-1:0];
-      if (reg_addr_i == REG_ID)   reg_id_q   <= reg_wdata_i[IdWidth-1:0];
+      if (reg_addr_i == REG_AGGR)     reg_aggr_q      <= reg_wdata_i[AggrWidth-1:0];
+      if (reg_addr_i == REG_ID)       reg_id_q        <= reg_wdata_i[IdWidth-1:0];
+      if (reg_addr_i == REG_WAKE_MSK) reg_wake_mask_q <= reg_wdata_i[NumCores-1:0];
     end
   end
 
@@ -118,6 +136,9 @@ module fsync_shim #(
       reg_rdata_o[2]  = busy_q;     // FSYNC_MM_STATUS_BUSY_MASK
       reg_rdata_o[7:4]                 = lvl_q;
       reg_rdata_o[8+IdWidth-1 -: IdWidth] = rsp_id_q;
+    end
+    if (reg_req_i && !reg_we_i && reg_addr_i == REG_WAKE_MSK) begin
+      reg_rdata_o[NumCores-1:0] = reg_wake_mask_q;
     end
   end
 
@@ -183,7 +204,8 @@ module fsync_shim #(
     v_req_o.sync     = sync_q &  id_q[0];
   end
 
-  assign wake_o   = wake;
+  assign wake_o     = wake;
+  assign wake_mask_o = reg_wake_mask_q;
   assign busy_o   = busy_q;
   assign error_o  = error_q;
   assign lvl_o    = lvl_q;
