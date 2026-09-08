@@ -48,6 +48,7 @@
 #define FSYNC_CONTROL_REG_OFFSET (0x08)
 #define FSYNC_STATUS_REG_OFFSET (0x0C)
 #define FSYNC_WAKE_MASK_REG_OFFSET 0x10u
+#define FSYNC_WAKE_CLEAR_REG_OFFSET 0x14u
 
 #define FSYNC_CONTROL_TRIGGER (1u << 0)
 #define FSYNC_CONTROL_CLEAR (1u << 1)
@@ -251,10 +252,13 @@ static inline uint32_t fsync_wake_mask(void) {
 
 // Drop this core out of the tile's barrier wakes. Call from a core that will
 // not participate, BEFORE the others start running barriers.
+// Single write, no read-modify-write: several cores of a tile may call this
+// concurrently. Doing it as a RMW on the shared mask loses updates -- measured
+// as 1024 missed wake-ups when three cores per tile raced.
 static inline void fsync_wake_mask_exclude_self(void) {
   const uint32_t bit =
       1u << (mempool_get_core_id() % (uint32_t)NUM_CORES_PER_TILE);
-  fsync_set_wake_mask(fsync_wake_mask() & ~bit);
+  *(volatile uint32_t *)(FSYNC_BASE + FSYNC_WAKE_CLEAR_REG_OFFSET) = bit;
 }
 
 static inline void fsync_clear_error(void) {

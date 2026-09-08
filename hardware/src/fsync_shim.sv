@@ -31,6 +31,11 @@
 //   +0x04 ID      W   scope id, bit 0 selects h (even) or v (odd)
 //   +0x08 CONTROL W   bit0 = trigger, bit1 = clear sticky error
 //   +0x0C STATUS  R   {rsp_id, lvl, error, BUSY(bit2), done}
+//   +0x14 WAKECLR W   write-1-to-clear on WAKEMSK. A core removes ITSELF with a
+//                     single write; the read-modify-write that +0x10 forces is
+//                     a lost-update race when several cores of the tile do it
+//                     at once, which cost 1024 missed wake-ups the first time
+//                     it was exercised.
 //   +0x10 WAKEMSK RW  one bit per core of the tile; 1 = this core receives the
 //                     tree's wake. Resets to all-ones, which is the historical
 //                     behaviour.
@@ -102,6 +107,7 @@ module fsync_shim #(
   localparam logic [4:0] REG_CONTROL  = 5'h08;
   localparam logic [4:0] REG_STATUS   = 5'h0C;
   localparam logic [4:0] REG_WAKE_MSK = 5'h10;
+  localparam logic [4:0] REG_WAKE_CLR = 5'h14;
 
   logic [AggrWidth-1:0] reg_aggr_q;
   logic [IdWidth-1:0]   reg_id_q;
@@ -124,6 +130,10 @@ module fsync_shim #(
       if (reg_addr_i == REG_AGGR)     reg_aggr_q      <= reg_wdata_i[AggrWidth-1:0];
       if (reg_addr_i == REG_ID)       reg_id_q        <= reg_wdata_i[IdWidth-1:0];
       if (reg_addr_i == REG_WAKE_MSK) reg_wake_mask_q <= reg_wdata_i[NumCores-1:0];
+      // Write-1-to-clear: independent of the current value, so concurrent
+      // callers from different cores of the tile cannot lose each other's bits.
+      if (reg_addr_i == REG_WAKE_CLR)
+        reg_wake_mask_q <= reg_wake_mask_q & ~reg_wdata_i[NumCores-1:0];
     end
   end
 
