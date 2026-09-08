@@ -148,10 +148,28 @@ _jump_main:
     call    main
 
 _eoc:
+    // ONLY hart 0 ends the run.
+    //
+    // Every core reaches here after main, and the testbench stops on the first
+    // nonzero write to the EOC register. So any core that escaped a broken
+    // barrier used to terminate the simulation while the rest were still
+    // working -- traced exactly that: a core hit _eoc at cycle 3775 and killed
+    // the run at 3784, with hart 0 nine cycles away from printing the failure
+    // it had just detected. The run reported retval=0 and no output, which a
+    // runner reads as a pass.
+    //
+    // Gating on hart 0 makes the exit deterministic: a healthy program ends
+    // exactly as before, because every app finishes with a barrier and hart 0
+    // is the one that reports. A program that wedges hart 0 now TIMES OUT
+    // instead of being silently ended by whichever core got out first, and the
+    // retval is hart 0's rather than a race between cores.
+    csrr    t2, mhartid
+    bnez    t2, _eoc_park
     li      t0, (CONTROL_REGISTER_OFFSET + CONTROL_REGISTERS_EOC_REG_OFFSET)
     slli    t1, a0, 1
     addi    t1, t1, 1
     sw      t1, 0(t0)
+_eoc_park:
     la      ra, __rom_start
     ret
 
