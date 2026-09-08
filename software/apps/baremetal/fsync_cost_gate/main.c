@@ -108,6 +108,9 @@ int main() {
     const uint32_t aggr = fsync_aggr_global();
     for (uint32_t r = 0; r < COST_REPS; ++r) {
       const mempool_timer_t t0 = mempool_get_timer();
+      // Arm before sleeping: the pulse only reaches armed cores now, so a raw
+      // trigger/wfi pair without this would sleep forever.
+      fsync_arm_self();
       fsync_trigger(FSYNC_ID_H, aggr);
       mempool_wfi();
       while ((fsync_status() & FSYNC_STATUS_BUSY_MASK) != 0u)

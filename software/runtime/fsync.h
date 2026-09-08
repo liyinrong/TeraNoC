@@ -49,6 +49,7 @@
 #define FSYNC_STATUS_REG_OFFSET (0x0C)
 #define FSYNC_WAKE_MASK_REG_OFFSET 0x10u
 #define FSYNC_WAKE_CLEAR_REG_OFFSET 0x14u
+#define FSYNC_ARM_REG_OFFSET 0x18u
 
 #define FSYNC_CONTROL_TRIGGER (1u << 0)
 #define FSYNC_CONTROL_CLEAR (1u << 1)
@@ -261,6 +262,22 @@ static inline void fsync_wake_mask_exclude_self(void) {
   *(volatile uint32_t *)(FSYNC_BASE + FSYNC_WAKE_CLEAR_REG_OFFSET) = bit;
 }
 
+// Arm a core explicitly. NOT needed for fsync_barrier_*: the trigger arms every
+// core in WAKEMSK. Use it for a bare trigger/wfi pair outside the barrier.
+//
+// Arm this core for exactly ONE wake from the tree, then sleep. The pulse only
+// reaches an armed core and clears the arm, so the wake count can never exceed
+// the number of wfis -- which is what makes sleeping safe on a counted,
+// non-saturating wake counter. A core that never arms is never woken, so a
+// non-participant needs no mask and cannot leak a credit.
+//
+// Correct in both orders: a response landing before the wfi is banked as the
+// single credit that wfi spends; one landing after finds the core asleep.
+static inline void fsync_arm_self(void) {
+  *(volatile uint32_t *)(FSYNC_BASE + FSYNC_ARM_REG_OFFSET) =
+      1u << (mempool_get_core_id() % (uint32_t)NUM_CORES_PER_TILE);
+}
+
 static inline void fsync_clear_error(void) {
   *(volatile uint32_t *)(FSYNC_BASE + FSYNC_CONTROL_REG_OFFSET) =
       FSYNC_CONTROL_CLEAR;
@@ -357,9 +374,10 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
       mempool_wait(4u);
     }
 #else
-    // The broadcast reaches every core of the tile, so sleep for it instead of
-    // spinning. A response implies the trigger already happened, so both epoch
-    // checks below normally pass on their first read.
+    // No explicit arm: the trigger arms every core in WAKEMSK, so a
+    // participant is armed before the response can possibly arrive. A response
+    // implies the trigger already happened, so both epoch checks below pass on
+    // their first read.
     mempool_wfi();
     while (__atomic_load_n(&tile_cnt[tile].issue_epoch, __ATOMIC_ACQUIRE) <=
            expected) {
