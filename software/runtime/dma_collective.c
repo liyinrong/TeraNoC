@@ -846,6 +846,7 @@ uint32_t dma_collective_all_wait(void) {
 // deeper queueing must use the slot API.
 uint32_t dma_collective_all_memcpy_solo(void *dest, const void *src,
                                         size_t len) {
+  DMA_PROF(0);
   if (!mempool_is_group_coordinator())
     return DMA_COLLECTIVE_ERROR_ARGUMENT;
 
@@ -853,6 +854,7 @@ uint32_t dma_collective_all_memcpy_solo(void *dest, const void *src,
   dma_collective_all_group_t *const control = &dma_collective_all_group[group];
   uint32_t error = 0;
   uint32_t descriptors = 0;
+  DMA_PROF(1);
 
   // The _all_ scope is every group, so scope coverage is a tautology and only
   // the L1 range needs checking. issue_linear repeats these, but doing them
@@ -867,10 +869,13 @@ uint32_t dma_collective_all_memcpy_solo(void *dest, const void *src,
     return DMA_COLLECTIVE_ERROR_ARGUMENT;
   }
 
+  DMA_PROF(2);
   const dma_id_t id = dma_collective_issue_linear(0u, dest, src, len, group,
                                                   &error, &descriptors);
+  DMA_PROF(3);
   control->solo_id = id;
   control->solo_error = error;
+  DMA_PROF(4);
   return error;
 }
 
@@ -878,6 +883,7 @@ uint32_t dma_collective_all_memcpy_solo(void *dest, const void *src,
 // establishes that every group's engine has retired, and the fsync leaf is a
 // tile, so every tile must take part.
 uint32_t dma_collective_all_wait_solo(void) {
+  DMA_PROF(5);
   uint32_t error = DMA_COLLECTIVE_OK;
   const uint32_t coordinator = mempool_is_group_coordinator();
   dma_collective_all_group_t *const control =
@@ -891,6 +897,7 @@ uint32_t dma_collective_all_wait_solo(void) {
       if (error == 0)
         error = wait_error;
     }
+    DMA_PROF(6);
     control->solo_id = 0;
     if (error != DMA_COLLECTIVE_OK) {
       // Rare path: tell every group before the rendezvous releases readers.
@@ -908,6 +915,7 @@ uint32_t dma_collective_all_wait_solo(void) {
 #else
   fsync_barrier_all(dma_collective_fsync_cnt, mempool_get_tile_id());
 #endif
+  DMA_PROF(7);
 
   if (coordinator && error == DMA_COLLECTIVE_OK) {
     const uint32_t reported =
@@ -918,6 +926,7 @@ uint32_t dma_collective_all_wait_solo(void) {
     }
   }
   __sync_synchronize();
+  DMA_PROF(8);
   return error;
 }
 
