@@ -2080,6 +2080,7 @@ module mempool_tile
   logic [31:0]                       fs_rdata;
   logic                              fs_wake;
   logic [NumCoresPerTile-1:0]        fs_wake_mask;
+  logic [NumCoresPerTile-1:0]        fs_wake_vec;
 
   // The barrier wake releases EVERY core of the tile, which is what makes one
   // arrival per tile sufficient: only the ARRIVAL rendezvous stays in
@@ -2183,6 +2184,7 @@ module mempool_tile
     .v_req_o      (fsync_v_req_o       ),
     .v_rsp_i      (fsync_v_rsp_i       ),
     .wake_o       (fs_wake             ),
+    .wake_vec_o   (fs_wake_vec         ),
     .wake_mask_o  (fs_wake_mask        ),
     .error_o      (                    ),
     .busy_o       (                    ),
@@ -2261,7 +2263,7 @@ module mempool_tile
     // The mask resets to all-ones, so this is behaviourally identical until
     // software narrows it.
     assign wake_up = wake_up_q | {{(NumCoresPerTile-1){1'b0}}, redmule_evt} |
-                     (fs_wake ? fs_wake_mask : '0);
+                     fs_wake_vec;
 
     // ----------------------------------------------------------------------
     // WP2 wide source path: issue each RedMulE HCI beat as one raw wide access.
@@ -2750,7 +2752,7 @@ module mempool_tile
 
   end else begin: gen_redmule_tieoff
 
-    assign wake_up = wake_up_q | (fs_wake ? fs_wake_mask : '0);
+    assign wake_up = wake_up_q | fs_wake_vec;
 
     // No RedMulE here: this tile never sources a wide access from the RedMulE SLOT.
     // It still accepts raw wide slave requests through the module-scope B2 path, and

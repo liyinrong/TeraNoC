@@ -31,6 +31,24 @@
 //   +0x04 ID      W   scope id, bit 0 selects h (even) or v (odd)
 //   +0x08 CONTROL W   bit0 = trigger, bit1 = clear sticky error
 //   +0x0C STATUS  R   {rsp_id, lvl, error, BUSY(bit2), done}
+//   +0x18 ARM     W1S set a core's ARMED bit. A core arms itself, then sleeps.
+//                     The tree's response pulses a core's wake ONLY while it is
+//                     armed, and the pulse clears the bit -- so there is
+//                     EXACTLY ONE pulse per arm, and a core that never arms is
+//                     never woken.
+//
+//                     This is what makes sleeping safe on a counted wake
+//                     counter. wake_up_q increments on every cycle the wake is
+//                     asserted while the core is awake (snitch.sv:447) and
+//                     wraps at eight without saturating, so any wake a core did
+//                     not ask for is a latent hang. Arming bounds the count by
+//                     the number of wfis by construction, for participants and
+//                     non-participants alike.
+//
+//                     Race-free in both orders: if the response lands before
+//                     the core reaches its wfi the pulse is banked as the one
+//                     credit that wfi then spends; if after, the core is asleep
+//                     and the pulse wakes it.
 //   +0x14 WAKECLR W   write-1-to-clear on WAKEMSK. A core removes ITSELF with a
 //                     single write; the read-modify-write that +0x10 forces is
 //                     a lost-update race when several cores of the tile do it
@@ -81,6 +99,9 @@ module fsync_shim #(
   input  fsync_rsp_t           v_rsp_i,
   // To the tile's cores.
   output logic                 wake_o,
+  // Per-core wake pulses. wake_o stays scalar for the existing unit test and
+  // for any consumer that wants the raw tree response.
+  output logic [NumCores-1:0]  wake_vec_o,
   output logic [NumCores-1:0]  wake_mask_o,
   output logic                 error_o,
   output logic                 busy_o,
@@ -108,10 +129,13 @@ module fsync_shim #(
   localparam logic [4:0] REG_STATUS   = 5'h0C;
   localparam logic [4:0] REG_WAKE_MSK = 5'h10;
   localparam logic [4:0] REG_WAKE_CLR = 5'h14;
+  localparam logic [4:0] REG_ARM      = 5'h18;
 
   logic [AggrWidth-1:0] reg_aggr_q;
   logic [IdWidth-1:0]   reg_id_q;
   logic [NumCores-1:0]  reg_wake_mask_q;
+  logic [NumCores-1:0]  armed_q;
+  logic [NumCores-1:0]  wake_pulse;
   logic                 reg_wr;
   logic                 reg_trigger, reg_clear;
 
@@ -214,7 +238,32 @@ module fsync_shim #(
     v_req_o.sync     = sync_q &  id_q[0];
   end
 
+  // A core is woken only while armed, and the pulse disarms it. Set beats
+  // clear when a core arms in the same cycle a response lands, so an arm is
+  // never silently lost.
+  assign wake_pulse = armed_q & reg_wake_mask_q & {NumCores{wake}};
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      armed_q <= '0;
+    end else begin
+      logic [NumCores-1:0] arm_set;
+      // Arming rides on the trigger: the barrier already writes CONTROL, so
+      // every masked-in core is armed for free. Four cores each writing ARM
+      // instead cost 16 cycles a barrier -- they serialise at the tile's fsync
+      // arbiter -- which is 24% of a 67-cycle barrier for a property one write
+      // already provides. WAKEMSK is therefore the participant set, and the
+      // explicit ARM register remains for a bare trigger/wfi pair that is not
+      // going through the barrier.
+      arm_set = ((reg_wr && reg_addr_i == REG_ARM) ? reg_wdata_i[NumCores-1:0]
+                                                   : '0) |
+                (reg_trigger ? reg_wake_mask_q : '0);
+      armed_q <= (armed_q & ~wake_pulse) | arm_set;
+    end
+  end
+
   assign wake_o     = wake;
+  assign wake_vec_o = wake_pulse;
   assign wake_mask_o = reg_wake_mask_q;
   assign busy_o   = busy_q;
   assign error_o  = error_q;
