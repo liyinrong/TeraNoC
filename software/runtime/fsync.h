@@ -286,16 +286,24 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
     __atomic_store_n(&tile_cnt[tile].issue_epoch, expected + 1u,
                      __ATOMIC_RELEASE);
     fsync_trigger(id, aggr);
+    // Sleep on the tree's own completion signal rather than polling STATUS.
+    //
+    // This is strictly safer than the two-phase BUSY poll it replaces. That
+    // poll waited for BUSY to ASSERT before accepting its deassertion, because
+    // an idle shim read before the trigger lands looks identical to a finished
+    // barrier -- an edge it can miss entirely if the round trip beats the first
+    // read. fs_wake is COUNTED, not observed: if the response lands before this
+    // core reaches the wfi, the wake is banked and the wfi returns at once.
+    // Neither ordering can hang.
+    //
+    // It also removes the polling quantisation from the critical path. The
+    // serial chain is trigger -> tree -> this core detects -> done_epoch ->
+    // peers observe, and two of those links were an MMIO read behind a 4-cycle
+    // backoff.
+    mempool_wfi();
     uint32_t status;
     do {
       status = fsync_status();
-      if ((status & FSYNC_STATUS_BUSY_MASK) == 0u)
-        mempool_wait(4u);
-    } while ((status & FSYNC_STATUS_BUSY_MASK) == 0u);
-    do {
-      status = fsync_status();
-      if ((status & FSYNC_STATUS_BUSY_MASK) != 0u)
-        mempool_wait(4u);
     } while ((status & FSYNC_STATUS_BUSY_MASK) != 0u);
     if ((status & FSYNC_STATUS_ERROR_MASK) != 0u ||
         fsync_status_level(status) != tile_cnt[tile].expected_level ||
@@ -311,6 +319,10 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
       mempool_wait(4u);
     }
 #else
+    // The broadcast reaches every core of the tile, so sleep for it instead of
+    // spinning. A response implies the trigger already happened, so both epoch
+    // checks below normally pass on their first read.
+    mempool_wfi();
     while (__atomic_load_n(&tile_cnt[tile].issue_epoch, __ATOMIC_ACQUIRE) <=
            expected) {
       mempool_wait(4u);
@@ -321,27 +333,18 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
     }
 #endif
   }
-  // Spend the credit the tree just deposited.
+  // Credit accounting: fs_wake is broadcast to EVERY core of the tile, unmasked
+  // (mempool_tile.sv:1746), and wake_up_q is three bits that wrap without
+  // saturating -- eight unconsumed wakes destroy all eight credits and the next
+  // sleep never returns. Both paths above now execute exactly ONE wfi per
+  // barrier, which consumes exactly the one broadcast this barrier produces, so
+  // the barrier is credit-neutral by construction. The explicit drain wfi that
+  // used to sit here is gone with it.
   //
-  // fs_wake is broadcast to EVERY core of the tile, unmasked
-  // (mempool_tile.sv:1746), and nothing above ever sleeps -- mempool_wait is a
-  // delay loop -- so every core is awake when the response lands and banks a
-  // wake it never asked for (snitch.sv:447). wake_up_q is three bits and wraps
-  // without saturating, so the eighth barrier destroys all eight credits and
-  // the next mempool_wfi() sleeps forever. Measured exactly that way:
-  // dma_dedicated_bench runs 18 of these and the RTL detector fired at barrier
-  // 8 and 16, 256 cores each.
-  //
-  // This wfi cannot block. The credit is banked at the response edge, which is
-  // strictly before the done_epoch handshake above can complete, so wake_up_q
-  // is already nonzero here and wfi returns immediately while decrementing it
-  // (snitch.sv:747-757). Net credit change per barrier: zero.
-  //
-  // NOT covered: a core of this tile that is not a participant still receives
-  // the broadcast and has no drain. Partial-tile barriers (fsync_barrier_n with
-  // participants < NUM_CORES_PER_TILE) therefore still leak into the
-  // non-participants, and mixing those with sleeping barriers is unsafe.
-  mempool_wfi();
+  // STILL NOT COVERED: a core of this tile that is not a participant receives
+  // the broadcast and has no wfi to spend it. Partial-tile barriers therefore
+  // remain unsafe to mix with sleeping barriers until the tile gains a per-core
+  // wake mask.
 
   if (__atomic_load_n(&tile_cnt[tile].status_error, __ATOMIC_ACQUIRE) != 0u)
     __builtin_trap();
