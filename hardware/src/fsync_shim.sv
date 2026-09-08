@@ -408,6 +408,25 @@ module fsync_shim #(
   assign lvl_o    = lvl_q;
   assign rsp_id_o = rsp_id_q;
 
+  // The tree's detected_error_o is DELIBERATELY not consumed.
+  //
+  // fractal_sync_cc declares it (:116) but the 1D and 2D nodes that instantiate
+  // it tie it off (fractal_sync_1d.sv:351, fractal_sync_2d.sv:571) and the tree
+  // wrappers have no error port at all, so surfacing it would mean patching a
+  // dep that is pinned to the revision MAGIA also uses.
+  //
+  // It is worth giving up because of WHAT it reports: FIFO empty-on-pop /
+  // full-on-push and RX/TX overflow (fractal_sync_cc.sv:686-696) -- queue
+  // CAPACITY violations. This shim admits one outstanding barrier per tile
+  // (accept = src_valid & ~busy_q), so the tree sees at most one request per
+  // leaf, which our traffic cannot use to overrun it; sizing the tree for its
+  // own leaf count is the dep's business.
+  //
+  // The FUNCTIONAL error path is wired and does reach software:
+  // local_rsp.error -> error_q -> STATUS bit 1, and fsync_barrier_n traps on
+  // it. What follows catches the other symptom worth having -- a lost or
+  // duplicated message.
+
   // A barrier response with no barrier outstanding means a lost or duplicated
   // arrival somewhere in the tree; catching it here beats debugging it from a
   // frozen trace later.
