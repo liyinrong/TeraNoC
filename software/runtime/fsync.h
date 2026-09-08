@@ -31,6 +31,14 @@
 #ifndef _FSYNC_H_
 #define _FSYNC_H_
 
+// Self-contained on purpose: this header uses NUM_BANKS_PER_TILE,
+// mempool_get_core_id() and mempool_wfi(), so an includer that reached it
+// before runtime.h used to fail with an implicit-declaration cascade rather
+// than a clear error.
+#include <stdint.h>
+
+#include "runtime.h"
+
 #include <stdint.h>
 
 #include "addrmap.h"
@@ -39,6 +47,7 @@
 #define FSYNC_ID_REG_OFFSET (0x04)
 #define FSYNC_CONTROL_REG_OFFSET (0x08)
 #define FSYNC_STATUS_REG_OFFSET (0x0C)
+#define FSYNC_WAKE_MASK_REG_OFFSET 0x10u
 
 #define FSYNC_CONTROL_TRIGGER (1u << 0)
 #define FSYNC_CONTROL_CLEAR (1u << 1)
@@ -221,6 +230,31 @@ static inline uint32_t fsync_wait_response(void) {
 // must NOT be ignored: the scope did not synchronise.
 static inline uint32_t fsync_wait(void) {
   return fsync_wait_response() & FSYNC_STATUS_ERROR_MASK;
+}
+
+// Per-core wake mask, one bit per core of THIS tile; 1 = that core receives the
+// tree's wake. Resets to all-ones.
+//
+// fs_wake is broadcast to the whole tile, and wake_up_q is a 3-bit counter that
+// wraps without saturating, so a core that receives the wake without sleeping
+// for it banks a credit per barrier and loses eight of them on the eighth. Any
+// core of the tile that does not take part in the barriers -- a dedicated
+// DMA/control core, say -- must clear its bit or it will eventually sleep
+// forever.
+static inline void fsync_set_wake_mask(uint32_t mask) {
+  *(volatile uint32_t *)(FSYNC_BASE + FSYNC_WAKE_MASK_REG_OFFSET) = mask;
+}
+
+static inline uint32_t fsync_wake_mask(void) {
+  return *(volatile uint32_t *)(FSYNC_BASE + FSYNC_WAKE_MASK_REG_OFFSET);
+}
+
+// Drop this core out of the tile's barrier wakes. Call from a core that will
+// not participate, BEFORE the others start running barriers.
+static inline void fsync_wake_mask_exclude_self(void) {
+  const uint32_t bit =
+      1u << (mempool_get_core_id() % (uint32_t)NUM_CORES_PER_TILE);
+  fsync_set_wake_mask(fsync_wake_mask() & ~bit);
 }
 
 static inline void fsync_clear_error(void) {
