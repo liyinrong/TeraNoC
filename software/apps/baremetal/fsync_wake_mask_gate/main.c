@@ -33,6 +33,15 @@
 static fsync_tile_counter_t tile_counter[GATE_TILES]
     __attribute__((aligned(FSYNC_TILE_COUNTER_ALIGNMENT), section(".l1")));
 static uint32_t volatile done_flag __attribute__((section(".l1")));
+// Per-core progress. Under the event unit a missing unsubscribe no longer
+// wraps the wake counter -- it leaves a stale pending that wakes the core out
+// of a LATER mempool_barrier, so the failure is an early barrier exit, not a
+// missed wake. MISSED cannot see that, and the run would otherwise report
+// retval=0 with no output, which a runner reads as a pass. Check progress
+// explicitly so the negative control fails loudly.
+static uint32_t rounds_done[NUM_CORES]
+    __attribute__((aligned(NUM_BANKS * sizeof(uint32_t)), section(".l1")));
+static uint32_t volatile progress_errors __attribute__((section(".l1")));
 static uint32_t volatile rounds __attribute__((section(".l1")));
 
 int main() {
@@ -46,7 +55,9 @@ int main() {
   if (core == 0u) {
     done_flag = 0u;
     rounds = 0u;
+    progress_errors = 0u;
   }
+  rounds_done[core] = 0u;
   for (uint32_t t = core; t < GATE_TILES; t += NUM_CORES)
     fsync_tile_counter_init(&tile_counter[t]);
   mempool_barrier(NUM_CORES);
@@ -59,9 +70,11 @@ int main() {
   mempool_barrier(NUM_CORES);
 
   if (!excluded) {
-    for (uint32_t r = 0; r < GATE_BARRIERS; ++r)
+    for (uint32_t r = 0; r < GATE_BARRIERS; ++r) {
       fsync_barrier_n(tile_counter, tile, FSYNC_ID_H, fsync_aggr_global(),
                       (uint32_t)NUM_CORES_PER_TILE - 1u);
+      __atomic_store_n(&rounds_done[core], r + 1u, __ATOMIC_RELEASE);
+    }
     if (core == 0u) {
       rounds = GATE_BARRIERS;
       __atomic_store_n(&done_flag, 1u, __ATOMIC_RELEASE);
@@ -74,11 +87,23 @@ int main() {
   }
   mempool_barrier(NUM_CORES);
 
+  // Every participant must have completed every round. A core that left a
+  // barrier early stops short, which is exactly the stale-pending failure.
+  if (core == 0u)
+    for (uint32_t c = 0; c < (uint32_t)NUM_CORES; ++c)
+      if ((c % (uint32_t)NUM_CORES_PER_TILE) !=
+              (uint32_t)NUM_CORES_PER_TILE - 1u &&
+          __atomic_load_n(&rounds_done[c], __ATOMIC_ACQUIRE) != GATE_BARRIERS)
+        ++progress_errors;
+  mempool_barrier(NUM_CORES);
+
+  if (core == 0u)
+    printf("[fsync_wake_mask] progress_errors=%u\n", (unsigned)progress_errors);
   if (core == 0u)
     printf("[fsync_wake_mask] barriers=%u participants=%u mask=0x%x "
            "excluded_lane=%u\n",
            (unsigned)rounds, (unsigned)(NUM_CORES_PER_TILE - 1),
            (unsigned)fsync_wake_mask(), (unsigned)(NUM_CORES_PER_TILE - 1));
   mempool_barrier(NUM_CORES);
-  return 0;
+  return (int)progress_errors;
 }

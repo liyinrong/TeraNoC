@@ -50,6 +50,9 @@
 #define FSYNC_WAKE_MASK_REG_OFFSET 0x10u
 #define FSYNC_WAKE_CLEAR_REG_OFFSET 0x14u
 #define FSYNC_ARM_REG_OFFSET 0x18u
+#define FSYNC_SUBSCRIBE_REG_OFFSET 0x20u
+#define FSYNC_CAUSE_REG_OFFSET 0x30u
+#define FSYNC_EVT_FSYNC 0x1u
 
 #define FSYNC_CONTROL_TRIGGER (1u << 0)
 #define FSYNC_CONTROL_CLEAR (1u << 1)
@@ -256,7 +259,35 @@ static inline uint32_t fsync_wake_mask(void) {
 // Single write, no read-modify-write: several cores of a tile may call this
 // concurrently. Doing it as a RMW on the shared mask loses updates -- measured
 // as 1024 missed wake-ups when three cores per tile raced.
+// Which event sources may wake THIS core. Per-core address, so a core writes
+// its own word: no read-modify-write and no race with its tile-mates.
+static inline void fsync_subscribe_self(uint32_t sources) {
+  const uint32_t lane = mempool_get_core_id() % (uint32_t)NUM_CORES_PER_TILE;
+  *(volatile uint32_t *)(FSYNC_BASE + FSYNC_SUBSCRIBE_REG_OFFSET + 4u * lane) =
+      sources;
+}
+
+// What woke this core, latched at the wake.
+static inline uint32_t fsync_cause_self(void) {
+  const uint32_t lane = mempool_get_core_id() % (uint32_t)NUM_CORES_PER_TILE;
+  return *(volatile uint32_t *)(FSYNC_BASE + FSYNC_CAUSE_REG_OFFSET +
+                                4u * lane);
+}
+
+// Leave the tile's barrier events entirely.
+//
+// A core that stays SUBSCRIBED but never sleeps for the event accumulates
+// pending -- it is level-held on purpose -- and the moment it next sleeps for
+// something else, that stale pending wakes it. mempool_barrier's sleeping path
+// has no re-check loop, so it would leave the barrier early. Any core that does
+// not take part in its tile's barriers must unsubscribe, not merely be masked:
+// WAKEMSK no longer gates the event path.
+static inline void fsync_unsubscribe_self(void) { fsync_subscribe_self(0u); }
+
 static inline void fsync_wake_mask_exclude_self(void) {
+  // Kept as the name existing gates use; under the event unit the meaningful
+  // action is unsubscribing.
+  fsync_unsubscribe_self();
   const uint32_t bit =
       1u << (mempool_get_core_id() % (uint32_t)NUM_CORES_PER_TILE);
   *(volatile uint32_t *)(FSYNC_BASE + FSYNC_WAKE_CLEAR_REG_OFFSET) = bit;
