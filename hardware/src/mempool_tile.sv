@@ -40,6 +40,10 @@ module mempool_tile
   input  logic                                                                    rst_ni,
   // Scan chain
   input  logic                                                                    scan_enable_i,
+  // Group engine status, reduced across streams by the group. Feeds the tile's
+  // event unit so a core can sleep on its DMA instead of polling done_id.
+  input  logic                                                                    dma_busy_i,
+  input  logic                                                                    dma_error_i,
   input  logic                                                                    scan_data_i,
   output logic                                                                    scan_data_o,
   // Tile ID
@@ -2176,6 +2180,8 @@ module mempool_tile
     .clk_i,
     .rst_ni,
     .core_asleep_i(core_asleep         ),
+    .dma_busy_i   (dma_busy_i          ),
+    .dma_error_i  (dma_error_i         ),
     .reg_req_i    (fs_arb_valid        ),
     .reg_we_i     (fs_arb_q.write      ),
     .reg_addr_i   (fs_arb_q.addr[7:0]  ),
