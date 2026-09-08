@@ -125,6 +125,17 @@ uint32_t dma_collective_all_wait(void);
 // _all_ API this is called by EVERY core, and only group coordinators get a
 // meaningful return code.
 uint32_t dma_collective_all_wait_sync(void);
+
+// Solo path: one designated agent per group issues, the SAME core waits, one
+// transfer per group in flight. Skips the slot machinery entirely -- issuer and
+// poller election, publish, ready_epoch, drain -- because none of it has work
+// to do under that contract. _memcpy_solo is coordinator-only; _wait_solo is
+// called by EVERY core, because the rendezvous is what establishes completion.
+uint32_t dma_collective_all_memcpy_solo(void *dest, const void *src,
+                                        size_t len);
+uint32_t dma_collective_all_wait_solo(void);
+uint32_t dma_collective_all_memcpy_solo_blocking(void *dest, const void *src,
+                                                 size_t len);
 uint32_t dma_collective_all_memcpy_blocking(void *dest, const void *src,
                                             size_t len);
 

@@ -26,7 +26,7 @@ typedef struct {
   uint32_t padding[DMA_COLLECTIVE_TILE_WORDS - 1];
 } dma_collective_tile_lock_t;
 
-#define DMA_COLLECTIVE_ALL_FIELDS 12u
+#define DMA_COLLECTIVE_ALL_FIELDS 14u
 
 #if DMA_COLLECTIVE_GROUP_WORDS < DMA_COLLECTIVE_ALL_FIELDS
 #error "The default collective control does not fit in one group bank stripe"
@@ -40,6 +40,10 @@ typedef struct {
   // reader one load from its own group's banks instead of a remote poll.
   volatile uint32_t fence_error;
   volatile uint32_t fence_generation;
+  // Solo path: this group's in-flight transfer. Written and read by the same
+  // core, in its own group's banks, so it replaces the whole slot machinery.
+  volatile uint32_t solo_id;
+  volatile uint32_t solo_error;
   uint32_t padding[DMA_COLLECTIVE_GROUP_WORDS - DMA_COLLECTIVE_ALL_FIELDS];
 } dma_collective_all_group_t;
 
@@ -768,6 +772,8 @@ void dma_collective_all_runtime_init(void) {
         &dma_collective_all_state, 0, 0, DMA_COLLECTIVE_ERROR_STALE);
     control->fence_error = 0;
     control->fence_generation = 0;
+    control->solo_id = 0;
+    control->solo_error = 0;
     for (uint32_t i = 0u;
          i < DMA_COLLECTIVE_GROUP_WORDS - DMA_COLLECTIVE_ALL_FIELDS; ++i)
       control->padding[i] = 0u;
@@ -814,6 +820,112 @@ uint32_t dma_collective_all_wait(void) {
     return DMA_COLLECTIVE_ERROR_ARGUMENT;
   return dma_collective_wait_through(&scope,
                                      &dma_collective_all_group[group].handle);
+}
+
+// ---------------------------------------------------------------------------
+// Solo path
+//
+// The slot machinery exists for the SPMD contract: any core may call, any core
+// may wait, several generations may be in flight. Under the _all_ contract --
+// one designated agent per group, the SAME core waits, one transfer at a time,
+// completion established by a rendezvous rather than by polling peers -- every
+// piece of it has no work to do:
+//
+//   issuer election   one caller, no competitor
+//   poller election   the issuer is the waiter
+//   publish           local_id/error never leave the core that produced them
+//   ready_epoch       the rendezvous below establishes what it was polled for
+//   slot drain        one live transfer, nothing to retire
+//
+// So skip it. The transfer's identity lives in this group's own control block,
+// two words written and read by one core in its own banks.
+//
+// The cost of the contract is that only ONE transfer per group may be in
+// flight. That is what double buffering actually needs -- issue the next tile,
+// compute on the current one, wait -- so it is not a restriction in practice;
+// deeper queueing must use the slot API.
+uint32_t dma_collective_all_memcpy_solo(void *dest, const void *src,
+                                        size_t len) {
+  if (!mempool_is_group_coordinator())
+    return DMA_COLLECTIVE_ERROR_ARGUMENT;
+
+  const uint32_t group = mempool_get_group_id();
+  dma_collective_all_group_t *const control = &dma_collective_all_group[group];
+  uint32_t error = 0;
+  uint32_t descriptors = 0;
+
+  // The _all_ scope is every group, so scope coverage is a tautology and only
+  // the L1 range needs checking. issue_linear repeats these, but doing them
+  // here keeps the failure out of the engine.
+  const uint32_t dest_addr = (uint32_t)dest;
+  const uint32_t src_addr = (uint32_t)src;
+  const uint32_t dest_in_l1 = dest_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
+  const uint32_t src_in_l1 = src_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
+  if (dest_in_l1 == src_in_l1 || len == 0 || len > UINT32_MAX) {
+    control->solo_id = 0;
+    control->solo_error = DMA_COLLECTIVE_ERROR_ARGUMENT;
+    return DMA_COLLECTIVE_ERROR_ARGUMENT;
+  }
+
+  const dma_id_t id = dma_collective_issue_linear(0u, dest, src, len, group,
+                                                  &error, &descriptors);
+  control->solo_id = id;
+  control->solo_error = error;
+  return error;
+}
+
+// Completion for the solo path. EVERY core calls it: the rendezvous is what
+// establishes that every group's engine has retired, and the fsync leaf is a
+// tile, so every tile must take part.
+uint32_t dma_collective_all_wait_solo(void) {
+  uint32_t error = DMA_COLLECTIVE_OK;
+  const uint32_t coordinator = mempool_is_group_coordinator();
+  dma_collective_all_group_t *const control =
+      &dma_collective_all_group[mempool_get_group_id()];
+
+  if (coordinator) {
+    error = control->solo_error;
+    const uint32_t id = control->solo_id;
+    if (id != 0) {
+      const uint32_t wait_error = dma_local_wait_id(0u, (dma_id_t)id);
+      if (error == 0)
+        error = wait_error;
+    }
+    control->solo_id = 0;
+    if (error != DMA_COLLECTIVE_OK) {
+      // Rare path: tell every group before the rendezvous releases readers.
+      for (uint32_t g = 0; g < (uint32_t)NUM_GROUPS; ++g)
+        __atomic_store_n(&dma_collective_all_group[g].fence_error, error,
+                         __ATOMIC_RELEASE);
+      __sync_synchronize();
+    }
+  }
+
+#if FSYNC_TPG_SIDE == 0
+  // No tree on this geometry; a software all-core barrier establishes the same
+  // thing, just slower. No ready_epoch is needed either way.
+  mempool_barrier(NUM_CORES);
+#else
+  fsync_barrier_all(dma_collective_fsync_cnt, mempool_get_tile_id());
+#endif
+
+  if (coordinator && error == DMA_COLLECTIVE_OK) {
+    const uint32_t reported =
+        __atomic_load_n(&control->fence_error, __ATOMIC_ACQUIRE);
+    if (reported != DMA_COLLECTIVE_OK) {
+      error = reported;
+      control->fence_error = DMA_COLLECTIVE_OK;
+    }
+  }
+  __sync_synchronize();
+  return error;
+}
+
+uint32_t dma_collective_all_memcpy_solo_blocking(void *dest, const void *src,
+                                                 size_t len) {
+  const uint32_t issue_error = dma_collective_all_memcpy_solo(dest, src, len);
+  const uint32_t wait_error = dma_collective_all_wait_solo();
+  return issue_error != DMA_COLLECTIVE_OK ? issue_error : wait_error;
 }
 
 // Hardware cross-group fence. EVERY core calls this, unlike the rest of the
