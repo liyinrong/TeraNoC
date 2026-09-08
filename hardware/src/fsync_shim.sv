@@ -31,6 +31,28 @@
 //   +0x04 ID      W   scope id, bit 0 selects h (even) or v (odd)
 //   +0x08 CONTROL W   bit0 = trigger, bit1 = clear sticky error
 //   +0x0C STATUS  R   {rsp_id, lvl, error, BUSY(bit2), done}
+//   +0x20+4c SUBSCRIBE[c] RW  event sources that may wake core c of this tile
+//   +0x30+4c CAUSE[c]     R   what woke it, latched at the wake
+//
+// E1, the event-unit core. A core is woken ONLY while it is asleep:
+//
+//     wake[c] = asleep[c] & |(pending[c])      pending = subscribed events
+//
+// asleep[c] needs no core change -- snitch.sv:287 already drives
+// inst_valid_o = ~wfi_q and mempool_tile.sv already routes it for the icache.
+//
+// This does not merely bound the wake counter, it BYPASSES it: wake_up_d
+// increments only when wake_up_sync_i && !wfi_q (snitch.sv:447), so a unit that
+// never wakes an awake core never increments it. The three-bit counter, its
+// wrap at eight, the drain, the mask discipline and the one-wfi-per-barrier
+// rule all stop being load-bearing.
+//
+// pending is level-held, so events arriving while the core runs simply wait:
+// N events before one sleep produce ONE wake with N bits set. It clears on the
+// wake and snapshots into CAUSE, so nothing has to be acked and the barrier
+// needs no software change. SUBSCRIBE resets to the fsync bit, so existing code
+// behaves exactly as before.
+//
 //   +0x18 ARM     W1S set a core's ARMED bit. A core arms itself, then sleeps.
 //                     The tree's response pulses a core's wake ONLY while it is
 //                     armed, and the pulse clears the bit -- so there is
@@ -80,10 +102,12 @@ module fsync_shim #(
 ) (
   input  logic                 clk_i,
   input  logic                 rst_ni,
+  // One bit per core of the tile, high while that core is in WFI.
+  input  logic [NumCores-1:0]  core_asleep_i,
   // Register port. Bus-agnostic on purpose; the tile adapts its own dialect.
   input  logic                 reg_req_i,
   input  logic                 reg_we_i,
-  input  logic [4:0]           reg_addr_i,   // byte offset inside the region
+  input  logic [7:0]           reg_addr_i,   // byte offset inside the region
   input  logic [31:0]          reg_wdata_i,
   output logic [31:0]          reg_rdata_o,
   // Direct trigger, kept for the unit test and for a future in-tile requester
@@ -123,19 +147,37 @@ module fsync_shim #(
   assign err  = h_rsp_i.error | v_rsp_i.error;
 
   // Register file, MAGIA-compatible offsets.
-  localparam logic [4:0] REG_AGGR     = 5'h00;
-  localparam logic [4:0] REG_ID       = 5'h04;
-  localparam logic [4:0] REG_CONTROL  = 5'h08;
-  localparam logic [4:0] REG_STATUS   = 5'h0C;
-  localparam logic [4:0] REG_WAKE_MSK = 5'h10;
-  localparam logic [4:0] REG_WAKE_CLR = 5'h14;
-  localparam logic [4:0] REG_ARM      = 5'h18;
+  localparam logic [7:0] REG_AGGR      = 8'h00;
+  localparam logic [7:0] REG_ID        = 8'h04;
+  localparam logic [7:0] REG_CONTROL   = 8'h08;
+  localparam logic [7:0] REG_STATUS    = 8'h0C;
+  localparam logic [7:0] REG_WAKE_MSK  = 8'h10;
+  localparam logic [7:0] REG_WAKE_CLR  = 8'h14;
+  localparam logic [7:0] REG_ARM       = 8'h18;
+  localparam logic [7:0] REG_SUBSCRIBE = 8'h20;  // +4 per core
+  localparam logic [7:0] REG_CAUSE     = 8'h30;  // +4 per core
+
+  // Event sources. Only FSYNC is wired today; the rest are the routing E2/E3
+  // will fill in (iDMA completion, engine, doorbell, tree error).
+  localparam int unsigned EvtWidth  = 8;
+  localparam int unsigned EVT_FSYNC = 0;
 
   logic [AggrWidth-1:0] reg_aggr_q;
   logic [IdWidth-1:0]   reg_id_q;
   logic [NumCores-1:0]  reg_wake_mask_q;
   logic [NumCores-1:0]  armed_q;
   logic [NumCores-1:0]  wake_pulse;
+  logic [EvtWidth-1:0]  subscribe_q [NumCores];
+  logic [EvtWidth-1:0]  pending_q   [NumCores];
+  logic [EvtWidth-1:0]  cause_q     [NumCores];
+  logic [NumCores-1:0]  evt_wake;
+  // The tree response may be asserted for more than one cycle. pending must be
+  // set ONCE per response: setting it on every cycle of a held response re-arms
+  // it right after the wake consumed it, and the leftover makes the NEXT wfi
+  // return immediately -- which breaks mempool_barrier, whose sleeping path has
+  // no re-check loop. Edge-detect instead.
+  logic                 wake_q;
+  logic                 wake_edge;
   logic                 reg_wr;
   logic                 reg_trigger, reg_clear;
 
@@ -173,6 +215,12 @@ module fsync_shim #(
     end
     if (reg_req_i && !reg_we_i && reg_addr_i == REG_WAKE_MSK) begin
       reg_rdata_o[NumCores-1:0] = reg_wake_mask_q;
+    end
+    for (int unsigned c = 0; c < NumCores; c++) begin
+      if (reg_req_i && !reg_we_i && reg_addr_i == (REG_SUBSCRIBE + 8'(4*c)))
+        reg_rdata_o[EvtWidth-1:0] = subscribe_q[c];
+      if (reg_req_i && !reg_we_i && reg_addr_i == (REG_CAUSE + 8'(4*c)))
+        reg_rdata_o[EvtWidth-1:0] = cause_q[c];
     end
   end
 
@@ -238,6 +286,49 @@ module fsync_shim #(
     v_req_o.sync     = sync_q &  id_q[0];
   end
 
+  // ---------------------------------------------------------------------
+  // Event unit
+  // ---------------------------------------------------------------------
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) wake_q <= 1'b0;
+    else         wake_q <= wake;
+  end
+  assign wake_edge = wake & ~wake_q;
+
+  for (genvar c = 0; c < NumCores; c++) begin : gen_events
+    logic [EvtWidth-1:0] evt_set;
+
+    // Only subscribed sources are recorded, so a core accumulates exactly what
+    // it asked for.
+    always_comb begin
+      evt_set = '0;
+      evt_set[EVT_FSYNC] = wake_edge & subscribe_q[c][EVT_FSYNC];
+    end
+
+    // Wake ONLY while the core is asleep. This is the whole safety argument:
+    // an awake core is never pulsed, so wake_up_q never increments and the
+    // counted-credit model cannot be violated.
+    assign evt_wake[c] = core_asleep_i[c] & (|pending_q[c]);
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        // Subscribed to the tree by default, so existing software that never
+        // touches these registers behaves exactly as it did before.
+        subscribe_q[c] <= (EvtWidth'(1) << EVT_FSYNC);
+        pending_q[c]   <= '0;
+        cause_q[c]     <= '0;
+      end else begin
+        if (reg_wr && reg_addr_i == (REG_SUBSCRIBE + 8'(4*c)))
+          subscribe_q[c] <= reg_wdata_i[EvtWidth-1:0];
+        // Set beats clear: an event landing in the same cycle as the wake is
+        // kept for the next sleep rather than lost.
+        pending_q[c] <= (pending_q[c] & ~{EvtWidth{evt_wake[c]}}) | evt_set;
+        if (evt_wake[c])
+          cause_q[c] <= pending_q[c];
+      end
+    end
+  end
+
   // A core is woken only while armed, and the pulse disarms it. Set beats
   // clear when a core arms in the same cycle a response lands, so an arm is
   // never silently lost.
@@ -263,7 +354,25 @@ module fsync_shim #(
   end
 
   assign wake_o     = wake;
-  assign wake_vec_o = wake_pulse;
+  // EVERY path is gated on the core being asleep. That is the single rule the
+  // event unit rests on: an awake core is never pulsed, so wake_up_q
+  // (snitch.sv:447) can never increment and the counted-credit model cannot be
+  // violated by any source. The arm path is kept for a bare trigger/wfi pair
+  // and is subject to the same gate.
+  // ADDITIVE, not a replacement. The legacy wake (wake_up_q, from the control
+  // registers) stays UNGATED in the tile: mempool_barrier_init has core 0 do
+  // wake_up_all() then wfi -- it pulses itself and sleeps to spend its own
+  // credit -- and boot and mempool_barrier rely on the same banking. Gating
+  // that path deadlocks the cluster before the first barrier.
+  //
+  // The event unit is a second, independent source for cores that opt in via
+  // SUBSCRIBE. It never wakes an awake core, so it cannot bank a credit; the
+  // legacy path keeps its old semantics for the startup handshake and for any
+  // software that still uses it.
+  //
+  // The arm path is gone: it overlapped this one, and armed_q was consumed by a
+  // pulse whose delivery a gate could block, which is where the lost wake was.
+  assign wake_vec_o = evt_wake;
   assign wake_mask_o = reg_wake_mask_q;
   assign busy_o   = busy_q;
   assign error_o  = error_q;

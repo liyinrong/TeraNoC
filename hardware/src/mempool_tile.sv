@@ -2081,6 +2081,13 @@ module mempool_tile
   logic                              fs_wake;
   logic [NumCoresPerTile-1:0]        fs_wake_mask;
   logic [NumCoresPerTile-1:0]        fs_wake_vec;
+  // snitch.sv drives inst_valid_o = ~wfi_q, so this is exactly "core asleep".
+  // Already routed for the icache; the event unit needs no new core signal.
+  logic [NumCoresPerTile-1:0]        core_asleep;
+  for (genvar c = 0; c < NumCoresPerTile; c++) begin : gen_core_asleep
+    assign core_asleep[c] =
+        ~snitch_inst_valid[c/NumCoresPerCache][c%NumCoresPerCache];
+  end
 
   // The barrier wake releases EVERY core of the tile, which is what makes one
   // arrival per tile sufficient: only the ARRIVAL rendezvous stays in
@@ -2168,9 +2175,10 @@ module mempool_tile
   ) i_fsync_shim (
     .clk_i,
     .rst_ni,
+    .core_asleep_i(core_asleep         ),
     .reg_req_i    (fs_arb_valid        ),
     .reg_we_i     (fs_arb_q.write      ),
-    .reg_addr_i   (fs_arb_q.addr[4:0]  ),
+    .reg_addr_i   (fs_arb_q.addr[7:0]  ),
     .reg_wdata_i  (fs_arb_q.data[31:0] ),
     .reg_rdata_o  (fs_rdata            ),
     // Unused: the bus is the only requester today. Kept so an in-tile
