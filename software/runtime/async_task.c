@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 
+#include "fsync.h"
 #include "runtime.h"
 
 #if NUM_REDMULE_TILES > 0
@@ -129,9 +130,18 @@ uint32_t tnc_redmule_done(uint8_t target) {
 // are harmless -- each spends exactly the credit that caused it, and the
 // predicate is re-checked every turn.
 void tnc_redmule_wait(uint8_t target) {
-  do {
+  // RedMulE's EOC no longer wakes core 0 directly; it is delivered through the
+  // event unit, so subscribe before testing. Order matters: a pulse landing
+  // after the subscribe is held in the level pending and the wfi returns at
+  // once, while one landing before was never recorded -- which is why the test
+  // comes after the subscribe and the loop is a while, not a do-while. An
+  // engine that already finished exits without sleeping at all.
+  fsync_subscribe_self(FSYNC_EVT_ENGINE);
+  while (!tnc_redmule_done(target))
     mempool_wfi();
-  } while (!tnc_redmule_done(target));
+  // Restore, or the pulse consumed here lingers as pending and wakes this core
+  // early from its next barrier.
+  fsync_subscribe_self(FSYNC_EVT_FSYNC);
   __atomic_thread_fence(__ATOMIC_ACQUIRE);
 }
 

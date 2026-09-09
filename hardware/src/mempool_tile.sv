@@ -2280,17 +2280,22 @@ module mempool_tile
     // banked a credit per barrier and wrapped wake_up_q every eighth one.
     // The mask resets to all-ones, so this is behaviourally identical until
     // software narrows it.
-    // The legacy direct wake to core 0 STAYS. tnc_redmule_wait sleeps on it,
-    // and it is ungated so a pulse arriving while core 0 is awake is banked --
-    // which is what makes that pattern work. The event unit is additive beside
-    // it, exactly as the fsync path is.
+    // RETIRED: redmule_evt no longer wakes core 0 directly.
     //
-    // A core should use ONE of the two. If core 0 both relies on the legacy
-    // wake and subscribes to EVT_ENGINE, the pulse it already consumed leaves a
-    // pending bit that wakes it early from its next sleep.
+    // The direct path could only ever reach core 0, so a second consumer had to
+    // be told by the first and a non-core-0 owner could not wait on the engine
+    // at all. It now goes solely through the event unit, where any number of
+    // cores subscribe to EVT_ENGINE and each gets its own pending bit from the
+    // one pulse. tnc_redmule_wait subscribes accordingly.
+    //
+    // Retiring it also removes the mixing hazard: a core that relied on the
+    // direct wake AND subscribed would have had its consumed pulse left as a
+    // pending bit, waking it early from the next sleep.
+    //
+    // wake_up_q, the legacy GLOBAL sync, stays ungated -- boot and
+    // mempool_barrier bank a pulse and spend it on the following wfi.
     assign tile_engine_evt = redmule_evt;
-    assign wake_up = wake_up_q | {{(NumCoresPerTile-1){1'b0}}, redmule_evt} |
-                     fs_wake_vec;
+    assign wake_up = wake_up_q | fs_wake_vec;
 
     // ----------------------------------------------------------------------
     // WP2 wide source path: issue each RedMulE HCI beat as one raw wide access.
