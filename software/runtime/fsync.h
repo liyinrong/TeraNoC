@@ -55,6 +55,7 @@
 #define FSYNC_EVT_FSYNC 0x1u
 #define FSYNC_EVT_DMA 0x2u     // group engine went idle (busy falling)
 #define FSYNC_EVT_DMA_ERR 0x4u // group engine latched a fault
+#define FSYNC_EVT_ENGINE 0x8u  // tile engine end-of-computation (RedMulE)
 
 #define FSYNC_CONTROL_TRIGGER (1u << 0)
 #define FSYNC_CONTROL_CLEAR (1u << 1)

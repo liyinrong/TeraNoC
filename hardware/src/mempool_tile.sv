@@ -2085,6 +2085,9 @@ module mempool_tile
   logic                              fs_wake;
   logic [NumCoresPerTile-1:0]        fs_wake_mask;
   logic [NumCoresPerTile-1:0]        fs_wake_vec;
+  // Engine end-of-computation, visible at tile scope so the event unit can fan
+  // it out to every subscribed core. Zero on tiles with no engine.
+  logic                              tile_engine_evt;
   // snitch.sv drives inst_valid_o = ~wfi_q, so this is exactly "core asleep".
   // Already routed for the icache; the event unit needs no new core signal.
   logic [NumCoresPerTile-1:0]        core_asleep;
@@ -2182,6 +2185,7 @@ module mempool_tile
     .core_asleep_i(core_asleep         ),
     .dma_busy_i   (dma_busy_i          ),
     .dma_error_i  (dma_error_i         ),
+    .engine_evt_i (tile_engine_evt     ),
     .reg_req_i    (fs_arb_valid        ),
     .reg_we_i     (fs_arb_q.write      ),
     .reg_addr_i   (fs_arb_q.addr[7:0]  ),
@@ -2276,6 +2280,15 @@ module mempool_tile
     // banked a credit per barrier and wrapped wake_up_q every eighth one.
     // The mask resets to all-ones, so this is behaviourally identical until
     // software narrows it.
+    // The legacy direct wake to core 0 STAYS. tnc_redmule_wait sleeps on it,
+    // and it is ungated so a pulse arriving while core 0 is awake is banked --
+    // which is what makes that pattern work. The event unit is additive beside
+    // it, exactly as the fsync path is.
+    //
+    // A core should use ONE of the two. If core 0 both relies on the legacy
+    // wake and subscribes to EVT_ENGINE, the pulse it already consumed leaves a
+    // pending bit that wakes it early from its next sleep.
+    assign tile_engine_evt = redmule_evt;
     assign wake_up = wake_up_q | {{(NumCoresPerTile-1){1'b0}}, redmule_evt} |
                      fs_wake_vec;
 
@@ -2766,6 +2779,8 @@ module mempool_tile
 
   end else begin: gen_redmule_tieoff
 
+    // No engine in this tile, so nothing to depend on.
+    assign tile_engine_evt = 1'b0;
     assign wake_up = wake_up_q | fs_wake_vec;
 
     // No RedMulE here: this tile never sources a wide access from the RedMulE SLOT.

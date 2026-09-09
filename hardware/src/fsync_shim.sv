@@ -111,6 +111,12 @@ module fsync_shim #(
   // conservative otherwise (it waits for every queued transfer, not just one).
   input  logic                 dma_busy_i,
   input  logic                 dma_error_i,
+  // Tile engine end-of-computation (RedMulE today). A PULSE, so it is taken as
+  // is rather than edge-detected. Routing it here is what makes an engine
+  // dependency expressible for ANY core, and for SEVERAL at once: every core
+  // subscribed to EVT_ENGINE gets its own pending bit set from the same pulse,
+  // so one producer can release many consumers with no software fan-out.
+  input  logic                 engine_evt_i,
   // Register port. Bus-agnostic on purpose; the tile adapts its own dialect.
   input  logic                 reg_req_i,
   input  logic                 reg_we_i,
@@ -170,6 +176,7 @@ module fsync_shim #(
   localparam int unsigned EVT_FSYNC   = 0;
   localparam int unsigned EVT_DMA     = 1;  // group engine went idle
   localparam int unsigned EVT_DMA_ERR = 2;  // group engine latched a fault
+  localparam int unsigned EVT_ENGINE  = 3;  // tile engine end-of-computation
 
   logic [AggrWidth-1:0] reg_aggr_q;
   logic [IdWidth-1:0]   reg_id_q;
@@ -332,6 +339,7 @@ module fsync_shim #(
       evt_set[EVT_FSYNC]   = wake_edge & subscribe_q[c][EVT_FSYNC];
       evt_set[EVT_DMA]     = dma_idle_edge & subscribe_q[c][EVT_DMA];
       evt_set[EVT_DMA_ERR] = dma_error_edge & subscribe_q[c][EVT_DMA_ERR];
+      evt_set[EVT_ENGINE]  = engine_evt_i & subscribe_q[c][EVT_ENGINE];
     end
 
     // Wake ONLY while the core is asleep. This is the whole safety argument:
