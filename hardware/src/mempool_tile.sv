@@ -139,6 +139,22 @@ module mempool_tile
    *********************/
   // wake_up mixes RedMulE's EOC (redmule_evt[0]) into bit 0; see gen_redmule.
   logic [NumCoresPerTile-1:0] wake_up_q, wake_up;
+
+  // Wake provenance trace. Every wake, with its SOURCE and whether the core was
+  // actually asleep. A wake whose evt bit is set with no preceding tree
+  // response for this tile is a stale pending; one whose legacy bit is set
+  // during an fsync barrier is the global path firing unexpectedly. Correlate
+  // against the shim's TREE RESPONSE line by timestamp and tile.
+  `ifdef FSYNC_WAKE_TRACE
+  for (genvar wc = 0; wc < NumCoresPerTile; wc++) begin : gen_wake_trace
+    always_ff @(posedge clk_i) begin
+      if (rst_ni && wake_up[wc])
+        $display("[%t] WAKE tile=%0d lane=%0d legacy=%0b evt=%0b asleep=%0b",
+                 $time, tile_id_i, wc, wake_up_q[wc], fs_wake_vec[wc],
+                 core_asleep[wc]);
+    end
+  end
+  `endif
   `FF(wake_up_q, wake_up_i, '0, clk_i, rst_ni);
 
   // Group ID

@@ -275,6 +275,21 @@ endif
 ifeq (1, $(spatz_profiling))
 	vlog_defs += -DSPATZ_PROFILING=$(spatz_profiling)
 endif
+# Every core wake, with its source (legacy control-register credit vs event
+# unit) and whether the core was actually asleep, plus every fsync tree
+# response. Off by default: it prints on every wake, which is far too loud for
+# a normal run, and it is the only way to tell the two wake paths apart.
+fsync_wake_trace ?= 0
+ifeq (1, $(fsync_wake_trace))
+	vlog_defs += -DFSYNC_WAKE_TRACE
+endif
+# End the run from inside after this many cycles instead of letting it wedge.
+# Killing a stuck simulator from outside throws away the tail of every trace
+# file, which is the part that says what wedged. 0 disables the deadline.
+sim_timeout_cycles ?= 0
+ifneq (0, $(sim_timeout_cycles))
+	vlog_defs += -DSIM_TIMEOUT_CYCLES=$(sim_timeout_cycles)
+endif
 # --------------------------
 # Remapping Controls
 # --------------------------

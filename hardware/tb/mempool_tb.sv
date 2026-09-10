@@ -511,6 +511,34 @@ module mempool_tb;
     fetch_en = 1'b1;
   end
 
+  // Simulation-time heartbeat. A frozen trace with the simulator still at 100%
+  // CPU is either a functional deadlock (time advances, nothing retires) or a
+  // combinational loop (time itself stops), and the two need opposite fixes.
+  // This is the only cheap way to tell them apart: if the heartbeat keeps
+  // printing, time is advancing.
+`ifdef FSYNC_WAKE_TRACE
+  initial begin : fsync_heartbeat
+    forever begin
+      #(5000*ClockPeriod);
+      $display("[HEARTBEAT] %t", $time);
+    end
+  end
+`endif
+
+  // Deadline. Killing a wedged run from outside loses whatever the trace DPI
+  // still holds in its stdio buffer -- the .dasm files end on a 4 KiB boundary,
+  // which is exactly the last few dozen instructions before the wedge, the ones
+  // that say what happened. Ending the run from inside with $finish flushes
+  // them. Off unless sim_timeout_cycles is set.
+`ifdef SIM_TIMEOUT_CYCLES
+  initial begin : sim_watchdog
+    #(`SIM_TIMEOUT_CYCLES * ClockPeriod);
+    $display("[WATCHDOG] no EOC after %0d cycles at %t", `SIM_TIMEOUT_CYCLES,
+             $time);
+    $finish;
+  end
+`endif
+
   /***********************
    *  L2 Initialization  *
    ***********************/

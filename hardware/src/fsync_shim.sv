@@ -315,6 +315,31 @@ module fsync_shim #(
   end
   assign wake_edge = wake & ~wake_q;
 
+  // Every trigger, and whether it was ACCEPTED or silently dropped. accept is
+  // gated on ~busy_q with no back-pressure to software -- fsync_trigger() is a
+  // posted MMIO write -- so a trigger arriving while the tile's previous
+  // barrier is still outstanding disappears and every participant sleeps for a
+  // response that will never come.
+  `ifdef FSYNC_WAKE_TRACE
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && src_valid)
+      $display("[%t] %m: TRIGGER %s id=%0d aggr=0x%0h", $time,
+               accept ? "ACCEPT" : "DROP", src_id, src_aggr);
+  end
+  `endif
+
+  // Every tree response this tile receives, and whether a barrier was actually
+  // outstanding when it arrived. A response with busy_q low was not asked for
+  // by this tile.
+  `ifdef FSYNC_WAKE_TRACE
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && wake_edge)
+      $display("[%t] %m: TREE RESPONSE busy=%0b lvl=%0d id=%0d", $time, busy_q,
+               h_rsp_i.wake ? h_rsp_i.sig.lvl : v_rsp_i.sig.lvl,
+               h_rsp_i.wake ? h_rsp_i.sig.id : v_rsp_i.sig.id);
+  end
+  `endif
+
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       dma_busy_q  <= 1'b0;
