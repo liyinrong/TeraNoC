@@ -1,5 +1,5 @@
 // Copyright 2026 ETH Zurich and University of Bologna.
-// Licensed under the Solderpad Hardware License, Version 0.51, see LICENSE for details.
+// Solderpad Hardware License, Version 0.51, see LICENSE for details.
 // SPDX-License-Identifier: SHL-0.51
 
 // One mainstream iDMA v0.6.5 frontend per MemPool group. Each tile owns an
