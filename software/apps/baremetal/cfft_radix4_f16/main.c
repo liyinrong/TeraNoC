@@ -51,6 +51,22 @@ by groups of cores.
 #include "baremetal/mempool_radix4_cfft_f16p.h"
 #include "mempool_checks.h"
 
+// Barrier selection. Build with -DUSE_FSYNC_BARRIER to run every barrier on
+// the fractal_sync H-tree instead of the software barrier; the default is
+// unchanged, so previously recorded numbers stay comparable. The two must not
+// be mixed inside one phase -- mempool_barrier's sleeping path treats any wake
+// as its own -- so the switch covers ALL of this app's barriers at once.
+#ifdef USE_FSYNC_BARRIER
+#include "fsync_app.h"
+#define APP_BARRIER_INIT(core) fsync_app_barrier_init(core)
+#define APP_BARRIER(n) fsync_app_barrier()
+#define APP_KERNEL_BARRIER(core) fsync_app_barrier()
+#else
+#define APP_BARRIER_INIT(core) mempool_barrier_init(core)
+#define APP_BARRIER(n) mempool_barrier(n)
+#define APP_KERNEL_BARRIER(core) mempool_log_barrier(2, core)
+#endif
+
 #if (defined(SINGLE) || defined(PARALLEL))
 __fp16 l1_pSrc[2 * N_CSAMPLES]
     __attribute__((aligned(sizeof(int32_t)), section(".l1_prio")));
@@ -84,7 +100,7 @@ int main() {
   uint32_t core_id = mempool_get_core_id();
   uint32_t num_cores = mempool_get_core_count();
   __fp16 *pRes = (__fp16 *)0;
-  mempool_barrier_init(core_id);
+  APP_BARRIER_INIT(core_id);
 
   /* INITIALIZATION */
 
@@ -101,7 +117,7 @@ int main() {
     if (core_id == 0)
       printf("01: END INITIALIZATION\n");
   }
-  mempool_barrier(num_cores);
+  APP_BARRIER(num_cores);
 #endif
 
 #if (defined(SCHEDULED) || defined(FOLDED))
@@ -121,7 +137,7 @@ int main() {
                                        BITREVINDEXTABLE_LENGTH *
                                            sizeof(int32_t));
   }
-  mempool_barrier(num_cores);
+  APP_BARRIER(num_cores);
 
 #ifdef FOLDED_TWIDDLES
   for (uint32_t j = 0; j < N_FFTs_COL; j++) {
@@ -137,13 +153,13 @@ int main() {
           *(v2h *)&l2_twiddleCoef_f16[2 * (i * 3U)];
     }
   }
-  mempool_barrier(num_cores);
+  APP_BARRIER(num_cores);
 #endif
 
   if (core_id == 0) {
     printf("01: END INITIALIZATION\n");
   }
-  mempool_barrier(num_cores);
+  APP_BARRIER(num_cores);
 #endif
 
   /* COMPUTATION */
@@ -189,7 +205,7 @@ int main() {
 #endif
 #endif
 
-  mempool_barrier(num_cores);
+  APP_BARRIER(num_cores);
   if (core_id == 0) {
     printf("02: END COMPUTATION\n");
   }
@@ -200,6 +216,6 @@ int main() {
   }
   mempool_check_dpi_f16(l2_pRes_check, l2_pRes, 2 * N_CSAMPLES,
                         (float)TOLERANCE, 0);
-  mempool_barrier(num_cores);
+  APP_BARRIER(num_cores);
   return 0;
 }
