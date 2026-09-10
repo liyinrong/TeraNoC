@@ -11,11 +11,12 @@
 #include "fsync.h"
 
 #define FSYNC_EPOCH_TILES (NUM_CORES / NUM_CORES_PER_TILE)
-#ifdef FSYNC_NEGATIVE_SKIP_ISSUE_EPOCH
-#define FSYNC_EPOCH_ITERS 1u
-#else
 #define FSYNC_EPOCH_ITERS 4u
-#endif
+
+// Negative control: build with -DFSYNC_NEGATIVE_SKIP_SEQ_RECHECK and the
+// barrier's waiters accept any wake instead of the tree's own. The arrival
+// scan below then reports errors, or the run deadlocks on a tile that was
+// left behind -- which is what the re-check exists to prevent.
 
 static fsync_tile_counter_t tile_counter[FSYNC_EPOCH_TILES]
     __attribute__((aligned(FSYNC_TILE_COUNTER_ALIGNMENT), section(".l1")));

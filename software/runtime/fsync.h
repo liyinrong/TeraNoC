@@ -52,6 +52,7 @@
 #define FSYNC_ARM_REG_OFFSET 0x18u
 #define FSYNC_SUBSCRIBE_REG_OFFSET 0x20u
 #define FSYNC_CAUSE_REG_OFFSET 0x30u
+#define FSYNC_EVT_SEQ_REG_OFFSET 0x40u
 #define FSYNC_EVT_FSYNC 0x1u
 #define FSYNC_EVT_DMA 0x2u     // group engine went idle (busy falling)
 #define FSYNC_EVT_DMA_ERR 0x4u // group engine latched a fault
@@ -271,6 +272,18 @@ static inline void fsync_subscribe_self(uint32_t sources) {
 }
 
 // What woke this core, latched at the wake.
+// Monotonic count of THIS core's event wakes. Sample it before sleeping and
+// loop until it changes: that is the only way to tell "the tree answered me"
+// from "wfi returned for some other reason". wfi is source-agnostic, and the
+// legacy global wake banks a credit on any core that happens to be awake, so a
+// bare wfi can return with nothing about the barrier having changed.
+static inline uint32_t fsync_evt_seq_self(void) {
+  const uint32_t lane = mempool_get_core_id() % (uint32_t)NUM_CORES_PER_TILE;
+  return *(volatile uint32_t *)(FSYNC_BASE + FSYNC_EVT_SEQ_REG_OFFSET +
+                                4u * lane) &
+         0xffu;
+}
+
 static inline uint32_t fsync_cause_self(void) {
   const uint32_t lane = mempool_get_core_id() % (uint32_t)NUM_CORES_PER_TILE;
   return *(volatile uint32_t *)(FSYNC_BASE + FSYNC_CAUSE_REG_OFFSET +
@@ -363,81 +376,65 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
                                    uint32_t participants) {
   if (participants == 0u || participants > (uint32_t)NUM_CORES_PER_TILE)
     __builtin_trap();
-  const uint32_t expected =
-      __atomic_load_n(&tile_cnt[tile].done_epoch, __ATOMIC_ACQUIRE);
+
+  // Sample BEFORE arriving: a response cannot be missed, only observed as a
+  // change that already happened.
+  const uint32_t seq0 = fsync_evt_seq_self();
+
+  // Intra-tile rendezvous. tile_cnt[tile] sits in THIS tile's own bank stripe,
+  // so the atomic is a local access; moving it into hardware would cost more
+  // than it saves (an arrival written to the shim serialises at the tile's
+  // fsync arbiter, measured at +16 cycles for four cores).
   if (__atomic_fetch_add(&tile_cnt[tile].count, 1, __ATOMIC_RELAXED) ==
       participants - 1u) {
-    // Ordered by the issue_epoch release below, like the three stores after it.
     tile_cnt[tile].count = 0;
-    tile_cnt[tile].expected_level = fsync_level_of_aggr(aggr);
-    tile_cnt[tile].expected_id = id;
-    tile_cnt[tile].status_error = 0;
-    __atomic_store_n(&tile_cnt[tile].issue_epoch, expected + 1u,
-                     __ATOMIC_RELEASE);
     fsync_trigger(id, aggr);
-    // Sleep on the tree's own completion signal rather than polling STATUS.
-    //
-    // This is strictly safer than the two-phase BUSY poll it replaces. That
-    // poll waited for BUSY to ASSERT before accepting its deassertion, because
-    // an idle shim read before the trigger lands looks identical to a finished
-    // barrier -- an edge it can miss entirely if the round trip beats the first
-    // read. fs_wake is COUNTED, not observed: if the response lands before this
-    // core reaches the wfi, the wake is banked and the wfi returns at once.
-    // Neither ordering can hang.
-    //
-    // It also removes the polling quantisation from the critical path. The
-    // serial chain is trigger -> tree -> this core detects -> done_epoch ->
-    // peers observe, and two of those links were an MMIO read behind a 4-cycle
-    // backoff.
+    // Everything below is off every other core's critical path: they are
+    // released by the tree, not by this core. Keep the bookkeeping AFTER the
+    // trigger so it never delays the response the others are waiting for --
+    // the expected level/id are locals for the same reason.
+    const uint32_t exp_level = fsync_level_of_aggr(aggr);
+    // The BUSY loop is itself the re-check for this core, so a spurious wake
+    // costs it one extra MMIO read and nothing more.
     mempool_wfi();
     uint32_t status;
     do {
       status = fsync_status();
     } while ((status & FSYNC_STATUS_BUSY_MASK) != 0u);
     if ((status & FSYNC_STATUS_ERROR_MASK) != 0u ||
-        fsync_status_level(status) != tile_cnt[tile].expected_level ||
-        fsync_status_id(status) != tile_cnt[tile].expected_id)
-      tile_cnt[tile].status_error = status | 0x80000000u;
-    __atomic_store_n(&tile_cnt[tile].done_epoch, expected + 1u,
-                     __ATOMIC_RELEASE);
+        fsync_status_level(status) != exp_level ||
+        fsync_status_id(status) != id)
+      __builtin_trap();
+    // Observability only -- no core waits on these. They are what makes
+    // fsync_epoch_smoke able to assert that every tile really did trigger on
+    // every generation rather than merely that everyone got out.
+    tile_cnt[tile].expected_level = exp_level;
+    tile_cnt[tile].expected_id = id;
+    ++tile_cnt[tile].issue_epoch;
+    ++tile_cnt[tile].done_epoch;
   } else {
-#ifdef FSYNC_NEGATIVE_SKIP_ISSUE_EPOCH
-    // Deliberate gate falsification: an idle pre-issue shim releases early.
-    // Production builds never define this macro.
-    while ((fsync_status() & FSYNC_STATUS_BUSY_MASK) != 0u) {
-      mempool_wait(4u);
-    }
-#else
-    // No explicit arm: the trigger arms every core in WAKEMSK, so a
-    // participant is armed before the response can possibly arrive. A response
-    // implies the trigger already happened, so both epoch checks below pass on
-    // their first read.
+    // Released by the tree response, re-checked against the event sequence.
+    //
+    // A bare wfi is NOT sufficient: it is source-agnostic, and wake_up_all from
+    // mempool_barrier banks a credit on any core that is awake when it fires --
+    // measured, 15 such credits in a four-barrier run -- so a later wfi returns
+    // immediately with the barrier still outstanding. Dropping the re-check
+    // entirely deadlocked fsync_epoch_smoke: cores left barriers whose tiles
+    // had not triggered.
+    //
+    // The sequence counter is what the two-epoch handshake used to provide,
+    // without the cost: the old code waited for the TRIGGER core to read
+    // STATUS, validate, and publish done_epoch, which put its MMIO read on
+    // every other core's critical path. This is two local MMIO reads instead.
+#ifdef FSYNC_NEGATIVE_SKIP_SEQ_RECHECK
+    // Deliberate gate falsification: accept ANY wake, including a legacy credit
+    // banked while this core was awake. Production builds never define this.
     mempool_wfi();
-    while (__atomic_load_n(&tile_cnt[tile].issue_epoch, __ATOMIC_ACQUIRE) <=
-           expected) {
-      mempool_wait(4u);
-    }
-    while (__atomic_load_n(&tile_cnt[tile].done_epoch, __ATOMIC_ACQUIRE) <=
-           expected) {
-      mempool_wait(4u);
-    }
+#else
+    while (fsync_evt_seq_self() == seq0)
+      mempool_wfi();
 #endif
   }
-  // Credit accounting: fs_wake is broadcast to EVERY core of the tile, unmasked
-  // (mempool_tile.sv:1746), and wake_up_q is three bits that wrap without
-  // saturating -- eight unconsumed wakes destroy all eight credits and the next
-  // sleep never returns. Both paths above now execute exactly ONE wfi per
-  // barrier, which consumes exactly the one broadcast this barrier produces, so
-  // the barrier is credit-neutral by construction. The explicit drain wfi that
-  // used to sit here is gone with it.
-  //
-  // STILL NOT COVERED: a core of this tile that is not a participant receives
-  // the broadcast and has no wfi to spend it. Partial-tile barriers therefore
-  // remain unsafe to mix with sleeping barriers until the tile gains a per-core
-  // wake mask.
-
-  if (__atomic_load_n(&tile_cnt[tile].status_error, __ATOMIC_ACQUIRE) != 0u)
-    __builtin_trap();
 }
 
 static inline void fsync_barrier(volatile fsync_tile_counter_t *tile_cnt,
