@@ -516,8 +516,14 @@ module mempool_tb;
   // combinational loop (time itself stops), and the two need opposite fixes.
   // This is the only cheap way to tell them apart: if the heartbeat keeps
   // printing, time is advancing.
-`ifdef FSYNC_WAKE_TRACE
-  initial begin : fsync_heartbeat
+// Liveness. A run that stops producing output is either advancing with nothing
+// retiring (a functional deadlock) or not advancing at all (a comb loop), and
+// the two need opposite fixes; a heartbeat is the cheapest way to tell them
+// apart. Tied to the deadline rather than to the wake trace, because a run
+// worth putting a deadline on is exactly the one whose liveness is in doubt --
+// and the wake trace is far too loud to enable just for this.
+`ifdef SIM_TIMEOUT_CYCLES
+  initial begin : sim_heartbeat
     forever begin
       #(5000*ClockPeriod);
       $display("[HEARTBEAT] %t", $time);
