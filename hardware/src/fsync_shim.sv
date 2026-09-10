@@ -169,6 +169,7 @@ module fsync_shim #(
   localparam logic [7:0] REG_ARM       = 8'h18;
   localparam logic [7:0] REG_SUBSCRIBE = 8'h20;  // +4 per core
   localparam logic [7:0] REG_CAUSE     = 8'h30;  // +4 per core
+  localparam logic [7:0] REG_EVT_SEQ   = 8'h40;  // +4 per core
 
   // Event sources. Only FSYNC is wired today; the rest are the routing E2/E3
   // will fill in (iDMA completion, engine, doorbell, tree error).
@@ -186,6 +187,17 @@ module fsync_shim #(
   logic [EvtWidth-1:0]  subscribe_q [NumCores];
   logic [EvtWidth-1:0]  pending_q   [NumCores];
   logic [EvtWidth-1:0]  cause_q     [NumCores];
+  // Monotonic per-core count of event wakes. A sleeper samples it before
+  // waiting and loops until it CHANGES, which is the only way to tell "the tree
+  // answered me" from "wfi returned for some other reason".
+  //
+  // It has to be a counter, not a level: wfi is source-agnostic and the legacy
+  // global wake (wake_up_all) banks a credit on any core that happens to be
+  // awake -- measured, 15 of them in a 4-barrier run -- so a later wfi returns
+  // immediately with nothing about the tree having changed. CAUSE cannot serve:
+  // it is only written on an event wake, so after a legacy wake it still holds
+  // the PREVIOUS event and would read as a false pass.
+  logic [7:0]           evt_seq_q   [NumCores];
   logic [NumCores-1:0]  evt_wake;
   // The tree response may be asserted for more than one cycle. pending must be
   // set ONCE per response: setting it on every cycle of a held response re-arms
@@ -241,6 +253,8 @@ module fsync_shim #(
         reg_rdata_o[EvtWidth-1:0] = subscribe_q[c];
       if (reg_req_i && !reg_we_i && reg_addr_i == (REG_CAUSE + 8'(4*c)))
         reg_rdata_o[EvtWidth-1:0] = cause_q[c];
+      if (reg_req_i && !reg_we_i && reg_addr_i == (REG_EVT_SEQ + 8'(4*c)))
+        reg_rdata_o[7:0] = evt_seq_q[c];
     end
   end
 
@@ -379,14 +393,17 @@ module fsync_shim #(
         subscribe_q[c] <= (EvtWidth'(1) << EVT_FSYNC);
         pending_q[c]   <= '0;
         cause_q[c]     <= '0;
+        evt_seq_q[c]   <= '0;
       end else begin
         if (reg_wr && reg_addr_i == (REG_SUBSCRIBE + 8'(4*c)))
           subscribe_q[c] <= reg_wdata_i[EvtWidth-1:0];
         // Set beats clear: an event landing in the same cycle as the wake is
         // kept for the next sleep rather than lost.
         pending_q[c] <= (pending_q[c] & ~{EvtWidth{evt_wake[c]}}) | evt_set;
-        if (evt_wake[c])
-          cause_q[c] <= pending_q[c];
+        if (evt_wake[c]) begin
+          cause_q[c]   <= pending_q[c];
+          evt_seq_q[c] <= evt_seq_q[c] + 8'd1;
+        end
       end
     end
   end
