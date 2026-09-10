@@ -2120,6 +2120,27 @@ module mempool_tile
   // reaches its wfi, so a late-arriving core still sees the release.
 
 
+  logic                              fs_resp_valid_q;
+  logic [idx_width(NumSoCPorts)-1:0] fs_resp_idx_q;
+  logic [31:0]                       fs_resp_data_q;
+  logic                              fs_resp_write_q;
+  meta_id_t                          fs_resp_id_q;
+  logic                              fs_resp_ready;
+  logic                              fs_can_accept;
+  logic                              fs_req_fire;
+
+  // The response register is ONE deep and fs_pvalid is a single-cycle pulse
+  // that nothing retries, so the shim must not take a new access until the
+  // previous response has been consumed. Granting unconditionally drops any
+  // response whose port is busy that cycle; for a WRITE that is a store the
+  // core never sees acknowledged, and it wedges on its next fence -- measured
+  // on minpool/fsync_epoch_smoke, one dropped ack (tile 3, lane 3, the trigger
+  // core's CONTROL write) left that tile unable to start the next barrier and
+  // the whole cluster asleep. Same shape as the DMA control path above.
+  assign fs_resp_ready = fs_pready[fs_resp_idx_q];
+  assign fs_can_accept = !fs_resp_valid_q || fs_resp_ready;
+  assign fs_req_fire   = fs_arb_valid & fs_can_accept;
+
   rr_arb_tree #(
     .NumIn     (NumSoCPorts        ),
     .DataType  (snitch_pkg::dreq_t ),
@@ -2127,26 +2148,20 @@ module mempool_tile
   ) i_fsync_arb (
     .clk_i,
     .rst_ni,
-    .flush_i (1'b0         ),
-    .rr_i    ('0           ),
-    .req_i   (fs_qvalid    ),
-    .gnt_o   (fs_qready    ),
-    .data_i  (fs_q         ),
-    .req_o   (fs_arb_valid ),
-    // A register access retires in the cycle it is granted, so the shim never
-    // backpressures the bus. Its one-outstanding rule governs BARRIERS, not bus
-    // accesses: a trigger arriving while busy is ignored, and STATUS.BUSY is
-    // how software sees that.
-    .gnt_i   (1'b1         ),
-    .data_o  (fs_arb_q     ),
-    .idx_o   (fs_arb_idx   )
+    .flush_i (1'b0          ),
+    .rr_i    ('0            ),
+    .req_i   (fs_qvalid     ),
+    .gnt_o   (fs_qready     ),
+    .data_i  (fs_q          ),
+    .req_o   (fs_arb_valid  ),
+    // A register access completes in the cycle it is granted, so the only
+    // reason to hold the bus is a response that has not been taken yet. The
+    // shim's one-outstanding rule governs BARRIERS, not bus accesses: a trigger
+    // arriving while busy is ignored, and STATUS.BUSY is how software sees it.
+    .gnt_i   (fs_can_accept ),
+    .data_o  (fs_arb_q      ),
+    .idx_o   (fs_arb_idx    )
   );
-
-  logic                              fs_resp_valid_q;
-  logic [idx_width(NumSoCPorts)-1:0] fs_resp_idx_q;
-  logic [31:0]                       fs_resp_data_q;
-  logic                              fs_resp_write_q;
-  meta_id_t                          fs_resp_id_q;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -2156,13 +2171,26 @@ module mempool_tile
       fs_resp_write_q <= 1'b0;
       fs_resp_id_q    <= '0;
     end else begin
-      fs_resp_valid_q <= fs_arb_valid;
-      fs_resp_idx_q   <= fs_arb_idx;
-      fs_resp_data_q  <= fs_rdata;
-      fs_resp_write_q <= fs_arb_q.write;
-      fs_resp_id_q    <= fs_arb_q.id;
+      if (fs_resp_valid_q && fs_resp_ready)
+        fs_resp_valid_q <= 1'b0;
+      if (fs_req_fire) begin
+        fs_resp_valid_q <= 1'b1;
+        fs_resp_idx_q   <= fs_arb_idx;
+        fs_resp_data_q  <= fs_rdata;
+        fs_resp_write_q <= fs_arb_q.write;
+        fs_resp_id_q    <= fs_arb_q.id;
+      end
     end
   end
+
+  // A response must never be retired without its port taking it, and a request
+  // must never be admitted on top of one that has not been taken. Both were
+  // true before fs_can_accept existed and cost a whole cluster.
+  `ifndef SYNTHESIS
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      fs_resp_valid_q && !fs_resp_ready |=> fs_resp_valid_q)
+    else $fatal(1, "%m: fsync response dropped before its port took it");
+  `endif
 
   for (genvar c = 0; c < NumSoCPorts; c++) begin: gen_fsync_resp
     assign fs_pvalid[c] = fs_resp_valid_q & (fs_resp_idx_q == c);
@@ -2186,7 +2214,7 @@ module mempool_tile
     .dma_busy_i   (dma_busy_i          ),
     .dma_error_i  (dma_error_i         ),
     .engine_evt_i (tile_engine_evt     ),
-    .reg_req_i    (fs_arb_valid        ),
+    .reg_req_i    (fs_req_fire         ),
     .reg_we_i     (fs_arb_q.write      ),
     .reg_addr_i   (fs_arb_q.addr[7:0]  ),
     .reg_wdata_i  (fs_arb_q.data[31:0] ),
