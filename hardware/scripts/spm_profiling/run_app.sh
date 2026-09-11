@@ -9,10 +9,8 @@ APP_PATH="/usr/scratch2/larain1/zexifu/terapool_noc/mempool/software/apps/bareme
 OUTPUT_PATH="/usr/scratch/larain4/zexifu/mempool/hardware"
 CONFIGS="terapool"
 # NUM_CORES_PER_TILE="4 8"
-# NUM_REMOTE_PORTS_PER_TILE="2 3 5"
 
 NUM_CORES_PER_TILE="4"
-NUM_REMOTE_PORTS_PER_TILE="3"
 
 
 # APPS="axpy \
@@ -100,35 +98,30 @@ for config in $CONFIGS;
 do
     for num_cores_per_tile in $NUM_CORES_PER_TILE;
     do
-        for num_remote_ports_per_tile in $NUM_REMOTE_PORTS_PER_TILE;
+        for app in $APPS;
         do
-            for app in $APPS;
-            do
-                case_name="${app}${APP_SUF}_${config}_c${num_cores_per_tile}_rp${num_remote_ports_per_tile}"
-                build_name="${APP_SUF}_${config}_c${num_cores_per_tile}_rp${num_remote_ports_per_tile}"
-                if [ -e "${APP_PATH}/bin_${config}_c${num_cores_per_tile}/${app}" ]; then
-                    (
-                        echo -e "[Start running app:${case_name}]"
-                        rm -rf ${OUTPUT_PATH}/build_${case_name}
-                        mkdir -p run_logs/${case_name}
-                        # ../gen_xbar.py -in ${num_cores_per_tile} -on $((num_remote_ports_per_tile - 1)) -o ../../src/selector.sv
-                        time app_path=${APP_PATH}/bin_${config}_c${num_cores_per_tile} \
-                        app=${app} spm_profiling=${spm_profiling}\
-                        app_suf=${APP_SUF}_${config}_c${num_cores_per_tile}_rp${num_remote_ports_per_tile} \
-                        buildpath=${OUTPUT_PATH}/build_${case_name} \
-                        config=${config} \
-                        num_cores_per_tile=${num_cores_per_tile} \
-                        num_remote_ports_per_tile=${num_remote_ports_per_tile} \
-                        make -C ../../ ${SIM} \
-                        1> run_logs/${case_name}/run_1.log \
-                        2> run_logs/${case_name}/run_2.log
-                        echo -e "[Done running app:${case_name}]"
-                    )
-                    sleep 3
-                else
-                    echo -e "[Can't find app:${APP_PATH}/bin_${config}_c${num_cores_per_tile}/${app}]"
-                fi
-            done
+            case_name="${app}${APP_SUF}_${config}_c${num_cores_per_tile}"
+            build_name="${APP_SUF}_${config}_c${num_cores_per_tile}"
+            if [ -e "${APP_PATH}/bin_${config}_c${num_cores_per_tile}/${app}" ]; then
+                (
+                    echo -e "[Start running app:${case_name}]"
+                    rm -rf ${OUTPUT_PATH}/build_${case_name}
+                    mkdir -p run_logs/${case_name}
+                    time app_path=${APP_PATH}/bin_${config}_c${num_cores_per_tile} \
+                    app=${app} spm_profiling=${spm_profiling}\
+                    app_suf=${APP_SUF}_${config}_c${num_cores_per_tile} \
+                    buildpath=${OUTPUT_PATH}/build_${case_name} \
+                    config=${config} \
+                    num_cores_per_tile=${num_cores_per_tile} \
+                    make -C ../../ ${SIM} \
+                    1> run_logs/${case_name}/run_1.log \
+                    2> run_logs/${case_name}/run_2.log
+                    echo -e "[Done running app:${case_name}]"
+                )
+                sleep 3
+            else
+                echo -e "[Can't find app:${APP_PATH}/bin_${config}_c${num_cores_per_tile}/${app}]"
+            fi
         done
     done
 done

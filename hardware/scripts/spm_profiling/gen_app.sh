@@ -9,7 +9,6 @@ APP_PATH="/usr/scratch2/larain1/zexifu/terapool_noc/mempool/software/apps/bareme
 OUTPUT_PATH="/usr/scratch/larain4/zexifu/mempool/hardware"
 CONFIGS="terapool"
 NUM_CORES_PER_TILE="2 4 8"
-NUM_REMOTE_PORTS_PER_TILE="2 3 5"
 
 
 APPS="axpy \
