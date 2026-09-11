@@ -7,7 +7,7 @@
 // descriptors onto the configured backend streams.
 
 module mempool_idma_group import mempool_pkg::*; #(
-  parameter int unsigned NumRegs          = NumTilesPerGroup,
+  parameter int unsigned NumRegs          = 1,
   parameter int unsigned NumStreams       = NumDmasPerGroup,
   parameter int unsigned ReqFifoDepth     = 16,
   parameter int unsigned NumAxInFlight    = 2,

@@ -142,6 +142,7 @@ module mempool_group
   axi_tile_resp_t [NumDmasPerGroup-1:0]  axi_dma_resp;
   idma_reg_req_t  [NumTilesPerGroup-1:0] idma_ctrl_req;
   idma_reg_rsp_t  [NumTilesPerGroup-1:0] idma_ctrl_rsp;
+  idma_reg_req_t                         idma_ctrl_req_mux;
 
   // Declared ahead of the tile loop, which consumes idma_busy/idma_error for
   // the per-tile event unit. Questa resolves the forward reference, but a
@@ -592,15 +593,68 @@ module mempool_group
   axi_tile_req_t  [NumDmasPerGroup-1:0] axi_dma_premux_req;
   axi_tile_resp_t [NumDmasPerGroup-1:0] axi_dma_premux_resp;
 
+  // ONE register context per group, not one per tile.
+  //
+  // The contexts only ever held the transient descriptor configuration. The id
+  // counters are per-STREAM (next_id/completed_id in mempool_idma_group), so
+  // every tile already shared those, and every context funnels into the same
+  // frontend_req_valid behind one 16-deep queue. Replicating them bought the
+  // ability for N tiles to STAGE a descriptor simultaneously -- which the queue
+  // provides anyway -- at 1490 flops each: 3 wasted per group on tensorpool256
+  // and 15 on terapool, 71520 and 357600 flops across the cluster. Upstream
+  // idma defaults to 1 for the same reason.
+  //
+  // reg_bus completes in the cycle valid && ready, so collapsing the ports
+  // needs no response storage: the winner sees the real ready and everyone else
+  // sees zero and stalls, which is exactly what the tile's own dma_ctrl stage
+  // already expects (it captures rdata only on the cycle it is granted).
+  idma_reg_req_t                          idma_ctrl_req_arb;
+  idma_reg_rsp_t                          idma_ctrl_rsp_arb;
+  logic [NumTilesPerGroup-1:0]            idma_ctrl_qvalid, idma_ctrl_gnt;
+  logic                                   idma_ctrl_arb_valid;
+
+  for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_idma_ctrl_valid
+    assign idma_ctrl_qvalid[t] = idma_ctrl_req[t].valid;
+  end
+
+  rr_arb_tree #(
+    .NumIn     (NumTilesPerGroup ),
+    .DataType  (idma_reg_req_t   ),
+    .AxiVldRdy (1'b1             )
+  ) i_idma_ctrl_arb (
+    .clk_i,
+    .rst_ni,
+    .flush_i (1'b0                    ),
+    .rr_i    ('0                      ),
+    .req_i   (idma_ctrl_qvalid        ),
+    .gnt_o   (idma_ctrl_gnt           ),
+    .data_i  (idma_ctrl_req           ),
+    .req_o   (idma_ctrl_arb_valid     ),
+    .gnt_i   (idma_ctrl_rsp_arb.ready ),
+    .data_o  (idma_ctrl_req_arb       ),
+    .idx_o   (                        )
+  );
+
+  // data_o carries the winner's whole struct; drive valid from the arbiter so a
+  // cycle with no requester cannot present a stale one.
+  always_comb begin
+    idma_ctrl_req_mux       = idma_ctrl_req_arb;
+    idma_ctrl_req_mux.valid = idma_ctrl_arb_valid;
+    for (int t = 0; t < NumTilesPerGroup; t++) begin
+      idma_ctrl_rsp[t]       = idma_ctrl_rsp_arb;
+      idma_ctrl_rsp[t].ready = idma_ctrl_gnt[t];
+    end
+  end
+
   mempool_idma_group #(
-    .NumRegs    (NumTilesPerGroup ),
+    .NumRegs    (1                ),
     .NumStreams (NumDmasPerGroup  )
   ) i_mempool_idma_group (
     .clk_i,
     .rst_ni,
     .testmode_i,
-    .ctrl_req_i      (idma_ctrl_req        ),
-    .ctrl_rsp_o      (idma_ctrl_rsp        ),
+    .ctrl_req_i      (idma_ctrl_req_mux    ),
+    .ctrl_rsp_o      (idma_ctrl_rsp_arb    ),
     .axi_req_o       (axi_dma_premux_req   ),
     .axi_rsp_i       (axi_dma_premux_resp  ),
     .error_clear_i   ('0                    ),

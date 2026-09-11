@@ -103,17 +103,30 @@ dma_collective_invalid_handle(dma_collective_state_t *state,
   return handle;
 }
 
+// The engine's descriptor registers are ONE context per group, so this lock is
+// per group. It used to be per tile, which was correct only while every tile
+// owned its own context: with a shared one, two tiles writing their descriptors
+// at the same time interleave SRC/DST/LENGTH into a single register set and
+// each launches the other's transfer.
+//
+// The array entries are padded to a tile stripe, so entry t lands in TILE t's
+// banks. Index by the group's FIRST tile rather than by the group id, or group
+// g's lock would sit in whichever group owns tile g and every acquire would
+// leave the group.
+#define DMA_COLLECTIVE_LOCK_INDEX                                              \
+  (mempool_get_group_id() * (uint32_t)NUM_TILES_PER_GROUP)
+
 static void dma_collective_lock(void) {
-  const uint32_t tile = mempool_get_tile_id();
-  while (__atomic_exchange_n(&dma_collective_tile_lock[tile].value, 1,
+  const uint32_t idx = DMA_COLLECTIVE_LOCK_INDEX;
+  while (__atomic_exchange_n(&dma_collective_tile_lock[idx].value, 1,
                              __ATOMIC_ACQUIRE) != 0) {
     mempool_wait(4u);
   }
 }
 
 static void dma_collective_unlock(void) {
-  const uint32_t tile = mempool_get_tile_id();
-  __atomic_store_n(&dma_collective_tile_lock[tile].value, 0, __ATOMIC_RELEASE);
+  const uint32_t idx = DMA_COLLECTIVE_LOCK_INDEX;
+  __atomic_store_n(&dma_collective_tile_lock[idx].value, 0, __ATOMIC_RELEASE);
 }
 
 // Claim for a caller that is the SOLE issuer of this group -- the agent path.
@@ -302,7 +315,7 @@ void dma_collective_init(dma_collective_state_t *state,
   }
   if (mempool_is_tile_agent()) {
     dma_collective_tile_lock_t *const lock =
-        &dma_collective_tile_lock[mempool_get_tile_id()];
+        &dma_collective_tile_lock[DMA_COLLECTIVE_LOCK_INDEX];
     lock->value = 0u;
     for (uint32_t i = 0u; i < DMA_COLLECTIVE_TILE_WORDS - 1u; ++i)
       lock->padding[i] = 0u;

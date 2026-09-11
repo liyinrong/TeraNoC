@@ -3,9 +3,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Concurrent per-group iDMA v0.6.5 smoke test. Every group launches two ND
-// transfers without waiting between them; the two descriptors use different
-// tile-owned register banks and distinct data so a misplaced group connection
-// cannot pass by symmetry.
+// transfers without waiting between them, and each group's leader sits in a
+// DIFFERENT tile (group_leader below rotates it), so a group whose control port
+// or backend were cross-wired to another group's engine cannot pass by
+// symmetry -- the data is keyed on the group.
+//
+// The register context is one per group, not one per tile, so the rotation no
+// longer says anything about per-tile banks; it still covers the tile-to-group
+// control path, which is now an arbiter rather than a dedicated port.
 
 #include <stdint.h>
 
