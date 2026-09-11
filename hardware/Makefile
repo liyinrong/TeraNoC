@@ -157,7 +157,6 @@ vlog_defs += -DBOOT_ADDR=32\'d$(boot_addr)
 # --------------------------
 # FlooNoC Configuration
 # --------------------------
-vlog_defs += -DNUM_REMOTE_PORTS_PER_TILE=$(num_remote_ports_per_tile)
 vlog_defs += -DNUM_DIRECTIONS=$(num_directions)
 vlog_defs += -DNUM_X=$(num_x)
 vlog_defs += -DNOC_TOPOLOGY=$(noc_topology)
