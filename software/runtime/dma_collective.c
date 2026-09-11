@@ -116,7 +116,22 @@ dma_collective_invalid_handle(dma_collective_state_t *state,
 #define DMA_COLLECTIVE_LOCK_INDEX                                              \
   (mempool_get_group_id() * (uint32_t)NUM_TILES_PER_GROUP)
 
-static void dma_collective_lock(void) {
+// The lock lives in `.l1`, which is NOBITS and powers up X, so it MUST be
+// zeroed before the first acquire or __atomic_exchange_n never returns 0 and
+// every issuer spins forever. Exported next to the lock itself: a caller
+// outside this file has no other way to reach the storage.
+void dma_group_ctx_init(void) {
+  if (mempool_is_tile_agent()) {
+    dma_collective_tile_lock_t *const lock =
+        &dma_collective_tile_lock[DMA_COLLECTIVE_LOCK_INDEX];
+    lock->value = 0u;
+    for (uint32_t i = 0u; i < DMA_COLLECTIVE_TILE_WORDS - 1u; ++i)
+      lock->padding[i] = 0u;
+  }
+  __sync_synchronize();
+}
+
+void dma_group_ctx_lock(void) {
   const uint32_t idx = DMA_COLLECTIVE_LOCK_INDEX;
   while (__atomic_exchange_n(&dma_collective_tile_lock[idx].value, 1,
                              __ATOMIC_ACQUIRE) != 0) {
@@ -124,7 +139,7 @@ static void dma_collective_lock(void) {
   }
 }
 
-static void dma_collective_unlock(void) {
+void dma_group_ctx_unlock(void) {
   const uint32_t idx = DMA_COLLECTIVE_LOCK_INDEX;
   __atomic_store_n(&dma_collective_tile_lock[idx].value, 0, __ATOMIC_RELEASE);
 }
@@ -313,14 +328,7 @@ void dma_collective_init(dma_collective_state_t *state,
          i < DMA_COLLECTIVE_GROUP_WORDS - DMA_COLLECTIVE_STATE_FIELDS; ++i)
       group_state->padding[i] = 0u;
   }
-  if (mempool_is_tile_agent()) {
-    dma_collective_tile_lock_t *const lock =
-        &dma_collective_tile_lock[DMA_COLLECTIVE_LOCK_INDEX];
-    lock->value = 0u;
-    for (uint32_t i = 0u; i < DMA_COLLECTIVE_TILE_WORDS - 1u; ++i)
-      lock->padding[i] = 0u;
-  }
-  __sync_synchronize();
+  dma_group_ctx_init();
 }
 
 static uint32_t dma_collective_group_row_range(uint32_t start, uint32_t end,
@@ -566,11 +574,11 @@ dma_collective_memcpy_common(dma_collective_state_t *state,
     DMA_PROF(5);
   } else {
     DMA_PROF(3);
-    dma_collective_lock();
+    dma_group_ctx_lock();
     DMA_PROF(4);
     local_id = dma_collective_issue_linear(
         stream, dest, src, len, handle.group_id, &error, &descriptors);
-    dma_collective_unlock();
+    dma_group_ctx_unlock();
     DMA_PROF(5);
   }
   DMA_PROF(6);
@@ -617,7 +625,7 @@ dma_collective_handle_t dma_collective_submit_2d_nonblocking(
   if (len == 0 || reps == 0) {
     error = DMA_COLLECTIVE_ERROR_ARGUMENT;
   } else {
-    dma_collective_lock();
+    dma_group_ctx_lock();
     local_id = dma_local_memcpy_2d_nonblocking(stream, dest, src, len,
                                                dst_stride, src_stride, reps);
     if (local_id == 0) {
@@ -625,7 +633,7 @@ dma_collective_handle_t dma_collective_submit_2d_nonblocking(
       if (error == 0)
         error = DMA_COLLECTIVE_ERROR_LAUNCH;
     }
-    dma_collective_unlock();
+    dma_group_ctx_unlock();
   }
   dma_collective_publish(&handle, local_id, error, local_id != 0);
   return handle;

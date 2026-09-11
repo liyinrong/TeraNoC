@@ -46,6 +46,30 @@ enum {
   DMA_LOCAL_ERROR_ARGUMENT = 0x80000001u,
 };
 
+// THE ENGINE'S DESCRIPTOR REGISTERS ARE ONE CONTEXT PER GROUP.
+//
+// DMA_BASE carries no tile index: the context is selected by which tile's port
+// the access arrives on, and every tile of a group now reaches the SAME one
+// (mempool_group.sv arbitrates them). So two tiles of one group programming a
+// transfer concurrently interleave SRC/DST/LENGTH into a single register set
+// and each launches the other's descriptor.
+//
+// One issuer per group is therefore the contract for everything below --
+// mempool_is_group_coordinator() is how every caller in-tree elects one. A
+// caller that genuinely needs several tiles of a group to issue must bracket
+// the programming sequence with dma_group_ctx_lock()/dma_group_ctx_unlock().
+// Reads (status, done id, error) need no lock; they are single-register and
+// the arbiter serialises them.
+//
+// This was safe without a lock while each tile owned its own context. It is
+// not any more, and it is silent when violated: the transfer completes, with
+// the wrong address or length.
+// Call once per group before the first lock, from every core (it elects the
+// tile agent internally). dma_collective_init() already does this for you.
+void dma_group_ctx_init(void);
+void dma_group_ctx_lock(void);
+void dma_group_ctx_unlock(void);
+
 static inline volatile uint32_t *dma_local_reg(uint32_t offset) {
   return (volatile uint32_t *)(DMA_BASE + offset);
 }
