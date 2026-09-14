@@ -36,10 +36,8 @@ int main() {
 
   time_init = 0;
   time_end = 0;
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_X, l2_X, array_N * sizeof(int16_t));
-    dma_collective_all_memcpy_blocking(l1_Y, l2_Y, array_N * sizeof(int16_t));
-  }
+  dma_collective_memcpy_nonblocking(l1_X, l2_X, array_N * sizeof(int16_t));
+  dma_collective_memcpy_blocking(l1_Y, l2_Y, array_N * sizeof(int16_t));
   uint32_t register volatile a = *(uint32_t *)&(l2_A)&0x0000FFFF;
   mempool_barrier(num_cores);
 
@@ -56,10 +54,7 @@ int main() {
     uint32_t clock_cycles = (time_end - time_init);
     printf("\nKernel execution takes %d clock cycles\n", clock_cycles);
   }
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l2_Z_check, l1_Y,
-                                       array_N * sizeof(int16_t));
-  }
+  dma_collective_memcpy_blocking(l2_Z_check, l1_Y, array_N * sizeof(int16_t));
   mempool_check_dpi_f16(l2_Z_check, l2_Z, array_N, 0.1f, 0);
   mempool_barrier(num_cores);
 

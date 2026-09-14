@@ -46,7 +46,7 @@ void mempool_barrier_init(uint32_t core_id) {
   }
   if (core_id == 0u)
     mempool_barrier_poll_init(&poll_slot);
-  dma_collective_all_runtime_init();
+  dma_collective_runtime_init();
   tnc_engine_runtime_init();
   mempool_barrier(NUM_CORES);
 }

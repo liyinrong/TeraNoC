@@ -104,9 +104,9 @@ int main() {
 #endif
 
   // Copy the inputs into the local L1 scratchpad.
+  dma_collective_memcpy_nonblocking(l1_X, l2_X, dim * sizeof(float));
+  dma_collective_memcpy_blocking(l1_Y, l2_Y, dim * sizeof(float));
   if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_X, l2_X, dim * sizeof(float));
-    dma_collective_all_memcpy_blocking(l1_Y, l2_Y, dim * sizeof(float));
     for (uint32_t i = 0; i <= active_cores; i++) {
       l1_result[i] = 0;
     }
@@ -201,9 +201,7 @@ int main() {
   }
 
   // Copy the scalar result to L2 for the testbench DPI checker.
-  if (mempool_is_group_coordinator())
-    dma_collective_all_memcpy_blocking(l2_result_check, final_store,
-                                       sizeof(float));
+  dma_collective_memcpy_blocking(l2_result_check, final_store, sizeof(float));
   mempool_check_dpi_f32(l2_result_check, &l2_Z, 1, 0.01f, 0);
   mempool_barrier(num_cores);
 

@@ -168,37 +168,23 @@ static inline uint32_t vc_desc_valid(const vc_desc_t *d) {
   return d->len != 0 && d->count[0] != 0 && d->count[1] != 0;
 }
 
-// Submit one L2<->VC transfer collectively. Every core in the rectangle calls
-// with the same nonzero generation; a software-atomic claim elects one issuer
-// per group and the returned handle names that group's accepted request.
+// One L2<->VC transfer over the caller's rectangle. Every core of the
+// rectangle calls, in the same order; each group's coordinator issues its own
+// stripe (dma_collective.h). Complete the returned op with dma_collective_wait
+// or dma_collective_wait_ready.
 //
 // Both descriptors use global aliases. One side must be a VC descriptor and
 // the other flat L2 memory. Cross-group L1<->L1 still needs the WP2 wide plane.
-dma_collective_handle_t vc_dma_memcpy_collective_nonblocking(
-    dma_collective_state_t *state, uint32_t generation, uint32_t stream,
-    const vc_desc_t *dst, const vc_desc_t *src);
-uint32_t vc_dma_memcpy_collective_wait_through(
-    const vc_desc_t *last_dst, const vc_desc_t *last_src,
-    const dma_collective_handle_t *last_handle);
-uint32_t vc_dma_memcpy_collective_blocking(dma_collective_state_t *state,
-                                           uint32_t generation, uint32_t stream,
-                                           const vc_desc_t *dst,
-                                           const vc_desc_t *src);
+dma_collective_op_t vc_dma_memcpy_nonblocking(const vc_desc_t *dst,
+                                              const vc_desc_t *src);
+uint32_t vc_dma_memcpy_blocking(const vc_desc_t *dst, const vc_desc_t *src);
 
 // Address-derived forms. Stride, rectangle and group scope all follow from
 // the addresses, so the caller passes only (dest, src, len); exactly one side
-// must point into a VC window. Every core of the rectangle calls, with the
-// same nonzero generation, as with the descriptor forms above.
-dma_collective_handle_t
-vc_dma_memcpy_auto_nonblocking(dma_collective_state_t *state,
-                               uint32_t generation, uint32_t stream, void *dest,
-                               const void *src, size_t len);
-uint32_t
-vc_dma_memcpy_auto_wait_through(void *dest, const void *src, size_t len,
-                                const dma_collective_handle_t *last_handle);
-uint32_t vc_dma_memcpy_auto_blocking(dma_collective_state_t *state,
-                                     uint32_t generation, uint32_t stream,
-                                     void *dest, const void *src, size_t len);
+// must point into a VC window.
+dma_collective_op_t vc_dma_memcpy_auto_nonblocking(void *dest, const void *src,
+                                                   size_t len);
+uint32_t vc_dma_memcpy_auto_blocking(void *dest, const void *src, size_t len);
 
 // --- allocator -------------------------------------------------------------
 //

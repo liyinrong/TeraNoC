@@ -56,15 +56,12 @@ int main() {
 
 #ifdef SINGLE
   // Transfer
-  if (tnc_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_X, l2_X,
-                                       (matrix_M * matrix_N) * sizeof(int16_t));
-    dma_collective_all_memcpy_blocking(l1_W, l2_W,
-                                       (matrix_N * matrix_P) * sizeof(int16_t));
-    dma_collective_all_memcpy_blocking(l1_Y, l2_Y,
-                                       (matrix_M * matrix_P) * sizeof(int16_t));
-  }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(l1_X, l2_X,
+                                    (matrix_M * matrix_N) * sizeof(int16_t));
+  dma_collective_memcpy_nonblocking(l1_W, l2_W,
+                                    (matrix_N * matrix_P) * sizeof(int16_t));
+  dma_collective_memcpy_blocking(l1_Y, l2_Y,
+                                 (matrix_M * matrix_P) * sizeof(int16_t));
   // Compute
   mempool_barrier(num_cores);
   time_init = mempool_get_timer();
@@ -92,20 +89,17 @@ int main() {
   uint32_t W_shift;
 
   // Transfer
-  if (tnc_is_group_coordinator()) {
-    for (uint32_t i = 0; i < num_redmules; i++) {
-      X_shift = (XSHIFT == 1) ? (i * PORT_WIDTH) % matrix_N : 0;
-      dma_collective_all_memcpy_blocking(
-          l1_X + i * (matrix_M * matrix_N / num_redmules) + X_shift,
-          l2_X + i * (matrix_M * matrix_N / num_redmules),
-          (matrix_M * matrix_N / num_redmules) * sizeof(int16_t));
-    }
-    dma_collective_all_memcpy_blocking(l1_W, l2_W,
-                                       (matrix_N * matrix_P) * sizeof(int16_t));
-    dma_collective_all_memcpy_blocking(l1_Y, l2_Y,
-                                       (matrix_M * matrix_P) * sizeof(int16_t));
+  for (uint32_t i = 0; i < num_redmules; i++) {
+    X_shift = (XSHIFT == 1) ? (i * PORT_WIDTH) % matrix_N : 0;
+    dma_collective_memcpy_nonblocking(
+        l1_X + i * (matrix_M * matrix_N / num_redmules) + X_shift,
+        l2_X + i * (matrix_M * matrix_N / num_redmules),
+        (matrix_M * matrix_N / num_redmules) * sizeof(int16_t));
   }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(l1_W, l2_W,
+                                    (matrix_N * matrix_P) * sizeof(int16_t));
+  dma_collective_memcpy_blocking(l1_Y, l2_Y,
+                                 (matrix_M * matrix_P) * sizeof(int16_t));
 
   // Compute
   mempool_barrier(num_cores);
@@ -138,10 +132,8 @@ int main() {
     uint32_t clock_cycles = (time_end - time_init);
     printf("\nKernel execution takes %d clock cycles\n", clock_cycles);
   }
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l2_Z_check, l1_Y,
-                                       matrix_M * matrix_P * sizeof(int16_t));
-  }
+  dma_collective_memcpy_blocking(l2_Z_check, l1_Y,
+                                 matrix_M * matrix_P * sizeof(int16_t));
   mempool_check_dpi_f16(l2_Z_check, l2_Z, matrix_M * matrix_P, 0.05f, 0);
   mempool_barrier(num_cores);
   return 0;

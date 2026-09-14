@@ -147,11 +147,10 @@ void *layernorm_conv1d(__fp16 const *__restrict__ l2_F,
 
   static __fp16 *F = l1_F; // Should be allocated dinamically
   static __fp16 *b = l1_b; // Should be allocated dinamically
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_nonblocking(F, l2_F,
-                                          ChOut * ChInp * Wf * sizeof(int16_t));
-    dma_collective_all_memcpy_nonblocking(b, l2_b, ChOut * sizeof(int16_t));
-  }
+  dma_collective_memcpy_nonblocking(F, l2_F,
+                                    ChOut * ChInp * Wf * sizeof(int16_t));
+  const dma_collective_op_t weights_op =
+      dma_collective_memcpy_nonblocking(b, l2_b, ChOut * sizeof(int16_t));
 
 #if defined(VERBOSE)
   if (core_id == 0) {
@@ -202,10 +201,7 @@ void *layernorm_conv1d(__fp16 const *__restrict__ l2_F,
   /**************************************************************************/
 
   mempool_start_benchmark();
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_wait();
-  }
-  mempool_barrier(num_cores);
+  dma_collective_wait(&weights_op);
   mempool_stop_benchmark();
 
 #ifdef VERBOSE

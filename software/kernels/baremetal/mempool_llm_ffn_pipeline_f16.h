@@ -110,28 +110,20 @@ llm_ffn_swiglu_f16(const __fp16 *l2_x, const __fp16 *l2_gamma,
   const uint32_t set_elems = 2 * gu_elems + wd_elems; // one double-buffer set
 
   // Stage inputs into L1 (activations resident; weights stream per panel).
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_x, l2_x,
-                                       seqlen * dmodel * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_gamma, l2_gamma,
-                                       dmodel * sizeof(__fp16));
-  }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(l1_x, l2_x,
+                                    seqlen * dmodel * sizeof(__fp16));
+  dma_collective_memcpy_blocking(l1_gamma, l2_gamma, dmodel * sizeof(__fp16));
 
   // h = RMSNorm(x) * gamma
   llm_rmsnorm_f16(l1_x, l1_gamma, l1_h, seqlen, dmodel, core_id, num_cores);
   mempool_barrier(num_cores);
 
   // Prime panel 0's three weight panels.
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_wbuf, l2_wg,
-                                       gu_elems * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_wbuf + gu_elems, l2_wu,
-                                       gu_elems * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_wbuf + 2 * gu_elems, l2_wd,
-                                       wd_elems * sizeof(__fp16));
-  }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(l1_wbuf, l2_wg, gu_elems * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_wbuf + gu_elems, l2_wu,
+                                    gu_elems * sizeof(__fp16));
+  dma_collective_memcpy_blocking(l1_wbuf + 2 * gu_elems, l2_wd,
+                                 wd_elems * sizeof(__fp16));
 
   for (uint32_t p = 0; p < npanel; p++) {
     __fp16 *cur = l1_wbuf + ((p & 1) ? set_elems : 0);
@@ -141,15 +133,17 @@ llm_ffn_swiglu_f16(const __fp16 *l2_x, const __fp16 *l2_gamma,
     __fp16 *wd = cur + 2 * gu_elems;
 
     // Prefetch panel p+1's weights (overlaps this panel's compute).
-    if (mempool_is_group_coordinator() && (p + 1) < npanel) {
-      dma_collective_all_memcpy_nonblocking(nxt, l2_wg + (p + 1) * gu_elems,
-                                            gu_elems * sizeof(__fp16));
-      dma_collective_all_memcpy_nonblocking(nxt + gu_elems,
-                                            l2_wu + (p + 1) * gu_elems,
-                                            gu_elems * sizeof(__fp16));
-      dma_collective_all_memcpy_nonblocking(nxt + 2 * gu_elems,
-                                            l2_wd + (p + 1) * wd_elems,
-                                            wd_elems * sizeof(__fp16));
+    const uint32_t prefetch = (p + 1) < npanel;
+    dma_collective_op_t prefetch_op = {.seq = 0};
+    if (prefetch) {
+      dma_collective_memcpy_nonblocking(nxt, l2_wg + (p + 1) * gu_elems,
+                                        gu_elems * sizeof(__fp16));
+      dma_collective_memcpy_nonblocking(nxt + gu_elems,
+                                        l2_wu + (p + 1) * gu_elems,
+                                        gu_elems * sizeof(__fp16));
+      prefetch_op = dma_collective_memcpy_nonblocking(
+          nxt + 2 * gu_elems, l2_wd + (p + 1) * wd_elems,
+          wd_elems * sizeof(__fp16));
     }
 
     // g_p = h @ Wg_p ; u_p = h @ Wu_p  (row-split across engines).
@@ -182,9 +176,10 @@ llm_ffn_swiglu_f16(const __fp16 *l2_x, const __fp16 *l2_gamma,
                       (uint16_t)dmodel, GEMM);
     }
     mempool_barrier(num_cores);
-    if (mempool_is_group_coordinator())
-      dma_collective_all_wait();
-    mempool_barrier(num_cores);
+    if (prefetch)
+      dma_collective_wait(&prefetch_op);
+    else
+      mempool_barrier(num_cores);
   }
 
   // out += x  (residual)
@@ -220,26 +215,19 @@ static inline void llm_ffn_swiglu_row_tiled_f16(
   const uint32_t row_elems = row_tile * dmodel;
   const uint32_t activation_elems = row_tile * panel;
 
-  if (mempool_is_group_coordinator())
-    dma_collective_all_memcpy_blocking(l1_gamma, l2_gamma,
-                                       dmodel * sizeof(__fp16));
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_blocking(l1_gamma, l2_gamma, dmodel * sizeof(__fp16));
 
   // Normalize every row once. The persistent normalized activation lives in
   // L2 because a real S x D tensor is larger than the constrained L1.
   for (uint32_t rt = 0; rt < nrow_tiles; rt++) {
     const uint32_t row0 = rt * row_tile;
-    if (mempool_is_group_coordinator())
-      dma_collective_all_memcpy_blocking(l1_row, l2_x + row0 * dmodel,
-                                         row_elems * sizeof(__fp16));
-    mempool_barrier(num_cores);
+    dma_collective_memcpy_blocking(l1_row, l2_x + row0 * dmodel,
+                                   row_elems * sizeof(__fp16));
     llm_rmsnorm_f16(l1_row, l1_gamma, l1_row, row_tile, dmodel, core_id,
                     num_cores);
     mempool_barrier(num_cores);
-    if (mempool_is_group_coordinator())
-      dma_collective_all_memcpy_blocking(l2_h + row0 * dmodel, l1_row,
-                                         row_elems * sizeof(__fp16));
-    mempool_barrier(num_cores);
+    dma_collective_memcpy_blocking(l2_h + row0 * dmodel, l1_row,
+                                   row_elems * sizeof(__fp16));
   }
 
   for (uint32_t p = 0; p < npanel; p++) {
@@ -247,22 +235,17 @@ static inline void llm_ffn_swiglu_row_tiled_f16(
     __fp16 *wu = l1_wbuf + gu_elems;
     __fp16 *wd = l1_wbuf + 2 * gu_elems;
 
-    if (mempool_is_group_coordinator()) {
-      dma_collective_all_memcpy_blocking(wg, l2_wg + p * gu_elems,
-                                         gu_elems * sizeof(__fp16));
-      dma_collective_all_memcpy_blocking(wu, l2_wu + p * gu_elems,
-                                         gu_elems * sizeof(__fp16));
-      dma_collective_all_memcpy_blocking(wd, l2_wd + p * wd_elems,
-                                         wd_elems * sizeof(__fp16));
-    }
-    mempool_barrier(num_cores);
+    dma_collective_memcpy_nonblocking(wg, l2_wg + p * gu_elems,
+                                      gu_elems * sizeof(__fp16));
+    dma_collective_memcpy_nonblocking(wu, l2_wu + p * gu_elems,
+                                      gu_elems * sizeof(__fp16));
+    dma_collective_memcpy_blocking(wd, l2_wd + p * wd_elems,
+                                   wd_elems * sizeof(__fp16));
 
     for (uint32_t rt = 0; rt < nrow_tiles; rt++) {
       const uint32_t row0 = rt * row_tile;
-      if (mempool_is_group_coordinator())
-        dma_collective_all_memcpy_blocking(l1_row, l2_h + row0 * dmodel,
-                                           row_elems * sizeof(__fp16));
-      mempool_barrier(num_cores);
+      dma_collective_memcpy_blocking(l1_row, l2_h + row0 * dmodel,
+                                     row_elems * sizeof(__fp16));
 
       if (redmule_id < ne_used) {
         unsigned int x =
@@ -285,10 +268,11 @@ static inline void llm_ffn_swiglu_row_tiled_f16(
 
       // h is no longer needed for this panel, so reuse l1_row for the partial
       // output. Panel zero starts from +0; later panels load the FP16 feedback.
-      if (p != 0 && mempool_is_group_coordinator())
-        dma_collective_all_memcpy_blocking(l1_row, l2_out + row0 * dmodel,
-                                           row_elems * sizeof(__fp16));
-      mempool_barrier(num_cores);
+      if (p != 0)
+        dma_collective_memcpy_blocking(l1_row, l2_out + row0 * dmodel,
+                                       row_elems * sizeof(__fp16));
+      else
+        mempool_barrier(num_cores);
       if (redmule_id < ne_used) {
         unsigned int x =
             (unsigned int)(l1_g + redmule_id * rows_per_engine * panel);
@@ -309,19 +293,15 @@ static inline void llm_ffn_swiglu_row_tiled_f16(
           uint32_t n = row_elems - off;
           if (n > activation_elems)
             n = activation_elems;
-          if (mempool_is_group_coordinator())
-            dma_collective_all_memcpy_blocking(l1_g, l2_x + row0 * dmodel + off,
-                                               n * sizeof(__fp16));
-          mempool_barrier(num_cores);
+          dma_collective_memcpy_blocking(l1_g, l2_x + row0 * dmodel + off,
+                                         n * sizeof(__fp16));
           llm_residual_add_f16(l1_row + off, l1_g, n, core_id, num_cores);
           mempool_barrier(num_cores);
         }
       }
 
-      if (mempool_is_group_coordinator())
-        dma_collective_all_memcpy_blocking(l2_out + row0 * dmodel, l1_row,
-                                           row_elems * sizeof(__fp16));
-      mempool_barrier(num_cores);
+      dma_collective_memcpy_blocking(l2_out + row0 * dmodel, l1_row,
+                                     row_elems * sizeof(__fp16));
     }
   }
 }

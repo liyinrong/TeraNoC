@@ -35,7 +35,6 @@ static uint32_t l2_src[AUTO_WORDS]
     __attribute__((aligned(4 * NUM_BANKS), section(".l2_bss")));
 static uint32_t total_errors __attribute__((section(".l1")));
 static uint32_t control_errors __attribute__((section(".l1")));
-static dma_collective_state_t dma_state DMA_COLLECTIVE_STORAGE;
 
 int main() {
   const uint32_t core_id = mempool_get_core_id();
@@ -51,13 +50,6 @@ int main() {
     return 1;
   }
   uint32_t *const dst = (uint32_t *)vc_malloc(AUTO_LEVEL, AUTO_BYTES);
-  const vc_rect_t rect = vc_rect(AUTO_LEVEL);
-  const dma_collective_scope_t scope = {
-      .base_group = rect.base_gid,
-      .num_groups = rect.ngroups,
-      .cores_per_group = NUM_CORES_PER_GROUP,
-  };
-  dma_collective_init(&dma_state, &scope);
 
   if (core_id == 0) {
     total_errors = 0;
@@ -75,9 +67,8 @@ int main() {
            (unsigned)AUTO_LEVEL, (unsigned)AUTO_ROW, (unsigned)AUTO_ROWS,
            (unsigned)AUTO_BYTES, (unsigned)(uint32_t)dst);
 
-  // Every core of the rectangle calls; the claim elects one issuer per group.
-  const uint32_t error =
-      vc_dma_memcpy_auto_blocking(&dma_state, 1u, 0u, dst, l2_src, AUTO_BYTES);
+  // Every core of the rectangle calls; each group's coordinator issues.
+  const uint32_t error = vc_dma_memcpy_auto_blocking(dst, l2_src, AUTO_BYTES);
   mempool_barrier(num_cores);
 
   {
@@ -96,7 +87,7 @@ int main() {
     dst[i] = 0u;
   mempool_barrier(num_cores);
   const uint32_t control_error = vc_dma_memcpy_auto_blocking(
-      &dma_state, 2u, 0u, dst, l2_src + (AUTO_ROW / 4u), AUTO_BYTES - AUTO_ROW);
+      dst, l2_src + (AUTO_ROW / 4u), AUTO_BYTES - AUTO_ROW);
   mempool_barrier(num_cores);
   {
     uint32_t same = 0u;

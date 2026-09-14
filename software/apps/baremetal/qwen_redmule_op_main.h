@@ -291,21 +291,22 @@ int main() {
   const uint32_t redmule_id = mempool_get_redmule_id();
   mempool_barrier_init(core_id);
 
-  if (mempool_is_group_coordinator()) {
-    if (core_id == 0)
-      printf("\n[%s] logical=%dx%dx%d tile=%dx%dx%d map=%dx%d "
-             "engines=%d/%d port=%d xshift=%d\n",
-             QWEN_BENCHMARK_NAME, QWEN_LOGICAL_M, QWEN_LOGICAL_N,
-             QWEN_LOGICAL_P, QWEN_TILE_M, QWEN_TILE_N, QWEN_TILE_P, QWEN_NE_R,
-             QWEN_NE_C, QWEN_ACTIVE_ENGINES, NUM_REDMULE_TILES, QWEN_PORT_WIDTH,
-             LLM_RM_X_SHIFT);
-    dma_collective_all_memcpy_blocking(
-        qwen_l1_x, qwen_l2_x, sizeof(__fp16) * QWEN_TILE_M * QWEN_TILE_N);
+  if (core_id == 0)
+    printf("\n[%s] logical=%dx%dx%d tile=%dx%dx%d map=%dx%d "
+           "engines=%d/%d port=%d xshift=%d\n",
+           QWEN_BENCHMARK_NAME, QWEN_LOGICAL_M, QWEN_LOGICAL_N, QWEN_LOGICAL_P,
+           QWEN_TILE_M, QWEN_TILE_N, QWEN_TILE_P, QWEN_NE_R, QWEN_NE_C,
+           QWEN_ACTIVE_ENGINES, NUM_REDMULE_TILES, QWEN_PORT_WIDTH,
+           LLM_RM_X_SHIFT);
 #ifndef QWEN_VC_W_LEVEL
-    dma_collective_all_memcpy_blocking(
-        qwen_l1_w, qwen_l2_w, sizeof(__fp16) * QWEN_TILE_N * QWEN_TILE_P);
+  dma_collective_memcpy_nonblocking(qwen_l1_x, qwen_l2_x,
+                                    sizeof(__fp16) * QWEN_TILE_M * QWEN_TILE_N);
+  dma_collective_memcpy_blocking(qwen_l1_w, qwen_l2_w,
+                                 sizeof(__fp16) * QWEN_TILE_N * QWEN_TILE_P);
+#else
+  dma_collective_memcpy_blocking(qwen_l1_x, qwen_l2_x,
+                                 sizeof(__fp16) * QWEN_TILE_M * QWEN_TILE_N);
 #endif
-  }
   mempool_barrier(num_cores);
 
   if (redmule_id < QWEN_ACTIVE_ENGINES) {
@@ -357,9 +358,10 @@ int main() {
   mempool_barrier(num_cores);
   QWEN_MARK("bar-after-alloc");
 
-  // One core per rectangle pulls that rectangle's W blocks out of L2. The
-  // descriptor is a GLOBAL alias -- the DMA never sees a VC address, which is
-  // what keeps one implementation of the map (contract [dma]).
+  // Every core of a rectangle pulls that rectangle's W blocks out of L2, and
+  // each group's coordinator issues its own stripe. The descriptor is a GLOBAL
+  // alias -- the DMA never sees a VC address, which is what keeps one
+  // implementation of the map (contract [dma]).
   // Seed the L2 source at the positions the fill check samples. qwen_l2_w is
   // .l2_bss and therefore zero, so comparing it after the DMA would compare
   // zeros to zeros and pass wherever the data landed -- the same vacuity the
@@ -372,7 +374,7 @@ int main() {
                                   QWEN_VC_FILL_N)) = (uint16_t)(0x5C00u + i);
   mempool_barrier(num_cores);
   QWEN_MARK("seed-done");
-  if (core_id == qwen_vc_first * NUM_CORES_PER_TILE) {
+  {
     const vc_rect_t rect = vc_rect(QWEN_VC_W_LEVEL);
     for (uint32_t e = 0; e < QWEN_VC_W_ENGINES; e++) {
       if (qwen_vc_first + e >= QWEN_ACTIVE_ENGINES)
@@ -495,15 +497,13 @@ int main() {
   mempool_stop_benchmark();
   const uint32_t time_end = mempool_get_timer();
 
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(
-        qwen_l2_z, qwen_l1_z, sizeof(__fp16) * QWEN_TILE_M * QWEN_TILE_P);
-    if (core_id == 0) {
-      printf("[%s] stage=gemm cycles=%u\n", QWEN_BENCHMARK_NAME,
-             time_end - time_init);
-      printf("[%s] kernel takes %u clock cycles\n", QWEN_BENCHMARK_NAME,
-             time_end - time_init);
-    }
+  dma_collective_memcpy_blocking(qwen_l2_z, qwen_l1_z,
+                                 sizeof(__fp16) * QWEN_TILE_M * QWEN_TILE_P);
+  if (core_id == 0) {
+    printf("[%s] stage=gemm cycles=%u\n", QWEN_BENCHMARK_NAME,
+           time_end - time_init);
+    printf("[%s] kernel takes %u clock cycles\n", QWEN_BENCHMARK_NAME,
+           time_end - time_init);
   }
   mempool_barrier(num_cores);
   return 0;

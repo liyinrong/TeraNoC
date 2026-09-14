@@ -31,11 +31,8 @@ void *ffn(__fp16 const *__restrict__ l2_I, __fp16 const *__restrict__ l2_F,
   static __fp16 *I = l1_I;   // Should be allocated dinamically
   static __fp16 *T1 = l1_T1; // Should be allocated dinamically
   static __fp16 *T2 = l1_T2; // Should be allocated dinamically
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(
-        I, l2_I, Embed * Beam * tdSamples * sizeof(int16_t));
-  }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_blocking(I, l2_I,
+                                 Embed * Beam * tdSamples * sizeof(int16_t));
   mempool_stop_benchmark();
 
 #if defined(VERBOSE)
@@ -59,11 +56,10 @@ void *ffn(__fp16 const *__restrict__ l2_I, __fp16 const *__restrict__ l2_F,
 
   static __fp16 *F = l1_F; // Should be allocated dinamically
   static __fp16 *b = l1_b; // Should be allocated dinamically
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_nonblocking(F, l2_F,
-                                          Embed * Embed * Wf * sizeof(int16_t));
-    dma_collective_all_memcpy_nonblocking(b, l2_b, Embed * sizeof(int16_t));
-  }
+  dma_collective_memcpy_nonblocking(F, l2_F,
+                                    Embed * Embed * Wf * sizeof(int16_t));
+  const dma_collective_op_t weights_op =
+      dma_collective_memcpy_nonblocking(b, l2_b, Embed * sizeof(int16_t));
 
 #if defined(VERBOSE)
   if (core_id == 0) {
@@ -112,10 +108,7 @@ void *ffn(__fp16 const *__restrict__ l2_I, __fp16 const *__restrict__ l2_F,
   /**************************************************************************/
 
   mempool_start_benchmark();
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_wait();
-  }
-  mempool_barrier(num_cores);
+  dma_collective_wait(&weights_op);
   mempool_stop_benchmark();
 
 #ifdef VERBOSE

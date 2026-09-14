@@ -14,7 +14,7 @@
 
 #include <stdint.h>
 
-#include "dma_collective.h"
+#include "dma.h"
 #include "encoding.h"
 #include "printf.h"
 #include "runtime.h"
@@ -32,34 +32,30 @@ uint32_t dma_l1_buf[DMA_BW_WORDS]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 uint32_t dma_l2_buf[DMA_BW_WORDS]
     __attribute__((aligned(4 * NUM_BANKS), section(".l2_bss")));
-static dma_collective_state_t dma_state DMA_COLLECTIVE_STORAGE;
 
 int main() {
   const uint32_t core_id = mempool_get_core_id();
   const uint32_t num_cores = mempool_get_core_count();
   mempool_barrier_init(core_id);
-  const dma_collective_scope_t dma_scope = dma_collective_scope_all();
-  dma_collective_init(&dma_state, &dma_scope);
   mempool_barrier(num_cores);
 
   if (core_id == 0)
     printf("\n[dma_l2_l1_bw] groups=%d cores=%d banks=%d bytes=%d\n",
            NUM_GROUPS, NUM_CORES, NUM_BANKS, DMA_BW_BYTES);
 
-  uint32_t error = dma_collective_memcpy_blocking(
-      &dma_state, &dma_scope, 1, 0, dma_l1_buf, dma_l2_buf, DMA_WARM_BYTES);
+  // Every core calls; each group's coordinator issues its own stripe.
+  uint32_t error =
+      dma_collective_memcpy_blocking(dma_l1_buf, dma_l2_buf, DMA_WARM_BYTES);
 
   mempool_start_benchmark();
   const uint32_t t0 = mempool_get_timer();
-  error |= dma_collective_memcpy_blocking(&dma_state, &dma_scope, 2, 0,
-                                          dma_l1_buf, dma_l2_buf, DMA_BW_BYTES);
+  error |= dma_collective_memcpy_blocking(dma_l1_buf, dma_l2_buf, DMA_BW_BYTES);
   const uint32_t t1 = mempool_get_timer();
   mempool_stop_benchmark();
 
   mempool_start_benchmark();
   const uint32_t t2 = mempool_get_timer();
-  error |= dma_collective_memcpy_blocking(&dma_state, &dma_scope, 3, 0,
-                                          dma_l2_buf, dma_l1_buf, DMA_BW_BYTES);
+  error |= dma_collective_memcpy_blocking(dma_l2_buf, dma_l1_buf, DMA_BW_BYTES);
   const uint32_t t3 = mempool_get_timer();
   mempool_stop_benchmark();
 

@@ -65,16 +65,12 @@ int main() {
   uint32_t time_init, time_end;
 
   /* Initialize matrices */
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_H, l2_H,
-                                       N_TX * N_RX * N_ITR * sizeof(int32_t));
-    dma_collective_all_memcpy_blocking(l1_y, l2_y,
-                                       N_RX * N_ITR * sizeof(int32_t));
-    dma_collective_all_memcpy_blocking(l1_S, l2_S,
-                                       N_TX * N_ITR * sizeof(int32_t));
-    if (core_id == 0)
-      printf("Data transferred\n");
-  }
+  dma_collective_memcpy_nonblocking(l1_H, l2_H,
+                                    N_TX * N_RX * N_ITR * sizeof(int32_t));
+  dma_collective_memcpy_nonblocking(l1_y, l2_y, N_RX * N_ITR * sizeof(int32_t));
+  dma_collective_memcpy_blocking(l1_S, l2_S, N_TX * N_ITR * sizeof(int32_t));
+  if (core_id == 0)
+    printf("Data transferred\n");
   mempool_barrier(num_cores);
 
   /* Benchmark */

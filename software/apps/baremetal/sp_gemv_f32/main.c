@@ -58,16 +58,14 @@ int main() {
   mempool_barrier_init(core_id);
 
   // Copy the inputs into the local L1 scratchpad.
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_A, l2_A,
-                                       (matrix_M * matrix_N) * sizeof(float));
-    for (uint32_t i = 0; i < multiB; i++) {
-      // Copy multiple X vectors to reduce conflicts
-      dma_collective_all_memcpy_blocking(l1_X[i], l2_X,
-                                         (matrix_N) * sizeof(float));
-    }
+  dma_collective_op_t op = dma_collective_memcpy_nonblocking(
+      l1_A, l2_A, (matrix_M * matrix_N) * sizeof(float));
+  for (uint32_t i = 0; i < multiB; i++) {
+    // Copy multiple X vectors to reduce conflicts
+    op = dma_collective_memcpy_nonblocking(l1_X[i], l2_X,
+                                           (matrix_N) * sizeof(float));
   }
-  mempool_barrier(num_cores);
+  dma_collective_wait(&op);
 
   // Work distribution
   unsigned int m_core = matrix_M / num_cores;
@@ -105,10 +103,7 @@ int main() {
   }
 
   // L2 buffer to hold the result for the testbench DPI checker.
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l2_Y_check, l1_Y,
-                                       matrix_M * sizeof(float));
-  }
+  dma_collective_memcpy_blocking(l2_Y_check, l1_Y, matrix_M * sizeof(float));
   mempool_check_dpi_f32(l2_Y_check, l2_Y, matrix_M, 0.01f, 0);
   mempool_barrier(num_cores);
 

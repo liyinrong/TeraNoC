@@ -32,7 +32,6 @@ static uint16_t l2_src[REPRO_BYTES / 2]
 // One slot per group: all rectangle leaders issue concurrently.
 static uint32_t cyc[NUM_GROUPS][3] __attribute__((section(".l1")));
 static uint32_t total_errors __attribute__((section(".l1")));
-static dma_collective_state_t dma_state DMA_COLLECTIVE_STORAGE;
 
 int main() {
   const uint32_t core_id = mempool_get_core_id();
@@ -54,11 +53,6 @@ int main() {
   uint16_t *const dst = (uint16_t *)vc_malloc(REPRO_LEVEL, REPRO_BYTES);
   const uint32_t off = (uint32_t)dst - vc_window_base(REPRO_LEVEL);
   const vc_rect_t rect = vc_rect(REPRO_LEVEL);
-  const dma_collective_scope_t dma_scope = {
-      .base_group = rect.base_gid,
-      .num_groups = rect.ngroups,
-      .cores_per_group = NUM_CORES_PER_GROUP,
-  };
   const uint32_t group_id = mempool_get_group_id();
   const uint32_t tile = group_id % NUM_TILES_PER_GROUP;
   const uint32_t leader =
@@ -77,7 +71,6 @@ int main() {
   if (core_id == leader && group_id == rect.base_gid)
     for (uint32_t r = 0; r < REPRO_ROWS_MAX; ++r)
       dst[r * (REPRO_ROW / 2)] = (uint16_t)(0x5A00u + r);
-  dma_collective_init(&dma_state, &dma_scope);
   mempool_barrier(num_cores);
 
   const uint32_t stages[3] = {1, 4, REPRO_ROWS_MAX};
@@ -106,9 +99,7 @@ int main() {
                           .len = bytes,
                           .count = {1, 1},
                           .stride = {0, 0}};
-    const dma_collective_handle_t handle =
-        vc_dma_memcpy_collective_nonblocking(&dma_state, s + 1u, 0, &d, &sd);
-    transfer_error = vc_dma_memcpy_collective_wait_through(&d, &sd, &handle);
+    transfer_error = vc_dma_memcpy_blocking(&d, &sd);
 #endif
     const mempool_timer_t t1 = mempool_get_timer();
     if (core_id == leader) {

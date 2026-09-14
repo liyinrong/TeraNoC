@@ -97,15 +97,12 @@ int main() {
   mempool_stop_benchmark();
   uint32_t time_end = mempool_get_timer();
 
-  if (mempool_is_group_coordinator()) {
-    if (core_id == 0)
-      printf("[llm_ffn_prefill_f16] kernel takes %d cycles\n",
-             time_end - time_init);
+  if (core_id == 0)
+    printf("[llm_ffn_prefill_f16] kernel takes %d cycles\n",
+           time_end - time_init);
 #if ROW_TILE == S
-    dma_collective_all_memcpy_blocking(l2_check, l1_out,
-                                       S * D * sizeof(__fp16));
+  dma_collective_memcpy_blocking(l2_check, l1_out, S * D * sizeof(__fp16));
 #endif
-  }
   mempool_barrier(num_cores);
 
 #if !LLM_PERF_ONLY

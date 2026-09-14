@@ -223,96 +223,66 @@ vc_desc_t vc_descriptor(const vc_rect_t *r, uint32_t offset, uint32_t bytes) {
   return d;
 }
 
-static dma_collective_handle_t
-vc_dma_invalid_handle(dma_collective_state_t *state, uint32_t generation,
-                      uint32_t stream, uint32_t status) {
-  const dma_collective_handle_t handle = {
-      .state = state,
-      .generation = generation,
-      .slot = 0,
-      .group_id = mempool_get_group_id(),
-      .base_group = 0,
-      .num_groups = 0,
-      .stream = stream,
-      .local_id = 0,
+// An op no core counted: its scope is invalid, so every wait on it returns the
+// error at once and no core enters a barrier.
+static dma_collective_op_t vc_dma_invalid_op(uint32_t status) {
+  const dma_collective_op_t op = {
+      .scope = {.level = UINT32_MAX, .base_group = 0, .num_groups = 0},
+      .seq = 0,
       .status = status,
   };
-  return handle;
+  return op;
 }
 
-static dma_collective_scope_t vc_dma_scope(const vc_desc_t *dst,
-                                           const vc_desc_t *src) {
-  const vc_desc_t *const vc = dst->stride[1] != 0 ? dst : src;
+// Morton makes a level-k rectangle a contiguous range of 4^k group ids.
+static dma_collective_scope_t vc_dma_scope(const vc_desc_t *vc) {
+  const uint32_t num_groups = vc->len / (uint32_t)VC_ROW_BYTES;
   const dma_collective_scope_t scope = {
+      .level = (31u - (uint32_t)__builtin_clz(num_groups)) / 2u,
       .base_group = (vc->base % VC_WORD_STRIDE) / (uint32_t)VC_ROW_BYTES,
-      .num_groups = vc->len / (uint32_t)VC_ROW_BYTES,
-      .cores_per_group = NUM_CORES_PER_GROUP,
+      .num_groups = num_groups,
   };
   return scope;
 }
 
-dma_collective_handle_t vc_dma_memcpy_collective_nonblocking(
-    dma_collective_state_t *state, uint32_t generation, uint32_t stream,
-    const vc_desc_t *dst, const vc_desc_t *src) {
+dma_collective_op_t vc_dma_memcpy_nonblocking(const vc_desc_t *dst,
+                                              const vc_desc_t *src) {
   if (!vc_desc_valid(dst) || !vc_desc_valid(src))
-    return vc_dma_invalid_handle(state, generation, stream,
-                                 DMA_COLLECTIVE_ERROR_ARGUMENT);
+    return vc_dma_invalid_op(DMA_COLLECTIVE_ERROR_ARGUMENT);
 
   // vc_descriptor leaves stride[1] nonzero even for a one-row allocation, so
   // it remains distinguishable from the caller's flat L2 descriptor.
   const uint32_t dst_vc = dst->stride[1] != 0;
   const uint32_t src_vc = src->stride[1] != 0;
   if (dst_vc == src_vc)
-    return vc_dma_invalid_handle(state, generation, stream,
-                                 DMA_COLLECTIVE_ERROR_ARGUMENT);
+    return vc_dma_invalid_op(DMA_COLLECTIVE_ERROR_ARGUMENT);
 
   const vc_desc_t *const vc = dst_vc ? dst : src;
   if (vc->count[0] != 1 || vc->len % VC_ROW_BYTES != 0)
-    return vc_dma_invalid_handle(state, generation, stream,
-                                 DMA_COLLECTIVE_ERROR_ARGUMENT);
+    return vc_dma_invalid_op(DMA_COLLECTIVE_ERROR_ARGUMENT);
 
-  const dma_collective_scope_t scope = vc_dma_scope(dst, src);
+  const dma_collective_scope_t scope = vc_dma_scope(vc);
   const uint32_t gid = mempool_get_group_id();
   if (gid < scope.base_group || gid >= scope.base_group + scope.num_groups)
-    return vc_dma_invalid_handle(state, generation, stream,
-                                 DMA_COLLECTIVE_ERROR_SCOPE);
+    return vc_dma_invalid_op(DMA_COLLECTIVE_ERROR_SCOPE);
 
-  // Morton makes the rectangle a contiguous group-id range. Each group moves
-  // one bank-row stripe; the flat side advances by the full rectangle row and
-  // the VC side by the global word-plane stride.
-  const uint32_t slot = gid - scope.base_group;
-  const uint32_t group_offset = slot * (uint32_t)VC_ROW_BYTES;
+  // Each group moves one bank-row stripe; the flat side advances by the full
+  // rectangle row and the VC side by the global word-plane stride.
+  const uint32_t group_offset =
+      (gid - scope.base_group) * (uint32_t)VC_ROW_BYTES;
   const uint32_t dst_stride = dst_vc ? dst->stride[1] : vc->len;
   const uint32_t src_stride = src_vc ? src->stride[1] : vc->len;
 
   return dma_collective_submit_2d_nonblocking(
-      state, &scope, generation, stream, (void *)(dst->base + group_offset),
+      &scope, 0u, (void *)(dst->base + group_offset),
       (const void *)(src->base + group_offset), VC_ROW_BYTES, dst_stride,
       src_stride, vc->count[1]);
 }
 
-uint32_t vc_dma_memcpy_collective_wait_through(
-    const vc_desc_t *last_dst, const vc_desc_t *last_src,
-    const dma_collective_handle_t *last_handle) {
-  if (last_dst == NULL || last_src == NULL || last_handle == NULL)
-    return DMA_COLLECTIVE_ERROR_ARGUMENT;
-  const uint32_t dst_vc = last_dst->stride[1] != 0;
-  const uint32_t src_vc = last_src->stride[1] != 0;
-  if (dst_vc == src_vc)
-    return DMA_COLLECTIVE_ERROR_ARGUMENT;
-  const dma_collective_scope_t scope = vc_dma_scope(last_dst, last_src);
-  return dma_collective_wait_through(&scope, last_handle);
-}
-
-uint32_t vc_dma_memcpy_collective_blocking(dma_collective_state_t *state,
-                                           uint32_t generation, uint32_t stream,
-                                           const vc_desc_t *dst,
-                                           const vc_desc_t *src) {
-  const dma_collective_handle_t handle =
-      vc_dma_memcpy_collective_nonblocking(state, generation, stream, dst, src);
-  if (handle.status != DMA_COLLECTIVE_OK)
-    return handle.status;
-  return vc_dma_memcpy_collective_wait_through(dst, src, &handle);
+uint32_t vc_dma_memcpy_blocking(const vc_desc_t *dst, const vc_desc_t *src) {
+  const dma_collective_op_t op = vc_dma_memcpy_nonblocking(dst, src);
+  const uint32_t error = dma_collective_wait(&op);
+  return op.status != DMA_COLLECTIVE_OK ? op.status : error;
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +296,7 @@ uint32_t vc_dma_memcpy_collective_blocking(dma_collective_state_t *state,
 //
 // Exactly one side must be a VC pointer. VC<->VC has no flat side to give the
 // descriptor its counterpart stride, and flat<->flat is the ordinary global
-// collective, which dma_collective_all_memcpy_* already does more cheaply.
+// collective, which dma_collective_memcpy_* already does more cheaply.
 // ---------------------------------------------------------------------------
 
 // The level whose window contains `addr`, or VC_LEVELS if none does. The
@@ -381,44 +351,20 @@ static uint32_t vc_dma_auto_descs(void *dest, const void *src, size_t len,
   return DMA_COLLECTIVE_OK;
 }
 
-dma_collective_handle_t
-vc_dma_memcpy_auto_nonblocking(dma_collective_state_t *state,
-                               uint32_t generation, uint32_t stream, void *dest,
-                               const void *src, size_t len) {
+dma_collective_op_t vc_dma_memcpy_auto_nonblocking(void *dest, const void *src,
+                                                   size_t len) {
   vc_desc_t dst_desc, src_desc;
   const uint32_t error =
       vc_dma_auto_descs(dest, src, len, &dst_desc, &src_desc);
   if (error != DMA_COLLECTIVE_OK)
-    return vc_dma_invalid_handle(state, generation, stream, error);
-  return vc_dma_memcpy_collective_nonblocking(state, generation, stream,
-                                              &dst_desc, &src_desc);
+    return vc_dma_invalid_op(error);
+  return vc_dma_memcpy_nonblocking(&dst_desc, &src_desc);
 }
 
-uint32_t
-vc_dma_memcpy_auto_wait_through(void *dest, const void *src, size_t len,
-                                const dma_collective_handle_t *last_handle) {
-  vc_desc_t dst_desc, src_desc;
-  const uint32_t error =
-      vc_dma_auto_descs(dest, src, len, &dst_desc, &src_desc);
-  if (error != DMA_COLLECTIVE_OK)
-    return error;
-  return vc_dma_memcpy_collective_wait_through(&dst_desc, &src_desc,
-                                               last_handle);
-}
-
-uint32_t vc_dma_memcpy_auto_blocking(dma_collective_state_t *state,
-                                     uint32_t generation, uint32_t stream,
-                                     void *dest, const void *src, size_t len) {
-  vc_desc_t dst_desc, src_desc;
-  const uint32_t error =
-      vc_dma_auto_descs(dest, src, len, &dst_desc, &src_desc);
-  if (error != DMA_COLLECTIVE_OK)
-    return error;
-  const dma_collective_handle_t handle = vc_dma_memcpy_collective_nonblocking(
-      state, generation, stream, &dst_desc, &src_desc);
-  if (handle.status != DMA_COLLECTIVE_OK)
-    return handle.status;
-  return vc_dma_memcpy_collective_wait_through(&dst_desc, &src_desc, &handle);
+uint32_t vc_dma_memcpy_auto_blocking(void *dest, const void *src, size_t len) {
+  const dma_collective_op_t op = vc_dma_memcpy_auto_nonblocking(dest, src, len);
+  const uint32_t error = dma_collective_wait(&op);
+  return op.status != DMA_COLLECTIVE_OK ? op.status : error;
 }
 
 // ---------------------------------------------------------------------------

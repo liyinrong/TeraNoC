@@ -151,27 +151,28 @@ static void fft_prepare_tables(uint32_t n_fft) {
   for (uint32_t stage = 0; stage < log2_nfft1; stage++) {
     uint32_t stage_len = NFFT >> (stage + 1);
     uint32_t p1_src = p1_src_base + stage * (NFFT >> 1);
-    dma_collective_all_memcpy_blocking(twiddle_p1[n_fft] + p1_dst,
-                                       fft_twiddle_re_dram + p1_src,
-                                       stage_len * sizeof(float));
-    dma_collective_all_memcpy_blocking(twiddle_p1[n_fft] + NTWI_P1 + p1_dst,
-                                       fft_twiddle_im_dram + p1_src,
-                                       stage_len * sizeof(float));
+    dma_collective_memcpy_nonblocking(twiddle_p1[n_fft] + p1_dst,
+                                      fft_twiddle_re_dram + p1_src,
+                                      stage_len * sizeof(float));
+    dma_collective_memcpy_nonblocking(twiddle_p1[n_fft] + NTWI_P1 + p1_dst,
+                                      fft_twiddle_im_dram + p1_src,
+                                      stage_len * sizeof(float));
     p1_dst += stage_len;
   }
 
   uint32_t p2_src = fft_twiddle_table_offset(nfftpc);
   for (uint32_t core = 0; core < active_cores; core++) {
     float *p2_dst = twiddle_p2[n_fft] + core * (NTWI_P2 << 1);
-    dma_collective_all_memcpy_blocking(p2_dst, fft_twiddle_re_dram + p2_src,
-                                       NTWI_P2 * sizeof(float));
-    dma_collective_all_memcpy_blocking(p2_dst + NTWI_P2,
-                                       fft_twiddle_im_dram + p2_src,
-                                       NTWI_P2 * sizeof(float));
-    core_offset[n_fft][core] = fft_bit_reverse(core, log2_nfft1);
+    dma_collective_memcpy_nonblocking(p2_dst, fft_twiddle_re_dram + p2_src,
+                                      NTWI_P2 * sizeof(float));
+    dma_collective_memcpy_nonblocking(p2_dst + NTWI_P2,
+                                      fft_twiddle_im_dram + p2_src,
+                                      NTWI_P2 * sizeof(float));
+    if (mempool_is_group_coordinator())
+      core_offset[n_fft][core] = fft_bit_reverse(core, log2_nfft1);
   }
 
-  dma_collective_all_memcpy_blocking(
+  dma_collective_memcpy_blocking(
       store_idx[n_fft], store_idx_dram + fft_store_idx_table_offset(nfftpc),
       SP_FFT_STORE_IDX_LEN * sizeof(uint16_t));
 }
@@ -197,16 +198,16 @@ int main() {
   time_end = 0;
 
   // Initialize data: multi-FFT mode replicates the same input in each slot.
-  if (mempool_is_group_coordinator()) {
-    for (uint32_t n_fft = 0; n_fft < num_fft; n_fft++) {
-      dma_collective_all_memcpy_blocking(samples[n_fft], samples_dram,
-                                         (NFFT * 2) * sizeof(float));
-      dma_collective_all_memcpy_blocking(buffer[n_fft], buffer_dram,
-                                         (NFFT * 2) * sizeof(float));
-      dma_collective_all_memcpy_blocking(out[n_fft], buffer_dram,
-                                         (NFFT * 2) * sizeof(float));
-      fft_prepare_tables(n_fft);
-    }
+  // Every core calls; fft_prepare_tables ends in a blocking transfer, which
+  // waits every earlier one.
+  for (uint32_t n_fft = 0; n_fft < num_fft; n_fft++) {
+    dma_collective_memcpy_nonblocking(samples[n_fft], samples_dram,
+                                      (NFFT * 2) * sizeof(float));
+    dma_collective_memcpy_nonblocking(buffer[n_fft], buffer_dram,
+                                      (NFFT * 2) * sizeof(float));
+    dma_collective_memcpy_nonblocking(out[n_fft], buffer_dram,
+                                      (NFFT * 2) * sizeof(float));
+    fft_prepare_tables(n_fft);
   }
   mempool_barrier(num_cores);
 
@@ -292,9 +293,9 @@ int main() {
         l1_R[2 * i] = out[n_fft][i];
         l1_R[2 * i + 1] = out[n_fft][i + NFFT];
       }
-      dma_collective_all_memcpy_blocking(l2_R_check, l1_R,
-                                         (NFFT * 2) * sizeof(float));
     }
+    dma_collective_memcpy_blocking(l2_R_check, l1_R,
+                                   (NFFT * 2) * sizeof(float));
     mempool_check_dpi_f32(l2_R_check, gold_out_dram, 2 * NFFT, 0.01f, 0);
     mempool_barrier(num_cores);
   }

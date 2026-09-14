@@ -65,7 +65,7 @@ enum {
 // not any more, and it is silent when violated: the transfer completes, with
 // the wrong address or length.
 // Call once per group before the first lock, from every core (it elects the
-// tile agent internally). dma_collective_init() already does this for you.
+// tile agent internally). mempool_barrier_init() already does this for you.
 void dma_group_ctx_init(void);
 void dma_group_ctx_lock(void);
 void dma_group_ctx_unlock(void);
@@ -141,9 +141,9 @@ static inline uint32_t dma_local_wait(uint32_t stream) {
 // Sleep until this group's engine is idle, instead of polling done_id.
 //
 // The iDMA exposes no completion pulse, so the event unit derives one from busy
-// FALLING. That is exact while a single transfer is outstanding -- the solo
-// collective's contract -- and conservative otherwise: it fires when the last
-// queued transfer retires, not a named one. Do not build a per-id sleep on it.
+// FALLING. That is exact while a single transfer is outstanding, and
+// conservative otherwise: it fires when the last queued transfer retires, not
+// a named one. Do not build a per-id sleep on it.
 //
 // Order matters. Subscribe BEFORE testing idle: an edge that lands after the
 // subscribe is recorded in the level-held pending and the wfi returns at once,
@@ -170,32 +170,6 @@ static inline uint32_t dma_local_wait_sleep(uint32_t stream) {
   __sync_synchronize();
   return dma_local_error(stream);
 }
-
-// Whole-cluster compatibility path for applications whose L1 objects use the
-// ordinary global interleave. Exactly one coordinator per group calls these
-// functions in the same program order. The implementation remains distributed:
-// every coordinator programs only its own group-local frontend.
-void dma_collective_all_runtime_init(void);
-uint32_t dma_collective_all_memcpy_nonblocking(void *dest, const void *src,
-                                               size_t len);
-uint32_t dma_collective_all_wait(void);
-// Hardware cross-group fence on the fractal_sync tree. Unlike the rest of the
-// _all_ API this is called by EVERY core, and only group coordinators get a
-// meaningful return code.
-uint32_t dma_collective_all_wait_sync(void);
-
-// Solo path: one designated agent per group issues, the SAME core waits, one
-// transfer per group in flight. Skips the slot machinery entirely -- issuer and
-// poller election, publish, ready_epoch, drain -- because none of it has work
-// to do under that contract. _memcpy_solo is coordinator-only; _wait_solo is
-// called by EVERY core, because the rendezvous is what establishes completion.
-uint32_t dma_collective_all_memcpy_solo(void *dest, const void *src,
-                                        size_t len);
-uint32_t dma_collective_all_wait_solo(void);
-uint32_t dma_collective_all_memcpy_solo_blocking(void *dest, const void *src,
-                                                 size_t len);
-uint32_t dma_collective_all_memcpy_blocking(void *dest, const void *src,
-                                            size_t len);
 
 static inline dma_id_t
 dma_local_memcpy_nd_nonblocking(uint32_t stream, void *dest, const void *src,
@@ -289,4 +263,9 @@ static inline uint32_t dma_local_memcpy_blocking(uint32_t stream, void *dest,
   const uint32_t error = dma_local_error(stream);
   return error != 0 ? error : DMA_LOCAL_ERROR_ARGUMENT;
 }
+
+// The collective API, for every includer of dma.h. Last, because it builds on
+// everything above.
+#include "dma_collective.h"
+
 #endif // _DMA_H_

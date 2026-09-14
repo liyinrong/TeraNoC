@@ -105,38 +105,30 @@ int main() {
   /* INITIALIZATION */
 
 #if (defined(SINGLE) || defined(PARALLEL))
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_pSrc, l2_pSrc,
-                                       N_CSAMPLES * sizeof(int32_t));
-    dma_collective_all_memcpy_blocking(l1_twiddleCoef_f16_src,
-                                       l2_twiddleCoef_f16,
-                                       N_TWIDDLES * sizeof(int32_t));
-    dma_collective_all_memcpy_blocking(l1_BitRevIndexTable, l2_BitRevIndexTable,
-                                       BITREVINDEXTABLE_LENGTH *
-                                           sizeof(int16_t));
-    if (core_id == 0)
-      printf("01: END INITIALIZATION\n");
-  }
+  dma_collective_memcpy_nonblocking(l1_pSrc, l2_pSrc,
+                                    N_CSAMPLES * sizeof(int32_t));
+  dma_collective_memcpy_nonblocking(l1_twiddleCoef_f16_src, l2_twiddleCoef_f16,
+                                    N_TWIDDLES * sizeof(int32_t));
+  dma_collective_memcpy_blocking(l1_BitRevIndexTable, l2_BitRevIndexTable,
+                                 BITREVINDEXTABLE_LENGTH * sizeof(int16_t));
+  if (core_id == 0)
+    printf("01: END INITIALIZATION\n");
   APP_BARRIER(num_cores);
 #endif
 
 #if (defined(SCHEDULED) || defined(FOLDED))
 
-  if (mempool_is_group_coordinator()) {
-    for (uint32_t j = 0; j < N_FFTs_ROW; j++) {
-      for (uint32_t i = 0; i < N_FFTs_COL; i++) {
-        dma_collective_all_memcpy_blocking(
-            l1_pSrc + i * 2 * N_CSAMPLES + j * (8 * NUM_BANKS), l2_pSrc,
-            N_CSAMPLES * sizeof(int32_t));
-      }
+  for (uint32_t j = 0; j < N_FFTs_ROW; j++) {
+    for (uint32_t i = 0; i < N_FFTs_COL; i++) {
+      dma_collective_memcpy_nonblocking(l1_pSrc + i * 2 * N_CSAMPLES +
+                                            j * (8 * NUM_BANKS),
+                                        l2_pSrc, N_CSAMPLES * sizeof(int32_t));
     }
-    dma_collective_all_memcpy_blocking(l1_twiddleCoef_f16_src,
-                                       l2_twiddleCoef_f16,
-                                       N_TWIDDLES * sizeof(int32_t));
-    dma_collective_all_memcpy_blocking(l1_BitRevIndexTable, l2_BitRevIndexTable,
-                                       BITREVINDEXTABLE_LENGTH *
-                                           sizeof(int32_t));
   }
+  dma_collective_memcpy_nonblocking(l1_twiddleCoef_f16_src, l2_twiddleCoef_f16,
+                                    N_TWIDDLES * sizeof(int32_t));
+  dma_collective_memcpy_blocking(l1_BitRevIndexTable, l2_BitRevIndexTable,
+                                 BITREVINDEXTABLE_LENGTH * sizeof(int32_t));
   APP_BARRIER(num_cores);
 
 #ifdef FOLDED_TWIDDLES
@@ -210,10 +202,8 @@ int main() {
     printf("02: END COMPUTATION\n");
   }
 
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l2_pRes_check, pRes,
-                                       2 * N_CSAMPLES * sizeof(int16_t));
-  }
+  dma_collective_memcpy_blocking(l2_pRes_check, pRes,
+                                 2 * N_CSAMPLES * sizeof(int16_t));
   mempool_check_dpi_f16(l2_pRes_check, l2_pRes, 2 * N_CSAMPLES,
                         (float)TOLERANCE, 0);
   APP_BARRIER(num_cores);

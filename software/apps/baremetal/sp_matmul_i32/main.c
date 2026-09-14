@@ -60,13 +60,10 @@ int main() {
   unsigned int kernel_size;
 
   // Copy the inputs into the local L1 scratchpad.
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_A, l2_A,
-                                       (matrix_M * matrix_N) * sizeof(int32_t));
-    dma_collective_all_memcpy_blocking(l1_B, l2_B,
-                                       (matrix_N * matrix_P) * sizeof(int32_t));
-  }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(l1_A, l2_A,
+                                    (matrix_M * matrix_N) * sizeof(int32_t));
+  dma_collective_memcpy_blocking(l1_B, l2_B,
+                                 (matrix_N * matrix_P) * sizeof(int32_t));
 
   // Set matrix dimension
   kernel_size = SP_MATMUL_I32_KERNEL_SIZE;
@@ -117,10 +114,8 @@ int main() {
     uint32_t clock_cycles = (time_end - time_init);
     printf("\nKernel execution takes %d clock cycles\n", clock_cycles);
   }
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l2_C_check, l1_C,
-                                       matrix_M * matrix_P * sizeof(int32_t));
-  }
+  dma_collective_memcpy_blocking(l2_C_check, l1_C,
+                                 matrix_M * matrix_P * sizeof(int32_t));
   mempool_check_dpi_i32(l2_C_check, l2_C, matrix_M * matrix_P, 0, 0);
   mempool_barrier(num_cores);
 

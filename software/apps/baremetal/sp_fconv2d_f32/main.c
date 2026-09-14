@@ -49,15 +49,11 @@ int main() {
   float *o = omtx + core_id * num_rows * c;
 
   // Initialize data
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(fmtx, fconv2d_F_dram,
-                                       f * f * ch * sizeof(float));
-    dma_collective_all_memcpy_blocking(
-        imtx, fconv2d_I_dram, (r + f - 1) * (c + f - 1) * sizeof(float));
-    dma_collective_all_memcpy_blocking(omtx, fconv2d_R_dram,
-                                       r * c * sizeof(float));
-  }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(fmtx, fconv2d_F_dram,
+                                    f * f * ch * sizeof(float));
+  dma_collective_memcpy_nonblocking(imtx, fconv2d_I_dram,
+                                    (r + f - 1) * (c + f - 1) * sizeof(float));
+  dma_collective_memcpy_blocking(omtx, fconv2d_R_dram, r * c * sizeof(float));
 
   // PARALLEL
   time_init = mempool_get_timer();
@@ -78,9 +74,7 @@ int main() {
     printf("The performance is %u OP/1000cycle (%u%%o utilization).\n",
            performance, utilization);
   }
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l2_R_check, omtx, r * c * sizeof(float));
-  }
+  dma_collective_memcpy_blocking(l2_R_check, omtx, r * c * sizeof(float));
   mempool_check_dpi_f32(l2_R_check, fconv2d_GR_dram, r * c, 0.01f, 0);
   mempool_barrier(num_cores);
 

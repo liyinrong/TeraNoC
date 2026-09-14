@@ -160,12 +160,8 @@ int main() {
   for (uint32_t col0 = 0; col0 < matrix_P; col0 += COL_TILE) {
     const uint32_t col_panel = col0 / COL_TILE;
     uint32_t stage_start = mempool_get_timer();
-    if (mempool_is_group_coordinator()) {
-      dma_collective_all_memcpy_blocking(l1_W,
-                                         l2_W + col_panel * matrix_N * COL_TILE,
-                                         matrix_N * COL_TILE * sizeof(__fp16));
-    }
-    mempool_barrier(num_cores);
+    dma_collective_memcpy_blocking(l1_W, l2_W + col_panel * matrix_N * COL_TILE,
+                                   matrix_N * COL_TILE * sizeof(__fp16));
     stage_cycles += mempool_get_timer() - stage_start;
 
     for (uint32_t row0 = 0; row0 < matrix_M; row0 += ROW_TILE) {
@@ -174,13 +170,10 @@ int main() {
           (row_panel * num_col_panels + col_panel) * tile_elems;
 
       stage_start = mempool_get_timer();
-      if (mempool_is_group_coordinator()) {
-        dma_collective_all_memcpy_blocking(
-            l1_X, l2_X + row0 * matrix_N, ROW_TILE * matrix_N * sizeof(__fp16));
-        dma_collective_all_memcpy_blocking(l1_Y, l2_Y + output_tile,
-                                           tile_elems * sizeof(__fp16));
-      }
-      mempool_barrier(num_cores);
+      dma_collective_memcpy_nonblocking(l1_X, l2_X + row0 * matrix_N,
+                                        ROW_TILE * matrix_N * sizeof(__fp16));
+      dma_collective_memcpy_blocking(l1_Y, l2_Y + output_tile,
+                                     tile_elems * sizeof(__fp16));
       stage_cycles += mempool_get_timer() - stage_start;
 
       uint32_t gemm_start = mempool_get_timer();
@@ -218,11 +211,8 @@ int main() {
       gemm_cycles += mempool_get_timer() - gemm_start;
 
       stage_start = mempool_get_timer();
-      if (mempool_is_group_coordinator()) {
-        dma_collective_all_memcpy_blocking(l2_Z_check + output_tile, l1_Y,
-                                           tile_elems * sizeof(__fp16));
-      }
-      mempool_barrier(num_cores);
+      dma_collective_memcpy_blocking(l2_Z_check + output_tile, l1_Y,
+                                     tile_elems * sizeof(__fp16));
       stage_cycles += mempool_get_timer() - stage_start;
     }
   }
@@ -232,15 +222,12 @@ int main() {
 
 #ifdef SINGLE
   // Transfer
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_X, l2_X,
-                                       (matrix_M * matrix_N) * sizeof(int16_t));
-    dma_collective_all_memcpy_blocking(l1_W, l2_W,
-                                       (matrix_N * matrix_P) * sizeof(int16_t));
-    dma_collective_all_memcpy_blocking(l1_Y, l2_Y,
-                                       (matrix_M * matrix_P) * sizeof(int16_t));
-  }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(l1_X, l2_X,
+                                    (matrix_M * matrix_N) * sizeof(int16_t));
+  dma_collective_memcpy_nonblocking(l1_W, l2_W,
+                                    (matrix_N * matrix_P) * sizeof(int16_t));
+  dma_collective_memcpy_blocking(l1_Y, l2_Y,
+                                 (matrix_M * matrix_P) * sizeof(int16_t));
   // Compute
   time_init = mempool_get_timer();
   mempool_start_benchmark();
@@ -267,20 +254,17 @@ int main() {
   uint32_t W_shift;
 
   // Transfer
-  if (mempool_is_group_coordinator()) {
-    for (uint32_t i = 0; i < num_redmules; i++) {
-      X_shift = (XSHIFT == 1) ? (i * PORT_WIDTH) % matrix_N : 0;
-      dma_collective_all_memcpy_blocking(
-          l1_X + i * (matrix_M * matrix_N / num_redmules) + X_shift,
-          l2_X + i * (matrix_M * matrix_N / num_redmules),
-          (matrix_M * matrix_N / num_redmules) * sizeof(int16_t));
-    }
-    dma_collective_all_memcpy_blocking(l1_W, l2_W,
-                                       (matrix_N * matrix_P) * sizeof(int16_t));
-    dma_collective_all_memcpy_blocking(l1_Y, l2_Y,
-                                       (matrix_M * matrix_P) * sizeof(int16_t));
+  for (uint32_t i = 0; i < num_redmules; i++) {
+    X_shift = (XSHIFT == 1) ? (i * PORT_WIDTH) % matrix_N : 0;
+    dma_collective_memcpy_nonblocking(
+        l1_X + i * (matrix_M * matrix_N / num_redmules) + X_shift,
+        l2_X + i * (matrix_M * matrix_N / num_redmules),
+        (matrix_M * matrix_N / num_redmules) * sizeof(int16_t));
   }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(l1_W, l2_W,
+                                    (matrix_N * matrix_P) * sizeof(int16_t));
+  dma_collective_memcpy_blocking(l1_Y, l2_Y,
+                                 (matrix_M * matrix_P) * sizeof(int16_t));
 
   // Compute
   time_init = mempool_get_timer();
@@ -327,10 +311,8 @@ int main() {
 #endif
   }
 #if !RM_GEMM_TILED_2D
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l2_Z_check, l1_Y,
-                                       matrix_M * matrix_P * sizeof(int16_t));
-  }
+  dma_collective_memcpy_blocking(l2_Z_check, l1_Y,
+                                 matrix_M * matrix_P * sizeof(int16_t));
 #endif
 #if !LLM_PERF_ONLY
   mempool_check_dpi_f16(l2_Z_check, l2_Z, matrix_M * matrix_P, 0.05f, 0);

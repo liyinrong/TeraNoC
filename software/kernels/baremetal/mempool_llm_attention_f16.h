@@ -127,17 +127,16 @@ llm_attention_proj_heads(const __fp16 *l2_w_pm, const __fp16 *l1_h,
   __fp16 *wbuf0 = l1_wbuf;
   __fp16 *wbuf1 = l1_wbuf + panel_elems;
 
-  if (mempool_is_group_coordinator())
-    dma_collective_all_memcpy_blocking(wbuf0, l2_w_pm,
-                                       panel_elems * sizeof(__fp16));
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_blocking(wbuf0, l2_w_pm, panel_elems * sizeof(__fp16));
 
   for (uint32_t h = 0; h < num_heads; h++) {
     __fp16 *wcur = (h & 1) ? wbuf1 : wbuf0;
     __fp16 *wnxt = (h & 1) ? wbuf0 : wbuf1;
 
-    if (mempool_is_group_coordinator() && (h + 1) < num_heads)
-      dma_collective_all_memcpy_nonblocking(
+    const uint32_t prefetch = (h + 1) < num_heads;
+    dma_collective_op_t prefetch_op = {.seq = 0};
+    if (prefetch)
+      prefetch_op = dma_collective_memcpy_nonblocking(
           wnxt, l2_w_pm + (h + 1) * panel_elems, panel_elems * sizeof(__fp16));
 
     if (redmule_id < ne_used) {
@@ -152,9 +151,10 @@ llm_attention_proj_heads(const __fp16 *l2_w_pm, const __fp16 *l1_h,
     }
 
     mempool_barrier(num_cores);
-    if (mempool_is_group_coordinator())
-      dma_collective_all_wait();
-    mempool_barrier(num_cores);
+    if (prefetch)
+      dma_collective_wait(&prefetch_op);
+    else
+      mempool_barrier(num_cores);
   }
 }
 
@@ -172,10 +172,8 @@ static inline void llm_attention_proj_heads_single_f16(
   const uint32_t out_panel_elems = seqlen * head_dim;
 
   for (uint32_t h = 0; h < num_heads; h++) {
-    if (mempool_is_group_coordinator())
-      dma_collective_all_memcpy_blocking(l1_wbuf, l2_w_pm + h * panel_elems,
-                                         panel_elems * sizeof(__fp16));
-    mempool_barrier(num_cores);
+    dma_collective_memcpy_blocking(l1_wbuf, l2_w_pm + h * panel_elems,
+                                   panel_elems * sizeof(__fp16));
 
     if (redmule_id < ne_used) {
       unsigned int x =
@@ -340,27 +338,30 @@ static inline void llm_attention_stage_decode_cache_f16(
     uint32_t num_cores) {
   (void)core_id;
   (void)num_cores;
-  if (!mempool_is_group_coordinator() || past_len == 0)
+  if (past_len == 0 || num_kv_heads == 0)
     return;
 
   // Spatz vector ports only address TCDM; L2/SoC traffic must use the scalar
   // port or DMA. K is transposed in both caches, so each (head,dimension) row
-  // is one contiguous DMA transfer despite the different row strides.
+  // is one contiguous DMA transfer despite the different row strides. Every
+  // core calls; the transfers queue, and waiting the last retires them all.
   const uint32_t kt_rows = num_kv_heads * head_dim;
   for (uint32_t hd = 0; hd < kt_rows; hd++) {
-    dma_collective_all_memcpy_blocking(l1_k_cache_t + hd * total_len,
-                                       l2_k_cache_t + hd * past_len,
-                                       past_len * sizeof(__fp16));
+    dma_collective_memcpy_nonblocking(l1_k_cache_t + hd * total_len,
+                                      l2_k_cache_t + hd * past_len,
+                                      past_len * sizeof(__fp16));
   }
 
   // Each V head is token-major and therefore one contiguous prefix in both
   // layouts, although consecutive destination heads have a larger stride.
   const uint32_t v_head_elems = past_len * head_dim;
+  dma_collective_op_t op = {.seq = 0};
   for (uint32_t head = 0; head < num_kv_heads; head++) {
-    dma_collective_all_memcpy_blocking(l1_v_cache + head * total_len * head_dim,
-                                       l2_v_cache + head * v_head_elems,
-                                       v_head_elems * sizeof(__fp16));
+    op = dma_collective_memcpy_nonblocking(
+        l1_v_cache + head * total_len * head_dim,
+        l2_v_cache + head * v_head_elems, v_head_elems * sizeof(__fp16));
   }
+  dma_collective_wait(&op);
 }
 
 static inline void
@@ -598,17 +599,16 @@ static inline void llm_attention_out_proj_f16(
   __fp16 *wbuf0 = wbuf;
   __fp16 *wbuf1 = wbuf + panel_elems;
 
-  if (mempool_is_group_coordinator())
-    dma_collective_all_memcpy_blocking(wbuf0, l2_wo,
-                                       panel_elems * sizeof(__fp16));
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_blocking(wbuf0, l2_wo, panel_elems * sizeof(__fp16));
 
   for (uint32_t h = 0; h < num_q_heads; h++) {
     __fp16 *wcur = (h & 1) ? wbuf1 : wbuf0;
     __fp16 *wnxt = (h & 1) ? wbuf0 : wbuf1;
-    if (mempool_is_group_coordinator() && (h + 1) < num_q_heads)
-      dma_collective_all_memcpy_nonblocking(wnxt, l2_wo + (h + 1) * panel_elems,
-                                            panel_elems * sizeof(__fp16));
+    const uint32_t prefetch = (h + 1) < num_q_heads;
+    dma_collective_op_t prefetch_op = {.seq = 0};
+    if (prefetch)
+      prefetch_op = dma_collective_memcpy_nonblocking(
+          wnxt, l2_wo + (h + 1) * panel_elems, panel_elems * sizeof(__fp16));
 
     if (redmule_id < ne_used) {
       unsigned int x = (unsigned int)(ctx_pm + h * ctx_head_elems +
@@ -622,9 +622,10 @@ static inline void llm_attention_out_proj_f16(
                                 (uint16_t)head_dim, (uint16_t)dmodel, GEMM);
     }
     mempool_barrier(num_cores);
-    if (mempool_is_group_coordinator())
-      dma_collective_all_wait();
-    mempool_barrier(num_cores);
+    if (prefetch)
+      dma_collective_wait(&prefetch_op);
+    else
+      mempool_barrier(num_cores);
   }
 }
 
@@ -639,10 +640,8 @@ static inline void llm_attention_out_proj_single_f16(
   const uint32_t ctx_head_elems = seqlen * head_dim;
 
   for (uint32_t h = 0; h < num_q_heads; h++) {
-    if (mempool_is_group_coordinator())
-      dma_collective_all_memcpy_blocking(wbuf, l2_wo + h * panel_elems,
-                                         panel_elems * sizeof(__fp16));
-    mempool_barrier(num_cores);
+    dma_collective_memcpy_blocking(wbuf, l2_wo + h * panel_elems,
+                                   panel_elems * sizeof(__fp16));
 
     if (redmule_id < ne_used) {
       unsigned int x = (unsigned int)(ctx_pm + h * ctx_head_elems +
@@ -887,17 +886,19 @@ static inline void llm_attention_store_kv_tile_f16(
     uint32_t num_cores) {
   const uint32_t tile_elems = tile_rows * head_dim;
   const uint32_t head_elems = cache_len * head_dim;
-  if (mempool_is_group_coordinator()) {
-    for (uint32_t h = 0; h < num_kv_heads; h++) {
-      dma_collective_all_memcpy_blocking(
-          l2_k_cache + h * head_elems + token0 * head_dim,
-          k_tile + h * tile_elems, tile_elems * sizeof(__fp16));
-      dma_collective_all_memcpy_blocking(
-          l2_v_cache + h * head_elems + token0 * head_dim,
-          v_tile + h * tile_elems, tile_elems * sizeof(__fp16));
-    }
+  dma_collective_op_t op = {.seq = 0};
+  for (uint32_t h = 0; h < num_kv_heads; h++) {
+    dma_collective_memcpy_nonblocking(
+        l2_k_cache + h * head_elems + token0 * head_dim,
+        k_tile + h * tile_elems, tile_elems * sizeof(__fp16));
+    op = dma_collective_memcpy_nonblocking(
+        l2_v_cache + h * head_elems + token0 * head_dim,
+        v_tile + h * tile_elems, tile_elems * sizeof(__fp16));
   }
-  mempool_barrier(num_cores);
+  if (num_kv_heads != 0u)
+    dma_collective_wait(&op);
+  else
+    mempool_barrier(num_cores);
 }
 
 static inline void llm_attention_stage_kv_tile_f16(
@@ -907,19 +908,21 @@ static inline void llm_attention_stage_kv_tile_f16(
     uint32_t num_cores) {
   const uint32_t tile_elems = tile_rows * head_dim;
   const uint32_t head_elems = cache_len * head_dim;
-  if (mempool_is_group_coordinator()) {
-    for (uint32_t h = 0; h < num_kv_heads; h++) {
-      dma_collective_all_memcpy_blocking(k_tile + h * tile_elems,
-                                         l2_k_cache + h * head_elems +
-                                             token0 * head_dim,
-                                         tile_elems * sizeof(__fp16));
-      dma_collective_all_memcpy_blocking(v_tile + h * tile_elems,
-                                         l2_v_cache + h * head_elems +
-                                             token0 * head_dim,
-                                         tile_elems * sizeof(__fp16));
-    }
+  dma_collective_op_t op = {.seq = 0};
+  for (uint32_t h = 0; h < num_kv_heads; h++) {
+    dma_collective_memcpy_nonblocking(k_tile + h * tile_elems,
+                                      l2_k_cache + h * head_elems +
+                                          token0 * head_dim,
+                                      tile_elems * sizeof(__fp16));
+    op = dma_collective_memcpy_nonblocking(v_tile + h * tile_elems,
+                                           l2_v_cache + h * head_elems +
+                                               token0 * head_dim,
+                                           tile_elems * sizeof(__fp16));
   }
-  mempool_barrier(num_cores);
+  if (num_kv_heads != 0u)
+    dma_collective_wait(&op);
+  else
+    mempool_barrier(num_cores);
 }
 
 // True 2-D FlashAttention: q contains only BM query rows, while every BN key
@@ -992,28 +995,22 @@ static inline void llm_attention_flash_tiled_prefill_f16(
   const uint32_t ne_used = llm_attention_ne_used(bm);
   const uint32_t half_dim = head_dim >> 1;
 
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_gamma, l2_gamma,
-                                       dmodel * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_q_gamma, l2_q_gamma,
-                                       head_dim * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_k_gamma, l2_k_gamma,
-                                       head_dim * sizeof(__fp16));
-  }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(l1_gamma, l2_gamma,
+                                    dmodel * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_q_gamma, l2_q_gamma,
+                                    head_dim * sizeof(__fp16));
+  dma_collective_memcpy_blocking(l1_k_gamma, l2_k_gamma,
+                                 head_dim * sizeof(__fp16));
 
   // Build the RoPE-transformed K/V cache in L2 one query-row tile at a time.
   // K is deliberately token-major here; each later BN tile is one DMA burst.
   for (uint32_t i0 = 0; i0 < seqlen; i0 += bm) {
-    if (mempool_is_group_coordinator()) {
-      dma_collective_all_memcpy_blocking(l1_x, l2_x + i0 * dmodel,
-                                         bm * dmodel * sizeof(__fp16));
-      dma_collective_all_memcpy_blocking(l1_cos, l2_cos + i0 * half_dim,
-                                         bm * half_dim * sizeof(__fp16));
-      dma_collective_all_memcpy_blocking(l1_sin, l2_sin + i0 * half_dim,
-                                         bm * half_dim * sizeof(__fp16));
-    }
-    mempool_barrier(num_cores);
+    dma_collective_memcpy_nonblocking(l1_x, l2_x + i0 * dmodel,
+                                      bm * dmodel * sizeof(__fp16));
+    dma_collective_memcpy_nonblocking(l1_cos, l2_cos + i0 * half_dim,
+                                      bm * half_dim * sizeof(__fp16));
+    dma_collective_memcpy_blocking(l1_sin, l2_sin + i0 * half_dim,
+                                   bm * half_dim * sizeof(__fp16));
 
     llm_rmsnorm_f16(l1_x, l1_gamma, l1_h, bm, dmodel, core_id, num_cores);
     mempool_barrier(num_cores);
@@ -1038,15 +1035,12 @@ static inline void llm_attention_flash_tiled_prefill_f16(
 
   // Recompute only the small Q tile and stream every K/V tile through it.
   for (uint32_t i0 = 0; i0 < seqlen; i0 += bm) {
-    if (mempool_is_group_coordinator()) {
-      dma_collective_all_memcpy_blocking(l1_x, l2_x + i0 * dmodel,
-                                         bm * dmodel * sizeof(__fp16));
-      dma_collective_all_memcpy_blocking(l1_cos, l2_cos + i0 * half_dim,
-                                         bm * half_dim * sizeof(__fp16));
-      dma_collective_all_memcpy_blocking(l1_sin, l2_sin + i0 * half_dim,
-                                         bm * half_dim * sizeof(__fp16));
-    }
-    mempool_barrier(num_cores);
+    dma_collective_memcpy_nonblocking(l1_x, l2_x + i0 * dmodel,
+                                      bm * dmodel * sizeof(__fp16));
+    dma_collective_memcpy_nonblocking(l1_cos, l2_cos + i0 * half_dim,
+                                      bm * half_dim * sizeof(__fp16));
+    dma_collective_memcpy_blocking(l1_sin, l2_sin + i0 * half_dim,
+                                   bm * half_dim * sizeof(__fp16));
 
     llm_rmsnorm_f16(l1_x, l1_gamma, l1_h, bm, dmodel, core_id, num_cores);
     mempool_barrier(num_cores);
@@ -1071,10 +1065,8 @@ static inline void llm_attention_flash_tiled_prefill_f16(
                                       num_cores, redmule_id, ne_used);
     llm_residual_add_f16(l1_out, l1_x, bm * dmodel, core_id, num_cores);
     mempool_barrier(num_cores);
-    if (mempool_is_group_coordinator())
-      dma_collective_all_memcpy_blocking(l2_out + i0 * dmodel, l1_out,
-                                         bm * dmodel * sizeof(__fp16));
-    mempool_barrier(num_cores);
+    dma_collective_memcpy_blocking(l2_out + i0 * dmodel, l1_out,
+                                   bm * dmodel * sizeof(__fp16));
   }
 }
 
@@ -1099,21 +1091,18 @@ static inline void llm_attention_flash_tiled_decode_f16(
     attn_len = llm_attention_min_u32(attn_len, window_len);
   const uint32_t first_key_pos = total_len - attn_len;
 
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_x, l2_x,
-                                       seqlen * dmodel * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_gamma, l2_gamma,
-                                       dmodel * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_q_gamma, l2_q_gamma,
-                                       head_dim * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_k_gamma, l2_k_gamma,
-                                       head_dim * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_cos, l2_cos,
-                                       seqlen * half_dim * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_sin, l2_sin,
-                                       seqlen * half_dim * sizeof(__fp16));
-  }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(l1_x, l2_x,
+                                    seqlen * dmodel * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_gamma, l2_gamma,
+                                    dmodel * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_q_gamma, l2_q_gamma,
+                                    head_dim * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_k_gamma, l2_k_gamma,
+                                    head_dim * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_cos, l2_cos,
+                                    seqlen * half_dim * sizeof(__fp16));
+  dma_collective_memcpy_blocking(l1_sin, l2_sin,
+                                 seqlen * half_dim * sizeof(__fp16));
 
   llm_rmsnorm_f16(l1_x, l1_gamma, l1_h, seqlen, dmodel, core_id, num_cores);
   mempool_barrier(num_cores);
@@ -1151,10 +1140,8 @@ static inline void llm_attention_flash_tiled_decode_f16(
                                     num_cores, redmule_id, ne_used);
   llm_residual_add_f16(l1_out, l1_x, seqlen * dmodel, core_id, num_cores);
   mempool_barrier(num_cores);
-  if (mempool_is_group_coordinator())
-    dma_collective_all_memcpy_blocking(l2_out, l1_out,
-                                       seqlen * dmodel * sizeof(__fp16));
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_blocking(l2_out, l1_out,
+                                 seqlen * dmodel * sizeof(__fp16));
 }
 #endif // LLM_FLASH_TILED
 
@@ -1175,21 +1162,18 @@ static inline void llm_attention_flash_prefill_f16(
   const uint32_t ne_used = llm_attention_ne_used(seqlen);
   const uint32_t half_dim = head_dim >> 1;
 
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_x, l2_x,
-                                       seqlen * dmodel * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_gamma, l2_gamma,
-                                       dmodel * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_q_gamma, l2_q_gamma,
-                                       head_dim * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_k_gamma, l2_k_gamma,
-                                       head_dim * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_cos, l2_cos,
-                                       seqlen * half_dim * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_sin, l2_sin,
-                                       seqlen * half_dim * sizeof(__fp16));
-  }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(l1_x, l2_x,
+                                    seqlen * dmodel * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_gamma, l2_gamma,
+                                    dmodel * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_q_gamma, l2_q_gamma,
+                                    head_dim * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_k_gamma, l2_k_gamma,
+                                    head_dim * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_cos, l2_cos,
+                                    seqlen * half_dim * sizeof(__fp16));
+  dma_collective_memcpy_blocking(l1_sin, l2_sin,
+                                 seqlen * half_dim * sizeof(__fp16));
 
   llm_rmsnorm_f16(l1_x, l1_gamma, l1_h, seqlen, dmodel, core_id, num_cores);
   mempool_barrier(num_cores);
@@ -1247,21 +1231,18 @@ static inline void llm_attention_prefill_f16(
   const uint32_t ne_used = llm_attention_ne_used(seqlen);
   const uint32_t half_dim = head_dim >> 1;
 
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_x, l2_x,
-                                       seqlen * dmodel * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_gamma, l2_gamma,
-                                       dmodel * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_q_gamma, l2_q_gamma,
-                                       head_dim * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_k_gamma, l2_k_gamma,
-                                       head_dim * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_cos, l2_cos,
-                                       seqlen * half_dim * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_sin, l2_sin,
-                                       seqlen * half_dim * sizeof(__fp16));
-  }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(l1_x, l2_x,
+                                    seqlen * dmodel * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_gamma, l2_gamma,
+                                    dmodel * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_q_gamma, l2_q_gamma,
+                                    head_dim * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_k_gamma, l2_k_gamma,
+                                    head_dim * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_cos, l2_cos,
+                                    seqlen * half_dim * sizeof(__fp16));
+  dma_collective_memcpy_blocking(l1_sin, l2_sin,
+                                 seqlen * half_dim * sizeof(__fp16));
 
   llm_rmsnorm_f16(l1_x, l1_gamma, l1_h, seqlen, dmodel, core_id, num_cores);
   mempool_barrier(num_cores);
@@ -1333,21 +1314,18 @@ static inline void llm_attention_decode_f16(
     attn_len = llm_attention_min_u32(attn_len, window_len);
   const uint32_t first_key_pos = total_len - attn_len;
 
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_x, l2_x,
-                                       seqlen * dmodel * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_gamma, l2_gamma,
-                                       dmodel * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_q_gamma, l2_q_gamma,
-                                       head_dim * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_k_gamma, l2_k_gamma,
-                                       head_dim * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_cos, l2_cos,
-                                       seqlen * half_dim * sizeof(__fp16));
-    dma_collective_all_memcpy_blocking(l1_sin, l2_sin,
-                                       seqlen * half_dim * sizeof(__fp16));
-  }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(l1_x, l2_x,
+                                    seqlen * dmodel * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_gamma, l2_gamma,
+                                    dmodel * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_q_gamma, l2_q_gamma,
+                                    head_dim * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_k_gamma, l2_k_gamma,
+                                    head_dim * sizeof(__fp16));
+  dma_collective_memcpy_nonblocking(l1_cos, l2_cos,
+                                    seqlen * half_dim * sizeof(__fp16));
+  dma_collective_memcpy_blocking(l1_sin, l2_sin,
+                                 seqlen * half_dim * sizeof(__fp16));
 
   llm_attention_stage_decode_cache_f16(
       l2_k_cache_t, l2_v_cache, l1_k_cache_t, l1_v_cache, past_len, total_len,

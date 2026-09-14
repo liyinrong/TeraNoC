@@ -10,60 +10,61 @@
 
 #include "dma.h"
 
-#define DMA_COLLECTIVE_GROUP_WORDS (NUM_BANKS / NUM_GROUPS)
-#define DMA_COLLECTIVE_SLOT_FIELDS 10u
-
-// One slot per collective that can be in flight at once. The budget is the
-// group's bank stripe: the whole per-group state has to fit inside it so that
-// two groups never share a bank, which is the property the padding exists to
-// keep. A hardcoded 2 did not fit minpool at all (16 words against 20), and
-// because dma_collective.c.o links into every binary that stopped the flavour
-// from building ANY software.
+// Collective DMA over a virtual-cluster scope, from one group to the whole
+// cluster.
 //
-// The cap stays at 2 until the _all_ API keeps a ring of handles: extra slots
-// buy nothing while each issue overwrites the last handle, and raising it
-// would silently weaken dma_collective_smoke, whose four generations currently
-// wrap the slot index and so cover reuse. Raise it with that change, and
-// lengthen the smoke to keep wrapping. The engine is not the constraint --
-// its request FIFO is 16 deep per stream (mempool_idma_group.sv:12) and every
-// accepted request gets its own id.
-#define DMA_COLLECTIVE_MAX_SLOTS 2u
-#define DMA_COLLECTIVE_SLOTS                                                   \
-  ((DMA_COLLECTIVE_GROUP_WORDS / DMA_COLLECTIVE_SLOT_FIELDS) >                 \
-           DMA_COLLECTIVE_MAX_SLOTS                                            \
-       ? DMA_COLLECTIVE_MAX_SLOTS                                              \
-       : (DMA_COLLECTIVE_GROUP_WORDS / DMA_COLLECTIVE_SLOT_FIELDS))
-#define DMA_COLLECTIVE_STATE_FIELDS                                            \
-  (DMA_COLLECTIVE_SLOTS * DMA_COLLECTIVE_SLOT_FIELDS)
-#define DMA_COLLECTIVE_ALIGNMENT (NUM_BANKS * sizeof(uint32_t))
+// FIXED ISSUER. Only the group coordinator (mempool_is_group_coordinator())
+// programs its group's engine, so the one-issuer contract of dma.h holds by
+// construction: no issuer or poller election and no descriptor lock.
+//
+// SPMD. Every core of the scope makes every submit and wait call, in the same
+// order. Non-coordinators issue nothing but count the call, so every core names
+// an operation by the same sequence number.
+//
+// QUEUEING. Submits may stack up. An engine retires requests in issue order and
+// counts retirements (idma_transfer_id_gen.sv), so waiting on a group's last id
+// waits every earlier one. The request FIFO holds 16 per stream
+// (mempool_idma_group.sv:12).
+//
+// COMPLETION, two forms:
+//   dma_collective_wait        every core of the scope. Coordinators wait their
+//                              own engine, then the scope's core barrier.
+//   dma_collective_wait_ready  any core of the scope, no core barrier. Returns
+//                              once every group has published READY through
+//                              the operation. A group publishes only when its
+//                              coordinator waits (either form), so a
+//                              coordinator that is still computing delays its
+//                              group.
 
-#if DMA_COLLECTIVE_SLOTS < 1u
-#error "A DMA collective slot does not fit in one group bank stripe"
-#endif
-#if DMA_COLLECTIVE_GROUP_WORDS < DMA_COLLECTIVE_STATE_FIELDS
-#error "A DMA collective group state does not fit in one group bank stripe"
-#endif
+#define DMA_COLLECTIVE_GROUP_WORDS (NUM_BANKS / NUM_GROUPS)
 
-#define DMA_COLLECTIVE_STORAGE                                                 \
-  __attribute__((aligned(DMA_COLLECTIVE_ALIGNMENT), section(".l1")))
+enum {
+  DMA_COLLECTIVE_OK = 0,
+  DMA_COLLECTIVE_ERROR_ARGUMENT = 0x80000001u,
+  DMA_COLLECTIVE_ERROR_SCOPE = 0x80000002u,
+  DMA_COLLECTIVE_ERROR_LAUNCH = 0x80000005u,
+};
+
+// A VC rectangle: level k spans 2^k groups per axis, i.e. 4^k groups forming
+// one contiguous Morton id range. Level VC_LEVELS is the whole cluster.
+typedef struct {
+  uint32_t level;
+  uint32_t base_group;
+  uint32_t num_groups;
+} dma_collective_scope_t;
+
+typedef struct {
+  dma_collective_scope_t scope;
+  uint32_t seq;    // identical on every core of the scope
+  uint32_t status; // this core's submit error
+} dma_collective_op_t;
 
 #ifdef DMA_COLLECTIVE_PROFILE
-// Timestamps for a whole transfer, submit through fence. Debug only.
-//
-// PER GROUP, one full bank stripe each. A single shared array made every probe
-// a CONTENDED REMOTE store -- sixteen coordinators hitting one bank -- which
-// inflated each phase by tens of cycles and left the phases summing to 449
-// against a measured 708. Each coordinator now writes only its own group's
-// banks.
-//
-//  0 enter _all_ wrapper      7 publish done (leave memcpy_common)
-//  1 enter memcpy_common      8 handle stored (leave wrapper)
-//  2 claim done               9 enter the fence
-//  3 addr + scope done       10 engine reported done
-//  4 tile lock taken         11 wait_local returned (slots drained)
-//  5 descriptors issued      12 fsync barrier done
-//  6 lock released           13 fence returned
-#define DMA_PROF_SLOTS 14u
+// Coordinator timestamps of the most recent operation. One full bank stripe per
+// group, so each coordinator writes only its own group's banks.
+//  0 submit entered     2 wait entered         4 barrier released
+//  1 descriptor issued  3 own engine retired   5 wait returned
+#define DMA_PROF_SLOTS 6u
 typedef struct {
   volatile uint32_t t[DMA_PROF_SLOTS];
   uint32_t pad[DMA_COLLECTIVE_GROUP_WORDS - DMA_PROF_SLOTS];
@@ -77,121 +78,70 @@ extern dma_prof_group_t dma_prof[];
   } while (0)
 #endif
 
-enum {
-  DMA_COLLECTIVE_OK = 0,
-  DMA_COLLECTIVE_ERROR_ARGUMENT = 0x80000001u,
-  DMA_COLLECTIVE_ERROR_SCOPE = 0x80000002u,
-  DMA_COLLECTIVE_ERROR_STALE = 0x80000003u,
-  DMA_COLLECTIVE_ERROR_REUSE = 0x80000004u,
-  DMA_COLLECTIVE_ERROR_LAUNCH = 0x80000005u,
-};
-
-typedef struct {
-  uint32_t base_group;
-  uint32_t num_groups;
-  uint32_t cores_per_group;
-} dma_collective_scope_t;
-
-typedef struct {
-  volatile uint32_t submit_epoch;
-  volatile uint32_t issued_epoch;
-  volatile uint32_t wait_epoch;
-  volatile uint32_t ready_epoch;
-  volatile dma_id_t local_id;
-  volatile uint32_t error;
-  volatile uint32_t descriptors;
-  volatile uint32_t issuer_core;
-  volatile uint32_t poller_core;
-  volatile uint32_t stream;
-} dma_collective_slot_state_t;
-
-typedef struct {
-  dma_collective_slot_state_t slot[DMA_COLLECTIVE_SLOTS];
-  uint32_t padding[DMA_COLLECTIVE_GROUP_WORDS - DMA_COLLECTIVE_STATE_FIELDS];
-} dma_collective_group_state_t;
-
-typedef struct dma_collective_state {
-  dma_collective_group_state_t group[NUM_GROUPS];
-} dma_collective_state_t;
-
-typedef struct {
-  dma_collective_state_t *state;
-  uint32_t generation;
-  uint32_t slot;
-  uint32_t group_id;
-  uint32_t base_group;
-  uint32_t num_groups;
-  uint32_t stream;
-  dma_id_t local_id;
-  uint32_t status;
-} dma_collective_handle_t;
-
-static inline dma_collective_scope_t dma_collective_scope_all(void) {
+// The level-`level` rectangle containing this core's group.
+static inline dma_collective_scope_t
+dma_collective_scope_level(uint32_t level) {
+  const uint32_t all = level >= (uint32_t)VC_LEVELS;
+  const uint32_t n = all ? (uint32_t)NUM_GROUPS : 1u << (2u * level);
   const dma_collective_scope_t scope = {
-      .base_group = 0,
-      .num_groups = NUM_GROUPS,
-      .cores_per_group = NUM_CORES_PER_GROUP,
+      .level = all ? (uint32_t)VC_LEVELS : level,
+      .base_group = mempool_get_group_id() & ~(n - 1u),
+      .num_groups = n,
   };
   return scope;
 }
 
-// Every core in the scope calls init after mempool_barrier_init(), followed by
-// a scope-appropriate barrier before the state is used. The deterministic first
-// core of each group initializes that group's bank-local state; the first core
-// of every tile initializes the tile-local descriptor lock.
-void dma_collective_init(dma_collective_state_t *state,
-                         const dma_collective_scope_t *scope);
+// The whole cluster is a constant: no hart-id read on the caller's path.
+static inline dma_collective_scope_t dma_collective_scope_all(void) {
+  const dma_collective_scope_t scope = {.level = (uint32_t)VC_LEVELS,
+                                        .base_group = 0u,
+                                        .num_groups = (uint32_t)NUM_GROUPS};
+  return scope;
+}
 
-// Split one contiguous L2<->L1 transfer over the participating group engines.
-// Exactly one side must be in the ordinary interleaved L1 range. Every core in
-// every group in scope calls this with the same nonzero generation. The first
-// arrival in each group issues that group's stripe and publishes its local id.
-// Up to DMA_COLLECTIVE_SLOTS generations may be outstanding concurrently.
-dma_collective_handle_t
-dma_collective_memcpy_nonblocking(dma_collective_state_t *state,
-                                  const dma_collective_scope_t *scope,
-                                  uint32_t generation, uint32_t stream,
-                                  void *dest, const void *src, size_t len);
+// Every core, once; mempool_barrier_init() does it.
+void dma_collective_runtime_init(void);
 
-// Agent form of the above: the caller asserts it is the SOLE issuer for its
-// group, so the issuer election is skipped. Calling it from more than one core
-// per group is a programming error.
-dma_collective_handle_t dma_collective_memcpy_agent_nonblocking(
-    dma_collective_state_t *state, const dma_collective_scope_t *scope,
-    uint32_t generation, uint32_t stream, void *dest, const void *src,
-    size_t len);
+// One contiguous global L2 <-> L1 range under `scope`. Exactly one side must be
+// in the interleaved L1 range, and every group owning part of it must be in the
+// scope.
+dma_collective_op_t
+dma_collective_submit_nonblocking(const dma_collective_scope_t *scope,
+                                  uint32_t stream, void *dest, const void *src,
+                                  size_t len);
 
-// Submit an already group-specialized 2-D transfer. This is the common lower
-// layer for virtual-cluster descriptors and manually partitioned workloads.
-dma_collective_handle_t dma_collective_submit_2d_nonblocking(
-    dma_collective_state_t *state, const dma_collective_scope_t *scope,
-    uint32_t generation, uint32_t stream, void *dest, const void *src,
-    size_t len, uint32_t dst_stride, uint32_t src_stride, uint32_t reps);
+// The same for the whole cluster, without a scope argument: a scope struct in
+// memory is a copy of a .rodata template, i.e. an L2 read on the hot path.
+dma_collective_op_t dma_collective_submit_all_nonblocking(uint32_t stream,
+                                                          void *dest,
+                                                          const void *src,
+                                                          size_t len);
 
-// Wait only for the caller's group-local id. Any core can become the completion
-// poller; this does not wait for other groups or impose a core barrier.
-uint32_t dma_collective_wait_local(const dma_collective_handle_t *handle);
+// An already group-specialised 2-D descriptor: each core passes ITS group's
+// shape. The lower layer for VC descriptors and manually partitioned transfers.
+dma_collective_op_t dma_collective_submit_2d_nonblocking(
+    const dma_collective_scope_t *scope, uint32_t stream, void *dest,
+    const void *src, size_t len, uint32_t dst_stride, uint32_t src_stride,
+    uint32_t reps);
 
-// Fence every group engine in the scope through handle->generation. All groups
-// must have at least one caller publishing local completion, but no
-// core-arrival barrier is implied.
-uint32_t dma_collective_wait(const dma_collective_scope_t *scope,
-                             const dma_collective_handle_t *handle);
+// Both wait `op` and every earlier operation; see COMPLETION above. Only
+// coordinators see their own launch errors in op.status; every core sees
+// engine errors in the return value.
+uint32_t dma_collective_wait(const dma_collective_op_t *last);
+uint32_t dma_collective_wait_ready(const dma_collective_op_t *op);
 
-// Wait for the named operation and every earlier request accepted by the same
-// group streams. iDMA transfer ids retire in issue order, so the explicit last
-// handle is the non-racy stream fence. This remains a DMA-only wait: it does
-// not impose a core barrier.
-uint32_t
-dma_collective_wait_through(const dma_collective_scope_t *scope,
-                            const dma_collective_handle_t *last_handle);
+// Whole-cluster forms on stream 0. Every core calls.
+static inline dma_collective_op_t
+dma_collective_memcpy_nonblocking(void *dest, const void *src, size_t len) {
+  return dma_collective_submit_all_nonblocking(0u, dest, src, len);
+}
 
-uint32_t dma_collective_done_local(const dma_collective_handle_t *handle);
-
-uint32_t dma_collective_memcpy_blocking(dma_collective_state_t *state,
-                                        const dma_collective_scope_t *scope,
-                                        uint32_t generation, uint32_t stream,
-                                        void *dest, const void *src,
-                                        size_t len);
+static inline uint32_t
+dma_collective_memcpy_blocking(void *dest, const void *src, size_t len) {
+  const dma_collective_op_t op =
+      dma_collective_memcpy_nonblocking(dest, src, len);
+  const uint32_t error = dma_collective_wait(&op);
+  return op.status != DMA_COLLECTIVE_OK ? op.status : error;
+}
 
 #endif // _DMA_COLLECTIVE_H_

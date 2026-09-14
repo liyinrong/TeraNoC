@@ -54,11 +54,10 @@ int main() {
   // Initialize data
   time_init = 0;
   time_end = 0;
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_X, l2_X, array_N * sizeof(int32_t));
-    dma_collective_all_memcpy_blocking(l1_Y, l2_Y, array_N * sizeof(int32_t));
+  dma_collective_memcpy_nonblocking(l1_X, l2_X, array_N * sizeof(int32_t));
+  dma_collective_memcpy_blocking(l1_Y, l2_Y, array_N * sizeof(int32_t));
+  if (mempool_is_group_coordinator())
     error = 0;
-  }
   register volatile int32_t a = l2_A;
   APP_BARRIER(num_cores);
 
@@ -76,10 +75,7 @@ int main() {
   }
 
   // Verify results
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l2_Z_check, l1_Y,
-                                       array_N * sizeof(int32_t));
-  }
+  dma_collective_memcpy_blocking(l2_Z_check, l1_Y, array_N * sizeof(int32_t));
   mempool_check_dpi_i32(l2_Z_check, l2_Z, array_N, 0, 0);
   APP_BARRIER(num_cores);
 

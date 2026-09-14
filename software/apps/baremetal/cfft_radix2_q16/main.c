@@ -50,16 +50,12 @@ int main() {
   uint32_t num_cores = mempool_get_core_count();
   mempool_barrier_init(core_id);
 
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_pSrc, l2_pSrc,
-                                       N_CSAMPLES * sizeof(int32_t));
-    dma_collective_all_memcpy_blocking(l1_twiddleCoef_q16, l2_twiddleCoef_q16,
-                                       (3 * N_CSAMPLES / 4) * sizeof(int32_t));
-    dma_collective_all_memcpy_blocking(l1_BitRevIndexTable, l2_BitRevIndexTable,
-                                       BITREVINDEXTABLE_LENGTH *
-                                           sizeof(uint16_t));
-  }
-  mempool_barrier(num_cores);
+  dma_collective_memcpy_nonblocking(l1_pSrc, l2_pSrc,
+                                    N_CSAMPLES * sizeof(int32_t));
+  dma_collective_memcpy_nonblocking(l1_twiddleCoef_q16, l2_twiddleCoef_q16,
+                                    (3 * N_CSAMPLES / 4) * sizeof(int32_t));
+  dma_collective_memcpy_blocking(l1_BitRevIndexTable, l2_BitRevIndexTable,
+                                 BITREVINDEXTABLE_LENGTH * sizeof(uint16_t));
 
 #ifdef SINGLE
   if (core_id == 0) {
@@ -80,10 +76,8 @@ int main() {
   mempool_stop_benchmark();
 #endif
 
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l2_pRes_check, l1_pSrc,
-                                       2 * N_CSAMPLES * sizeof(int16_t));
-  }
+  dma_collective_memcpy_blocking(l2_pRes_check, l1_pSrc,
+                                 2 * N_CSAMPLES * sizeof(int16_t));
   mempool_check_dpi_i16(l2_pRes_check, l2_pRes, 2 * N_CSAMPLES, TOLERANCE, 0);
   mempool_barrier(num_cores);
   return 0;

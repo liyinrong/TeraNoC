@@ -29,7 +29,15 @@ SECTIONS {
   .text : {
     *(.text.init)
     *(.text.startup)
+    /* Hot DMA collective code, kept contiguous and line-aligned so it spans as
+       few 64-byte instruction-cache lines as possible (dma_collective.c). */
+    . = ALIGN(0x40);
+    __dma_hot_start = .;
+    *(.text.dma_hot)
+    . = ALIGN(0x40);
+    __dma_hot_end = .;
     *(.text)
+    *(.text.dma_cold)
     *(.text.end)
     . = ALIGN(0x40);
     _etext = .;

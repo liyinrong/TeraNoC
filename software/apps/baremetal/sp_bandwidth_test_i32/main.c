@@ -140,10 +140,9 @@ int main() {
   mempool_barrier(num_cores);
 
   // Initialize data
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(data_l1, data_dram, dim * sizeof(int));
+  dma_collective_memcpy_blocking(data_l1, data_dram, dim * sizeof(int));
+  if (mempool_is_group_coordinator())
     init_offsets(offset_l1, num_cores * measure_iterations, dim, v_len);
-  }
 
   // Each core's starting address
   uint32_t *offset_p = offset_l1;

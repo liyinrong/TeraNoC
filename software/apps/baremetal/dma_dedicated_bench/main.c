@@ -4,11 +4,10 @@
 
 // H3 (was A5): what a dedicated DMA core buys, measured without any RTL.
 //
-// RE-MEASURED against the solo collective path. The original run used
-// dma_collective_all_memcpy_nonblocking + _wait_sync -- the slot path -- and
-// reported 450-700 cyc/iteration. That control has since become 36% cheaper
-// (solo path, f87f70de; wake-based barrier, 23f30fc2), so the old figure
-// overstates what a dedicated core is worth and must not be quoted.
+// Measured against the fixed-coordinator collective (dma_collective.h). An
+// earlier run used the slot path and reported 450-700 cyc/iteration; that
+// control has since become cheaper, so the old figure overstates what a
+// dedicated core is worth and must not be quoted.
 //
 // A double-buffered L2 -> L1 stream with compute on the other buffer, run
 // twice over identical machine state:
@@ -31,7 +30,6 @@
 #include <stdint.h>
 
 #include "dma.h"
-#include "dma_collective.h"
 #include "printf.h"
 #include "runtime.h"
 #include "synchronization.h"
@@ -75,10 +73,9 @@ static uint32_t run_arm(uint32_t core, uint32_t dedicated) {
       dedicated ? core - core / (uint32_t)NUM_CORES_PER_GROUP - 1u : core;
 
   acc[core] = 0u;
-  // Prime buffer 0 so iteration 0 has something to compute on.
-  if (coord)
-    (void)dma_collective_all_memcpy_solo(l1_buf[0], l2_src, DED_BYTES);
-  (void)dma_collective_all_wait_solo();
+  // Prime buffer 0 so iteration 0 has something to compute on. Every core
+  // calls; only the coordinators issue.
+  (void)dma_collective_memcpy_blocking(l1_buf[0], l2_src, DED_BYTES);
 
   const mempool_timer_t t0 = mempool_get_timer();
   uint32_t sum = 0u;
@@ -87,15 +84,14 @@ static uint32_t run_arm(uint32_t core, uint32_t dedicated) {
     const uint32_t nxt = cur ^ 1u;
     // Prefetch the next tile, wrapping so every iteration has one outstanding
     // transfer and the two arms see an identical DMA sequence.
-    if (coord)
-      (void)dma_collective_all_memcpy_solo(
-          l1_buf[nxt], &l2_src[((it + 1u) % DED_ITERS) * DED_TILE_WORDS],
-          DED_BYTES);
+    const dma_collective_op_t op = dma_collective_memcpy_nonblocking(
+        l1_buf[nxt], &l2_src[((it + 1u) % DED_ITERS) * DED_TILE_WORDS],
+        DED_BYTES);
     if (worker)
       for (uint32_t r = 0u; r < DED_REPS; ++r)
         for (uint32_t i = wid; i < DED_TILE_WORDS; i += nworkers)
           sum += l1_buf[cur][i];
-    (void)dma_collective_all_wait_solo();
+    (void)dma_collective_wait(&op);
   }
   const mempool_timer_t t1 = mempool_get_timer();
 

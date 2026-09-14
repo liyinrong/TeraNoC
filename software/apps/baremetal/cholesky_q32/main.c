@@ -69,13 +69,11 @@ int main() {
     }
   }
 #else
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_memcpy_blocking(l1_A, l2_A,
-                                       matrix_N * matrix_N * sizeof(int32_t));
-    dma_collective_all_memcpy_blocking(l1_L, l2_L,
-                                       matrix_N * matrix_N * sizeof(int32_t));
-    dma_collective_all_memcpy_blocking(l1_y, l2_y, matrix_N * sizeof(int32_t));
-  }
+  dma_collective_memcpy_nonblocking(l1_A, l2_A,
+                                    matrix_N * matrix_N * sizeof(int32_t));
+  dma_collective_memcpy_nonblocking(l1_L, l2_L,
+                                    matrix_N * matrix_N * sizeof(int32_t));
+  dma_collective_memcpy_blocking(l1_y, l2_y, matrix_N * sizeof(int32_t));
 #endif
   mempool_barrier(num_cores);
 

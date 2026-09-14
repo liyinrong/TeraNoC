@@ -79,25 +79,22 @@ int main() {
     dump_addr((uint32_t)l2_data);
     dump_addr((uint32_t)l2_data_move_out);
     dump_addr((uint32_t)l1_data);
-
-    // Copy in
-    uint32_t time = mempool_get_timer();
-    dma_collective_all_memcpy_blocking(l1_data, l2_data,
-                                       SIZE * sizeof(int32_t));
-    time = mempool_get_timer() - time;
-    dump_end(time);
   }
 
-  mempool_barrier(num_cores);
-
-  if (mempool_is_group_coordinator()) {
-    // Copy out
-    uint32_t time = mempool_get_timer();
-    dma_collective_all_memcpy_blocking(l2_data_move_out, l1_data,
-                                       SIZE * sizeof(int32_t));
-    time = mempool_get_timer() - time;
+  // Copy in. Every core calls; each group's coordinator issues its stripe.
+  uint32_t time = mempool_get_timer();
+  dma_collective_memcpy_blocking(l1_data, l2_data, SIZE * sizeof(int32_t));
+  time = mempool_get_timer() - time;
+  if (mempool_is_group_coordinator())
     dump_end(time);
-  }
+
+  // Copy out
+  time = mempool_get_timer();
+  dma_collective_memcpy_blocking(l2_data_move_out, l1_data,
+                                 SIZE * sizeof(int32_t));
+  time = mempool_get_timer() - time;
+  if (mempool_is_group_coordinator())
+    dump_end(time);
 
   // wait until all cores have finished
   mempool_barrier(num_cores);

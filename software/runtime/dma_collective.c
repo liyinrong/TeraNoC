@@ -4,7 +4,6 @@
 
 #include "dma_collective.h"
 
-#include <stdbool.h>
 #include <stdint.h>
 
 #include "fsync.h"
@@ -12,6 +11,7 @@
 #include "synchronization.h"
 
 #define DMA_COLLECTIVE_TILE_WORDS NUM_BANKS_PER_TILE
+#define DMA_COLLECTIVE_CORE_WORDS (NUM_BANKS / NUM_CORES)
 #define DMA_COLLECTIVE_NUM_TILES (NUM_CORES / NUM_CORES_PER_TILE)
 #define DMA_COLLECTIVE_TCDM_SIZE (NUM_BANKS * L1_BANK_SIZE)
 #define DMA_COLLECTIVE_ROW_BYTES (NUM_BANKS * sizeof(uint32_t))
@@ -20,106 +20,109 @@
   ((AXI_DATA_WIDTH / 8u) * AXI_WIDTH_INTERLEAVED)
 #define DMA_COLLECTIVE_L2_PERIOD_BYTES                                         \
   (DMA_COLLECTIVE_L2_STRIPE_BYTES * L2_BANKS)
+#define DMA_COLLECTIVE_LEVELS ((uint32_t)VC_LEVELS + 1u)
+#define DMA_COLLECTIVE_STORAGE                                                 \
+  __attribute__((aligned(NUM_BANKS * sizeof(uint32_t)), section(".l1")))
+
+// The whole-cluster issue and wait paths live in their own line-aligned
+// section, kept contiguous by link.ld and prefetched into each group's
+// read-only cache at init. Executed cold they would be fetched from L2 one
+// 64-byte cache line at a time (~30 cycles each), by every group at once, and
+// the groups queue at L2 (docs/plan/dma-collective-optimization.md §7.9).
+#define DMA_HOT __attribute__((section(".text.dma_hot"), aligned(64)))
+#define DMA_COLD __attribute__((section(".text.dma_cold"), noinline, cold))
+// The fast paths use masks for these, so they need powers of two, plus the
+// same geometry preconditions as dma_collective_issue_linear()'s fast path.
+#define DMA_COLLECTIVE_FAST_GEOMETRY                                           \
+  (((DMA_COLLECTIVE_ROW_BYTES & (DMA_COLLECTIVE_ROW_BYTES - 1u)) == 0u) &&     \
+   ((NUM_CORES_PER_GROUP & (NUM_CORES_PER_GROUP - 1u)) == 0u) &&               \
+   ((DMA_COLLECTIVE_ROW_BYTES % DMA_COLLECTIVE_L2_PERIOD_BYTES) == 0u) &&      \
+   ((DMA_COLLECTIVE_L2_STRIPE_BYTES % DMA_COLLECTIVE_GROUP_BYTES) == 0u))
+
+// Per-group control block, written by the group coordinator. Padded to one
+// group bank stripe, so entry g lands in group g's banks.
+#define DMA_COLLECTIVE_GROUP_FIELDS (5 + NUM_DMAS_PER_GROUP)
+#if DMA_COLLECTIVE_GROUP_WORDS <= DMA_COLLECTIVE_GROUP_FIELDS
+#error "The DMA group control block does not fit in one group bank stripe"
+#endif
+
+typedef struct {
+  volatile dma_id_t last_id[NUM_DMAS_PER_GROUP]; // newest issued id, 0 = none
+  volatile uint32_t error;       // first launch error since the last wait
+  volatile uint32_t ready_seq;   // every operation up to this one has retired
+  volatile uint32_t ready_error; // error published with ready_seq
+  volatile uint32_t fence_seq;   // operation whose barrier fence_error names
+  volatile uint32_t fence_error; // stored into EVERY group of a failing scope
+  uint32_t padding[DMA_COLLECTIVE_GROUP_WORDS - DMA_COLLECTIVE_GROUP_FIELDS];
+} dma_collective_group_t;
+
+// Per-core operation count, padded to one core's bank share so entry c lands
+// in core c's tile.
+#if DMA_COLLECTIVE_CORE_WORDS < 3
+#error "The DMA per-core state does not fit in one core bank share"
+#endif
+
+typedef struct {
+  volatile uint32_t seq;
+  uint32_t aggr_all; // fractal_sync aggregate of the whole cluster, 0 = none
+  uint32_t padding[DMA_COLLECTIVE_CORE_WORDS - 2];
+} dma_collective_core_t;
 
 typedef struct {
   volatile uint32_t value;
   uint32_t padding[DMA_COLLECTIVE_TILE_WORDS - 1];
 } dma_collective_tile_lock_t;
 
-#define DMA_COLLECTIVE_ALL_FIELDS 14u
-
-#if DMA_COLLECTIVE_GROUP_WORDS < DMA_COLLECTIVE_ALL_FIELDS
-#error "The default collective control does not fit in one group bank stripe"
-#endif
-
-typedef struct {
-  volatile uint32_t generation;
-  dma_collective_handle_t handle;
-  // Failure report for the hardware fence. A group that fails writes its code
-  // into EVERY group's copy before the barrier, so the common path costs each
-  // reader one load from its own group's banks instead of a remote poll.
-  volatile uint32_t fence_error;
-  volatile uint32_t fence_generation;
-  // Solo path: this group's in-flight transfer. Written and read by the same
-  // core, in its own group's banks, so it replaces the whole slot machinery.
-  volatile uint32_t solo_id;
-  volatile uint32_t solo_error;
-  uint32_t padding[DMA_COLLECTIVE_GROUP_WORDS - DMA_COLLECTIVE_ALL_FIELDS];
-} dma_collective_all_group_t;
-
-#ifdef DMA_COLLECTIVE_PROFILE
-dma_prof_group_t dma_prof[NUM_GROUPS] DMA_COLLECTIVE_STORAGE;
-#endif
-
+static dma_collective_group_t
+    dma_collective_group[NUM_GROUPS] DMA_COLLECTIVE_STORAGE;
+static dma_collective_core_t
+    dma_collective_core[NUM_CORES] DMA_COLLECTIVE_STORAGE;
 static dma_collective_tile_lock_t
     dma_collective_tile_lock[DMA_COLLECTIVE_NUM_TILES] DMA_COLLECTIVE_STORAGE;
-static dma_collective_state_t dma_collective_all_state DMA_COLLECTIVE_STORAGE;
-static dma_collective_all_group_t
-    dma_collective_all_group[NUM_GROUPS] DMA_COLLECTIVE_STORAGE;
+// Rendezvous for scopes the fractal_sync tree cannot express.
+static mempool_poll_slot_t dma_collective_poll[DMA_COLLECTIVE_LEVELS]
+                                              [NUM_GROUPS]
+    __attribute__((section(".l1")));
 #if FSYNC_TPG_SIDE != 0
 // One full bank stripe per tile, so a tile's counter lands in its own banks.
 static fsync_tile_counter_t dma_collective_fsync_cnt[DMA_COLLECTIVE_NUM_TILES]
     __attribute__((aligned(FSYNC_TILE_COUNTER_ALIGNMENT), section(".l1")));
 #endif
 
-static uint32_t
-dma_collective_scope_valid(const dma_collective_scope_t *scope) {
-  return scope != NULL && scope->num_groups != 0 &&
-         scope->base_group < (uint32_t)NUM_GROUPS &&
-         scope->num_groups <= (uint32_t)NUM_GROUPS - scope->base_group &&
-         scope->cores_per_group == (uint32_t)NUM_CORES_PER_GROUP;
+extern const char __dma_hot_start[], __dma_hot_end[];
+// Load the hot code into the group read-only cache by reading one word per
+// 64-byte line as data, so its first instruction fetch fills from the group
+// cache (~8 cycles) instead of L2 (~30).
+DMA_COLD static void dma_collective_prefetch_hot(void) {
+  volatile uint32_t sink = 0u;
+  for (const char *p = __dma_hot_start; p < __dma_hot_end; p += 64)
+    sink = *(const uint32_t *)(const void *)p;
+  (void)sink;
 }
 
-static uint32_t
-dma_collective_group_in_scope(const dma_collective_scope_t *scope,
-                              uint32_t group) {
-  return group >= scope->base_group &&
-         group < scope->base_group + scope->num_groups;
-}
-
-static uint32_t dma_collective_slot_index(uint32_t generation) {
-  return (generation - 1u) % DMA_COLLECTIVE_SLOTS;
-}
-
-static uint32_t dma_collective_epoch_done(uint32_t done, uint32_t target) {
-  return (int32_t)(done - target) >= 0;
-}
-
-static dma_collective_handle_t
-dma_collective_invalid_handle(dma_collective_state_t *state,
-                              uint32_t generation, uint32_t stream,
-                              uint32_t status) {
-  const dma_collective_handle_t handle = {
-      .state = state,
-      .generation = generation,
-      .slot = generation == 0 ? 0 : dma_collective_slot_index(generation),
-      .group_id = mempool_get_group_id(),
-      .base_group = 0,
-      .num_groups = 0,
-      .stream = stream,
-      .local_id = 0,
-      .status = status,
-  };
-  return handle;
-}
+#ifdef DMA_COLLECTIVE_PROFILE
+dma_prof_group_t dma_prof[NUM_GROUPS] DMA_COLLECTIVE_STORAGE;
+#define DMA_PROF_COORD(i)                                                      \
+  do {                                                                         \
+    if (mempool_is_group_coordinator())                                        \
+      DMA_PROF(i);                                                             \
+  } while (0)
+#else
+#define DMA_PROF_COORD(i)                                                      \
+  do {                                                                         \
+  } while (0)
+#endif
 
 // The engine's descriptor registers are ONE context per group, so this lock is
-// per group. It used to be per tile, which was correct only while every tile
-// owned its own context: with a shared one, two tiles writing their descriptors
-// at the same time interleave SRC/DST/LENGTH into a single register set and
-// each launches the other's transfer.
+// per group, indexed by the group's FIRST tile so it sits in the group's own
+// banks. The collective does not need it -- it has one issuer per group -- but
+// raw dma_local_* callers issuing from several tiles do (dma.h).
 //
-// The array entries are padded to a tile stripe, so entry t lands in TILE t's
-// banks. Index by the group's FIRST tile rather than by the group id, or group
-// g's lock would sit in whichever group owns tile g and every acquire would
-// leave the group.
+// `.l1` is NOBITS and powers up X, so the lock MUST be zeroed before the first
+// acquire or __atomic_exchange_n never returns 0.
 #define DMA_COLLECTIVE_LOCK_INDEX                                              \
   (mempool_get_group_id() * (uint32_t)NUM_TILES_PER_GROUP)
 
-// The lock lives in `.l1`, which is NOBITS and powers up X, so it MUST be
-// zeroed before the first acquire or __atomic_exchange_n never returns 0 and
-// every issuer spins forever. Exported next to the lock itself: a caller
-// outside this file has no other way to reach the storage.
 void dma_group_ctx_init(void) {
   if (mempool_is_tile_agent()) {
     dma_collective_tile_lock_t *const lock =
@@ -144,191 +147,82 @@ void dma_group_ctx_unlock(void) {
   __atomic_store_n(&dma_collective_tile_lock[idx].value, 0, __ATOMIC_RELEASE);
 }
 
-// Claim for a caller that is the SOLE issuer of this group -- the agent path.
-//
-// The SPMD claim below must elect one issuer among every core of the group,
-// which costs a CAS plus three fenced acquire loads. dma_collective_all_* is
-// coordinator-only (see dma_collective_all_memcpy_nonblocking), so there is
-// exactly one caller and that election is provably uncontended: the CAS can
-// never fail and the non-owner path can never run.
-//
-// What does NOT go away is the slot-reuse guard. With DMA_COLLECTIVE_SLOTS
-// generations in flight, generation N reuses the slot of N-SLOTS, so that
-// transfer must have landed. A sole issuer is also the sole publisher of
-// submit_epoch/issued_epoch, so `issued == submit` holds by construction and
-// only ready_epoch has to be read -- one acquire load instead of four fenced
-// operations.
-static dma_collective_handle_t
-dma_collective_claim_agent(dma_collective_state_t *state,
-                           const dma_collective_scope_t *scope,
-                           uint32_t generation, uint32_t stream) {
-  if (state == NULL || !dma_collective_scope_valid(scope) || generation == 0 ||
-      stream >= (uint32_t)NUM_DMAS_PER_GROUP)
-    return dma_collective_invalid_handle(state, generation, stream,
-                                         DMA_COLLECTIVE_ERROR_ARGUMENT);
-
-  const uint32_t group = mempool_get_group_id();
-  if (!dma_collective_group_in_scope(scope, group))
-    return dma_collective_invalid_handle(state, generation, stream,
-                                         DMA_COLLECTIVE_ERROR_SCOPE);
-
-  const uint32_t slot = dma_collective_slot_index(generation);
-  dma_collective_slot_state_t *const slot_state =
-      &state->group[group].slot[slot];
-  dma_collective_handle_t handle = {
-      .state = state,
-      .generation = generation,
-      .slot = slot,
-      .group_id = group,
-      .base_group = scope->base_group,
-      .num_groups = scope->num_groups,
-      .stream = stream,
-      .local_id = 0,
-      .status = DMA_COLLECTIVE_OK,
-  };
-
-  const uint32_t submit =
-      __atomic_load_n(&slot_state->submit_epoch, __ATOMIC_RELAXED);
-  if (submit == generation)
-    return handle; // already claimed by this same agent; idempotent
-  if (dma_collective_epoch_done(submit, generation)) {
-    handle.status = DMA_COLLECTIVE_ERROR_STALE;
-    return handle;
-  }
-  if (submit != 0u &&
-      !dma_collective_epoch_done(
-          __atomic_load_n(&slot_state->ready_epoch, __ATOMIC_ACQUIRE),
-          submit)) {
-    handle.status = DMA_COLLECTIVE_ERROR_REUSE;
-    return handle;
-  }
-  // No CAS: a sole issuer has no competitor. Release so the drain and any
-  // observer see a consistent slot before issued_epoch is published.
-  __atomic_store_n(&slot_state->submit_epoch, generation, __ATOMIC_RELEASE);
-  return handle;
-}
-
-static dma_collective_handle_t
-dma_collective_claim(dma_collective_state_t *state,
-                     const dma_collective_scope_t *scope, uint32_t generation,
-                     uint32_t stream, uint32_t *owner) {
-  *owner = 0;
-  if (state == NULL || !dma_collective_scope_valid(scope) || generation == 0 ||
-      stream >= (uint32_t)NUM_DMAS_PER_GROUP)
-    return dma_collective_invalid_handle(state, generation, stream,
-                                         DMA_COLLECTIVE_ERROR_ARGUMENT);
-
-  const uint32_t group = mempool_get_group_id();
-  if (!dma_collective_group_in_scope(scope, group))
-    return dma_collective_invalid_handle(state, generation, stream,
-                                         DMA_COLLECTIVE_ERROR_SCOPE);
-
-  const uint32_t slot = dma_collective_slot_index(generation);
-  dma_collective_slot_state_t *const slot_state =
-      &state->group[group].slot[slot];
-  dma_collective_handle_t handle = {
-      .state = state,
-      .generation = generation,
-      .slot = slot,
-      .group_id = group,
-      .base_group = scope->base_group,
-      .num_groups = scope->num_groups,
-      .stream = stream,
-      .local_id = 0,
-      .status = DMA_COLLECTIVE_OK,
-  };
-
-  while (1) {
-    uint32_t submit =
-        __atomic_load_n(&slot_state->submit_epoch, __ATOMIC_ACQUIRE);
-    if (submit != generation && dma_collective_epoch_done(submit, generation)) {
-      handle.status = DMA_COLLECTIVE_ERROR_STALE;
-      return handle;
-    }
-    if (submit == generation) {
-      uint32_t issued;
-      do {
-        issued = __atomic_load_n(&slot_state->issued_epoch, __ATOMIC_ACQUIRE);
-        if (issued != generation)
-          mempool_wait(4u);
-      } while (issued != generation);
-      if (issued != generation) {
-        handle.status = DMA_COLLECTIVE_ERROR_STALE;
-        return handle;
-      }
-      handle.local_id =
-          __atomic_load_n(&slot_state->local_id, __ATOMIC_RELAXED);
-      return handle;
-    }
-
-    const uint32_t issued =
-        __atomic_load_n(&slot_state->issued_epoch, __ATOMIC_ACQUIRE);
-    const uint32_t ready =
-        __atomic_load_n(&slot_state->ready_epoch, __ATOMIC_ACQUIRE);
-    if (issued != submit || !dma_collective_epoch_done(ready, issued)) {
-      handle.status = DMA_COLLECTIVE_ERROR_REUSE;
-      return handle;
-    }
-
-    uint32_t expected = submit;
-    if (__atomic_compare_exchange_n(&slot_state->submit_epoch, &expected,
-                                    generation, false, __ATOMIC_ACQ_REL,
-                                    __ATOMIC_ACQUIRE)) {
-      *owner = 1;
-      return handle;
-    }
-  }
-}
-
-static void dma_collective_publish(dma_collective_handle_t *handle,
-                                   dma_id_t local_id, uint32_t error,
-                                   uint32_t descriptors) {
-  dma_collective_slot_state_t *const slot_state =
-      &handle->state->group[handle->group_id].slot[handle->slot];
-  // Plain volatile stores: the release store on issued_epoch below orders all
-  // of them, and every reader reaches them only after acquiring that word. A
-  // relaxed __atomic_store_n would add no ordering here but does compile to
-  // amoswap.w, which blocks the bank for an extra cycle (tcdm_adapter.sv:262).
-  slot_state->local_id = local_id;
-  slot_state->error = error;
-  // No runtime reader for these two: dma_collective_smoke asserts on them, and
-  // a build-time gate would let that check pass vacuously. Two plain stores.
-  slot_state->descriptors = descriptors;
-  slot_state->issuer_core = mempool_get_core_id();
-  slot_state->stream = handle->stream;
-  __atomic_store_n(&slot_state->issued_epoch, handle->generation,
-                   __ATOMIC_RELEASE);
-  handle->local_id = local_id;
-}
-
-void dma_collective_init(dma_collective_state_t *state,
-                         const dma_collective_scope_t *scope) {
-  if (state == NULL || !dma_collective_scope_valid(scope))
-    return;
-
-  const uint32_t group = mempool_get_group_id();
-  if (!dma_collective_group_in_scope(scope, group))
-    return;
-
+void dma_collective_runtime_init(void) {
+  const uint32_t core = mempool_get_core_id();
+  dma_collective_core[core].seq = 0u;
+#if FSYNC_TPG_SIDE != 0
+  dma_collective_core[core].aggr_all = fsync_aggr_global();
+#else
+  dma_collective_core[core].aggr_all = 0u;
+#endif
+#if FSYNC_TPG_SIDE != 0
+  for (uint32_t t = core; t < DMA_COLLECTIVE_NUM_TILES;
+       t += (uint32_t)NUM_CORES)
+    fsync_tile_counter_init(&dma_collective_fsync_cnt[t]);
+#endif
   if (mempool_is_group_coordinator()) {
-    dma_collective_group_state_t *const group_state = &state->group[group];
-    for (uint32_t slot = 0; slot < DMA_COLLECTIVE_SLOTS; ++slot) {
-      group_state->slot[slot].submit_epoch = 0;
-      group_state->slot[slot].issued_epoch = 0;
-      group_state->slot[slot].wait_epoch = 0;
-      group_state->slot[slot].ready_epoch = 0;
-      group_state->slot[slot].local_id = 0;
-      group_state->slot[slot].error = 0;
-      group_state->slot[slot].descriptors = 0;
-      group_state->slot[slot].issuer_core = 0;
-      group_state->slot[slot].poller_core = 0;
-      group_state->slot[slot].stream = 0;
-    }
-    for (uint32_t i = 0u;
-         i < DMA_COLLECTIVE_GROUP_WORDS - DMA_COLLECTIVE_STATE_FIELDS; ++i)
-      group_state->padding[i] = 0u;
+    dma_collective_group_t *const control =
+        &dma_collective_group[mempool_get_group_id()];
+    for (uint32_t s = 0u; s < (uint32_t)NUM_DMAS_PER_GROUP; ++s)
+      control->last_id[s] = 0u;
+    control->error = DMA_COLLECTIVE_OK;
+    control->ready_seq = 0u;
+    control->ready_error = DMA_COLLECTIVE_OK;
+    control->fence_seq = 0u;
+    control->fence_error = DMA_COLLECTIVE_OK;
+    dma_collective_prefetch_hot();
+  }
+  if (core == 0u) {
+    for (uint32_t k = 0u; k < DMA_COLLECTIVE_LEVELS; ++k)
+      for (uint32_t g = 0u; g < (uint32_t)NUM_GROUPS; ++g)
+        mempool_barrier_poll_init(&dma_collective_poll[k][g]);
   }
   dma_group_ctx_init();
+}
+
+static uint32_t dma_collective_seq_done(uint32_t done, uint32_t target) {
+  return (int32_t)(done - target) >= 0;
+}
+
+static uint32_t
+dma_collective_scope_valid(const dma_collective_scope_t *scope) {
+  if (scope == NULL || scope->level > (uint32_t)VC_LEVELS)
+    return 0;
+  const uint32_t n = scope->level == (uint32_t)VC_LEVELS
+                         ? (uint32_t)NUM_GROUPS
+                         : 1u << (2u * scope->level);
+  return scope->num_groups == n && (scope->base_group & (n - 1u)) == 0u &&
+         scope->base_group < (uint32_t)NUM_GROUPS &&
+         n <= (uint32_t)NUM_GROUPS - scope->base_group;
+}
+
+static uint32_t
+dma_collective_group_in_scope(const dma_collective_scope_t *scope,
+                              uint32_t group) {
+  return group >= scope->base_group &&
+         group < scope->base_group + scope->num_groups;
+}
+
+// The scope's core rendezvous: the fractal_sync tree where it can express the
+// scope, software otherwise. Every core of the scope calls.
+static void dma_collective_barrier(const dma_collective_scope_t *scope) {
+  const uint32_t all = scope->num_groups == (uint32_t)NUM_GROUPS;
+#if FSYNC_TPG_SIDE != 0
+  const uint32_t aggr =
+      all ? fsync_aggr_global() : fsync_aggr_of_vc_level(scope->level);
+  // A zero aggregate is a single-tile scope, which the tree refuses.
+  if (aggr != 0u) {
+    fsync_barrier(dma_collective_fsync_cnt, mempool_get_tile_id(), FSYNC_ID_H,
+                  aggr);
+    return;
+  }
+#endif
+  if (all)
+    mempool_barrier((uint32_t)NUM_CORES);
+  else
+    mempool_barrier_poll_slot(
+        &dma_collective_poll[scope->level][scope->base_group],
+        scope->num_groups * (uint32_t)NUM_CORES_PER_GROUP);
 }
 
 static uint32_t dma_collective_group_row_range(uint32_t start, uint32_t end,
@@ -541,482 +435,343 @@ static dma_id_t dma_collective_issue_linear(uint32_t stream, void *dest,
   return last_id;
 }
 
-static dma_collective_handle_t
-dma_collective_memcpy_common(dma_collective_state_t *state,
-                             const dma_collective_scope_t *scope,
-                             uint32_t generation, uint32_t stream, void *dest,
-                             const void *src, size_t len, uint32_t agent) {
-  uint32_t owner = 1u;
-  DMA_PROF(1);
-  dma_collective_handle_t handle =
-      agent ? dma_collective_claim_agent(state, scope, generation, stream)
-            : dma_collective_claim(state, scope, generation, stream, &owner);
-  DMA_PROF(2);
-  if (handle.status != DMA_COLLECTIVE_OK || !owner)
-    return handle;
-
-  const uint32_t dest_addr = (uint32_t)dest;
-  const uint32_t src_addr = (uint32_t)src;
-  const uint32_t dest_in_l1 = dest_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
-  const uint32_t l1_start = dest_in_l1 ? dest_addr : src_addr;
-  uint32_t error = 0;
-  uint32_t descriptors = 0;
-  dma_id_t local_id = 0;
-
-  if (len == 0 || len > UINT32_MAX ||
-      l1_start >= (uint32_t)DMA_COLLECTIVE_TCDM_SIZE ||
-      len > (size_t)((uint32_t)DMA_COLLECTIVE_TCDM_SIZE - l1_start) ||
-      !dma_collective_scope_covers_range(scope, l1_start,
-                                         l1_start + (uint32_t)len)) {
-    error = DMA_COLLECTIVE_ERROR_SCOPE;
-    DMA_PROF(3);
-    DMA_PROF(4);
-    DMA_PROF(5);
-  } else {
-    DMA_PROF(3);
-    dma_group_ctx_lock();
-    DMA_PROF(4);
-    local_id = dma_collective_issue_linear(
-        stream, dest, src, len, handle.group_id, &error, &descriptors);
-    dma_group_ctx_unlock();
-    DMA_PROF(5);
+// Every core counts every submit; the count names the operation. An invalid
+// scope still counts, so every core stays in step.
+static dma_collective_op_t
+dma_collective_begin(const dma_collective_scope_t *scope, uint32_t stream) {
+  const uint32_t core = mempool_get_core_id();
+  dma_collective_op_t op;
+  op.seq = dma_collective_core[core].seq + 1u;
+  dma_collective_core[core].seq = op.seq;
+  op.status = DMA_COLLECTIVE_OK;
+  if (!dma_collective_scope_valid(scope)) {
+    op.scope.level = UINT32_MAX;
+    op.scope.base_group = 0u;
+    op.scope.num_groups = 0u;
+    op.status = DMA_COLLECTIVE_ERROR_ARGUMENT;
+    return op;
   }
-  DMA_PROF(6);
-  dma_collective_publish(&handle, local_id, error, descriptors);
-  DMA_PROF(7);
-  return handle;
+  op.scope = *scope;
+  if (stream >= (uint32_t)NUM_DMAS_PER_GROUP)
+    op.status = DMA_COLLECTIVE_ERROR_ARGUMENT;
+  else if (!dma_collective_group_in_scope(scope, mempool_get_group_id()))
+    op.status = DMA_COLLECTIVE_ERROR_SCOPE;
+  return op;
 }
 
-// SPMD form: every core of every group in scope calls this. One wins the
-// election and issues; the others come away with the same handle.
-dma_collective_handle_t
-dma_collective_memcpy_nonblocking(dma_collective_state_t *state,
-                                  const dma_collective_scope_t *scope,
-                                  uint32_t generation, uint32_t stream,
-                                  void *dest, const void *src, size_t len) {
-  return dma_collective_memcpy_common(state, scope, generation, stream, dest,
-                                      src, len, 0u);
-}
-
-// Agent form: the caller asserts it is the SOLE issuer for its group. Skips the
-// election, which is uncontended by construction in that case. Behaviour is
-// otherwise identical; calling it from more than one core per group is a
-// programming error and will corrupt the slot.
-dma_collective_handle_t dma_collective_memcpy_agent_nonblocking(
-    dma_collective_state_t *state, const dma_collective_scope_t *scope,
-    uint32_t generation, uint32_t stream, void *dest, const void *src,
-    size_t len) {
-  return dma_collective_memcpy_common(state, scope, generation, stream, dest,
-                                      src, len, 1u);
-}
-
-dma_collective_handle_t dma_collective_submit_2d_nonblocking(
-    dma_collective_state_t *state, const dma_collective_scope_t *scope,
-    uint32_t generation, uint32_t stream, void *dest, const void *src,
-    size_t len, uint32_t dst_stride, uint32_t src_stride, uint32_t reps) {
-  uint32_t owner;
-  dma_collective_handle_t handle =
-      dma_collective_claim(state, scope, generation, stream, &owner);
-  if (handle.status != DMA_COLLECTIVE_OK || !owner)
-    return handle;
-
-  uint32_t error = 0;
-  dma_id_t local_id = 0;
-  if (len == 0 || reps == 0) {
-    error = DMA_COLLECTIVE_ERROR_ARGUMENT;
-  } else {
-    dma_group_ctx_lock();
-    local_id = dma_local_memcpy_2d_nonblocking(stream, dest, src, len,
-                                               dst_stride, src_stride, reps);
-    if (local_id == 0) {
-      error = dma_local_error(stream);
-      if (error == 0)
-        error = DMA_COLLECTIVE_ERROR_LAUNCH;
-    }
-    dma_group_ctx_unlock();
-  }
-  dma_collective_publish(&handle, local_id, error, local_id != 0);
-  return handle;
-}
-
-uint32_t dma_collective_wait_local(const dma_collective_handle_t *handle) {
-  if (handle == NULL || handle->state == NULL || handle->generation == 0 ||
-      handle->slot >= DMA_COLLECTIVE_SLOTS ||
-      handle->group_id >= (uint32_t)NUM_GROUPS ||
-      handle->stream >= (uint32_t)NUM_DMAS_PER_GROUP)
-    return DMA_COLLECTIVE_ERROR_ARGUMENT;
-  if (handle->status != DMA_COLLECTIVE_OK)
-    return handle->status;
-
-  dma_collective_group_state_t *const group_state =
-      &handle->state->group[handle->group_id];
-  dma_collective_slot_state_t *const slot_state =
-      &group_state->slot[handle->slot];
-  while (1) {
-    const uint32_t ready =
-        __atomic_load_n(&slot_state->ready_epoch, __ATOMIC_ACQUIRE);
-    if (dma_collective_epoch_done(ready, handle->generation))
-      return __atomic_load_n(&slot_state->error, __ATOMIC_RELAXED);
-
-    uint32_t wait = __atomic_load_n(&slot_state->wait_epoch, __ATOMIC_ACQUIRE);
-    if (wait != handle->generation &&
-        dma_collective_epoch_done(wait, handle->generation))
-      return DMA_COLLECTIVE_ERROR_STALE;
-    if (wait == handle->generation)
-      mempool_wait(4u);
-    if (wait == handle->generation)
-      continue;
-
-    uint32_t expected = wait;
-    if (__atomic_compare_exchange_n(&slot_state->wait_epoch, &expected,
-                                    handle->generation, false, __ATOMIC_ACQ_REL,
-                                    __ATOMIC_ACQUIRE)) {
-      // Ordered by the ready_epoch release at the end of the drain loop.
-      slot_state->poller_core = mempool_get_core_id();
-      uint32_t error = __atomic_load_n(&slot_state->error, __ATOMIC_RELAXED);
-      dma_id_t completed_id = 0;
-      if (handle->local_id != 0) {
-        const uint32_t wait_error =
-            dma_local_wait_id(handle->stream, handle->local_id);
-        DMA_PROF(10);
-        if (error == 0)
-          error = wait_error;
-        completed_id = dma_local_completed_id(handle->stream);
-      }
-      slot_state->error = error;
-
-      // Completion ids are cumulative. Retiring the named request therefore
-      // also retires every older slot on the same stream, which makes an
-      // explicit last handle a wait-through fence for queued submissions.
-      for (uint32_t slot = 0; slot < DMA_COLLECTIVE_SLOTS; ++slot) {
-        dma_collective_slot_state_t *const completed = &group_state->slot[slot];
-        const uint32_t issued =
-            __atomic_load_n(&completed->issued_epoch, __ATOMIC_ACQUIRE);
-        const dma_id_t local_id =
-            __atomic_load_n(&completed->local_id, __ATOMIC_RELAXED);
-        if (issued == 0 ||
-            dma_collective_epoch_done(
-                __atomic_load_n(&completed->ready_epoch, __ATOMIC_ACQUIRE),
-                issued) ||
-            __atomic_load_n(&completed->stream, __ATOMIC_RELAXED) !=
-                handle->stream ||
-            (slot != handle->slot &&
-             (completed_id == 0 || local_id == 0 ||
-              !dma_local_id_done(completed_id, local_id))))
-          continue;
-        if (__atomic_load_n(&completed->error, __ATOMIC_RELAXED) == 0)
-          completed->error = error;
-        __atomic_store_n(&completed->ready_epoch, issued, __ATOMIC_RELEASE);
-      }
-      return error;
-    }
+// Coordinator only: remember the newest id and the first launch error.
+static void dma_collective_record(dma_collective_op_t *op, uint32_t stream,
+                                  dma_id_t id, uint32_t error) {
+  dma_collective_group_t *const control =
+      &dma_collective_group[mempool_get_group_id()];
+  if (id != 0u)
+    control->last_id[stream] = id;
+  if (error != DMA_COLLECTIVE_OK) {
+    op->status = error;
+    if (control->error == DMA_COLLECTIVE_OK)
+      control->error = error;
   }
 }
 
-uint32_t dma_collective_wait(const dma_collective_scope_t *scope,
-                             const dma_collective_handle_t *handle) {
-  if (handle == NULL || !dma_collective_scope_valid(scope))
-    return DMA_COLLECTIVE_ERROR_ARGUMENT;
-  if (handle->status != DMA_COLLECTIVE_OK)
-    return handle->status;
-  if (handle->base_group != scope->base_group ||
-      handle->num_groups != scope->num_groups)
-    return DMA_COLLECTIVE_ERROR_SCOPE;
-  uint32_t error = dma_collective_wait_local(handle);
+// Any scope and range; dma_collective_submit_nonblocking() takes it for
+// everything its whole-cluster fast path does not cover.
+DMA_COLD static dma_collective_op_t
+dma_collective_submit_general(const dma_collective_scope_t *scope,
+                              uint32_t stream, void *dest, const void *src,
+                              size_t len) {
+  DMA_PROF_COORD(0);
+  dma_collective_op_t op = dma_collective_begin(scope, stream);
+  if (op.status != DMA_COLLECTIVE_OK)
+    return op;
 
-  for (uint32_t group = scope->base_group;
-       group < scope->base_group + scope->num_groups; ++group) {
-    dma_collective_slot_state_t *const slot_state =
-        &handle->state->group[group].slot[handle->slot];
-    while (!dma_collective_epoch_done(
-        __atomic_load_n(&slot_state->ready_epoch, __ATOMIC_ACQUIRE),
-        handle->generation)) {
-      mempool_wait(4u);
-    }
-    error |= __atomic_load_n(&slot_state->error, __ATOMIC_RELAXED);
-  }
-  __sync_synchronize();
-  return error;
-}
-
-uint32_t
-dma_collective_wait_through(const dma_collective_scope_t *scope,
-                            const dma_collective_handle_t *last_handle) {
-  return dma_collective_wait(scope, last_handle);
-}
-
-uint32_t dma_collective_done_local(const dma_collective_handle_t *handle) {
-  if (handle == NULL || handle->state == NULL || handle->generation == 0 ||
-      handle->slot >= DMA_COLLECTIVE_SLOTS ||
-      handle->group_id >= (uint32_t)NUM_GROUPS ||
-      handle->stream >= (uint32_t)NUM_DMAS_PER_GROUP ||
-      handle->status != DMA_COLLECTIVE_OK)
-    return 0;
-  dma_collective_slot_state_t *const slot_state =
-      &handle->state->group[handle->group_id].slot[handle->slot];
-  if (__atomic_load_n(&slot_state->submit_epoch, __ATOMIC_ACQUIRE) !=
-      handle->generation)
-    return 0;
-  if (dma_collective_epoch_done(
-          __atomic_load_n(&slot_state->ready_epoch, __ATOMIC_ACQUIRE),
-          handle->generation))
-    return 1;
-  return handle->local_id == 0 ||
-         dma_local_done_id(handle->stream, handle->local_id);
-}
-
-uint32_t dma_collective_memcpy_blocking(dma_collective_state_t *state,
-                                        const dma_collective_scope_t *scope,
-                                        uint32_t generation, uint32_t stream,
-                                        void *dest, const void *src,
-                                        size_t len) {
-  const dma_collective_handle_t handle = dma_collective_memcpy_nonblocking(
-      state, scope, generation, stream, dest, src, len);
-  return dma_collective_wait(scope, &handle);
-}
-
-void dma_collective_all_runtime_init(void) {
-  const dma_collective_scope_t scope = dma_collective_scope_all();
-  const uint32_t group = mempool_get_group_id();
-
-  dma_collective_init(&dma_collective_all_state, &scope);
-#if FSYNC_TPG_SIDE != 0
-  for (uint32_t t = mempool_get_core_id(); t < DMA_COLLECTIVE_NUM_TILES;
-       t += (uint32_t)NUM_CORES)
-    fsync_tile_counter_init(&dma_collective_fsync_cnt[t]);
-#endif
-  if (mempool_is_group_coordinator()) {
-    dma_collective_all_group_t *const control =
-        &dma_collective_all_group[group];
-    control->generation = 0;
-    control->handle = dma_collective_invalid_handle(
-        &dma_collective_all_state, 0, 0, DMA_COLLECTIVE_ERROR_STALE);
-    control->fence_error = 0;
-    control->fence_generation = 0;
-    control->solo_id = 0;
-    control->solo_error = 0;
-    for (uint32_t i = 0u;
-         i < DMA_COLLECTIVE_GROUP_WORDS - DMA_COLLECTIVE_ALL_FIELDS; ++i)
-      control->padding[i] = 0u;
-  }
-  __sync_synchronize();
-}
-
-uint32_t dma_collective_all_memcpy_nonblocking(void *dest, const void *src,
-                                               size_t len) {
-  DMA_PROF(0);
-  const uint32_t group = mempool_get_group_id();
-  const dma_collective_scope_t scope = dma_collective_scope_all();
-  if (!mempool_is_group_coordinator())
-    return DMA_COLLECTIVE_ERROR_ARGUMENT;
-
-  dma_collective_all_group_t *const control = &dma_collective_all_group[group];
-  uint32_t generation = control->generation + 1u;
-  if (generation == 0)
-    generation = 1;
-
-  dma_collective_handle_t handle = dma_collective_memcpy_agent_nonblocking(
-      &dma_collective_all_state, &scope, generation, 0, dest, src, len);
-  if (handle.status == DMA_COLLECTIVE_ERROR_REUSE &&
-      control->handle.status == DMA_COLLECTIVE_OK) {
-    const uint32_t wait_error =
-        dma_collective_wait_through(&scope, &control->handle);
-    if (wait_error != DMA_COLLECTIVE_OK)
-      return wait_error;
-    handle = dma_collective_memcpy_agent_nonblocking(
-        &dma_collective_all_state, &scope, generation, 0, dest, src, len);
-  }
-
-  control->handle = handle;
-  if (handle.status == DMA_COLLECTIVE_OK)
-    control->generation = generation;
-  DMA_PROF(8);
-  return handle.status;
-}
-
-uint32_t dma_collective_all_wait(void) {
-  const uint32_t group = mempool_get_group_id();
-  const dma_collective_scope_t scope = dma_collective_scope_all();
-  if (!mempool_is_group_coordinator())
-    return DMA_COLLECTIVE_ERROR_ARGUMENT;
-  return dma_collective_wait_through(&scope,
-                                     &dma_collective_all_group[group].handle);
-}
-
-// ---------------------------------------------------------------------------
-// Solo path
-//
-// The slot machinery exists for the SPMD contract: any core may call, any core
-// may wait, several generations may be in flight. Under the _all_ contract --
-// one designated agent per group, the SAME core waits, one transfer at a time,
-// completion established by a rendezvous rather than by polling peers -- every
-// piece of it has no work to do:
-//
-//   issuer election   one caller, no competitor
-//   poller election   the issuer is the waiter
-//   publish           local_id/error never leave the core that produced them
-//   ready_epoch       the rendezvous below establishes what it was polled for
-//   slot drain        one live transfer, nothing to retire
-//
-// So skip it. The transfer's identity lives in this group's own control block,
-// two words written and read by one core in its own banks.
-//
-// The cost of the contract is that only ONE transfer per group may be in
-// flight. That is what double buffering actually needs -- issue the next tile,
-// compute on the current one, wait -- so it is not a restriction in practice;
-// deeper queueing must use the slot API.
-uint32_t dma_collective_all_memcpy_solo(void *dest, const void *src,
-                                        size_t len) {
-  DMA_PROF(0);
-  if (!mempool_is_group_coordinator())
-    return DMA_COLLECTIVE_ERROR_ARGUMENT;
-
-  const uint32_t group = mempool_get_group_id();
-  dma_collective_all_group_t *const control = &dma_collective_all_group[group];
-  uint32_t error = 0;
-  uint32_t descriptors = 0;
-  DMA_PROF(1);
-
-  // The _all_ scope is every group, so scope coverage is a tautology and only
-  // the L1 range needs checking. issue_linear repeats these, but doing them
-  // here keeps the failure out of the engine.
   const uint32_t dest_addr = (uint32_t)dest;
   const uint32_t src_addr = (uint32_t)src;
   const uint32_t dest_in_l1 = dest_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
   const uint32_t src_in_l1 = src_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
-  if (dest_in_l1 == src_in_l1 || len == 0 || len > UINT32_MAX) {
-    control->solo_id = 0;
-    control->solo_error = DMA_COLLECTIVE_ERROR_ARGUMENT;
-    return DMA_COLLECTIVE_ERROR_ARGUMENT;
+  const uint32_t l1_start = dest_in_l1 ? dest_addr : src_addr;
+  if (dest_in_l1 == src_in_l1 || len == 0 || len > UINT32_MAX ||
+      len > (size_t)((uint32_t)DMA_COLLECTIVE_TCDM_SIZE - l1_start)) {
+    op.status = DMA_COLLECTIVE_ERROR_ARGUMENT;
+    return op;
   }
+  if (!dma_collective_scope_covers_range(scope, l1_start,
+                                         l1_start + (uint32_t)len)) {
+    op.status = DMA_COLLECTIVE_ERROR_SCOPE;
+    return op;
+  }
+  if (!mempool_is_group_coordinator())
+    return op;
 
-  DMA_PROF(2);
-  const dma_id_t id = dma_collective_issue_linear(0u, dest, src, len, group,
-                                                  &error, &descriptors);
-  DMA_PROF(3);
-  control->solo_id = id;
-  control->solo_error = error;
-  DMA_PROF(4);
-  return error;
-}
-
-// Completion for the solo path. EVERY core calls it: the rendezvous is what
-// establishes that every group's engine has retired, and the fsync leaf is a
-// tile, so every tile must take part.
-uint32_t dma_collective_all_wait_solo(void) {
-  DMA_PROF(5);
   uint32_t error = DMA_COLLECTIVE_OK;
-  const uint32_t coordinator = mempool_is_group_coordinator();
-  dma_collective_all_group_t *const control =
-      &dma_collective_all_group[mempool_get_group_id()];
-
-  if (coordinator) {
-    error = control->solo_error;
-    const uint32_t id = control->solo_id;
-    if (id != 0) {
-      const uint32_t wait_error = dma_local_wait_id(0u, (dma_id_t)id);
-      if (error == 0)
-        error = wait_error;
-    }
-    DMA_PROF(6);
-    control->solo_id = 0;
-    if (error != DMA_COLLECTIVE_OK) {
-      // Rare path: tell every group before the rendezvous releases readers.
-      for (uint32_t g = 0; g < (uint32_t)NUM_GROUPS; ++g)
-        __atomic_store_n(&dma_collective_all_group[g].fence_error, error,
-                         __ATOMIC_RELEASE);
-      __sync_synchronize();
-    }
-  }
-
-#if FSYNC_TPG_SIDE == 0
-  // No tree on this geometry; a software all-core barrier establishes the same
-  // thing, just slower. No ready_epoch is needed either way.
-  mempool_barrier(NUM_CORES);
-#else
-  fsync_barrier_all(dma_collective_fsync_cnt, mempool_get_tile_id());
-#endif
-  DMA_PROF(7);
-
-  if (coordinator && error == DMA_COLLECTIVE_OK) {
-    const uint32_t reported =
-        __atomic_load_n(&control->fence_error, __ATOMIC_ACQUIRE);
-    if (reported != DMA_COLLECTIVE_OK) {
-      error = reported;
-      control->fence_error = DMA_COLLECTIVE_OK;
-    }
-  }
-  __sync_synchronize();
-  DMA_PROF(8);
-  return error;
+  uint32_t descriptors = 0u;
+  const dma_id_t id = dma_collective_issue_linear(
+      stream, dest, src, len, mempool_get_group_id(), &error, &descriptors);
+  dma_collective_record(&op, stream, id, error);
+  DMA_PROF_COORD(1);
+  return op;
 }
 
-uint32_t dma_collective_all_memcpy_solo_blocking(void *dest, const void *src,
-                                                 size_t len) {
-  const uint32_t issue_error = dma_collective_all_memcpy_solo(dest, src, len);
-  const uint32_t wait_error = dma_collective_all_wait_solo();
-  return issue_error != DMA_COLLECTIVE_OK ? issue_error : wait_error;
+DMA_COLD static void dma_collective_launch_failed(dma_collective_op_t *op,
+                                                  uint32_t group,
+                                                  uint32_t stream) {
+  uint32_t error = dma_local_error(stream);
+  if (error == DMA_COLLECTIVE_OK)
+    error = DMA_COLLECTIVE_ERROR_LAUNCH;
+  op->status = error;
+  if (dma_collective_group[group].error == DMA_COLLECTIVE_OK)
+    dma_collective_group[group].error = error;
 }
 
-// Hardware cross-group fence. EVERY core calls this, unlike the rest of the
-// _all_ API: the fractal_sync leaf is a TILE, so a barrier over the cluster
-// only completes if every tile triggers its shim.
-//
-// Each group's coordinator confirms its OWN engine locally, then the whole
-// machine rendezvous on the tree. That is the invariant the software fence
-// pays 16 remote spin-loops to establish; the tree establishes it in one
-// round trip. Errors ride the per-group report written before the barrier.
-uint32_t dma_collective_all_wait_sync(void) {
-  DMA_PROF(9);
-  const uint32_t group = mempool_get_group_id();
-  dma_collective_all_group_t *const control = &dma_collective_all_group[group];
-  const uint32_t coordinator = mempool_is_group_coordinator();
-  const uint32_t generation = control->generation;
-  uint32_t error = DMA_COLLECTIVE_OK;
-
-#if FSYNC_TPG_SIDE == 0
-  // No square tile grid, so no tree (see FSyncTpgSide in mempool_pkg.sv).
-  // Keep the all-cores contract with the software fence underneath.
+// Only the fallback of the scope-less entry keeps a scope in memory.
+DMA_COLD static dma_collective_op_t
+dma_collective_submit_all_general(uint32_t stream, void *dest, const void *src,
+                                  size_t len) {
   const dma_collective_scope_t scope = dma_collective_scope_all();
-  if (coordinator)
-    error = dma_collective_wait_through(&scope, &control->handle);
-  mempool_barrier(NUM_CORES);
+  return dma_collective_submit_general(&scope, stream, dest, src, len);
+}
+
+// Hot path: the whole cluster and a row-aligned global L1 <-> L2 range, which
+// is what dma_collective_memcpy_*() issues. Short and linear, so it spans few
+// 64-byte instruction-cache lines; everything else takes the general path.
+DMA_HOT dma_collective_op_t dma_collective_submit_all_nonblocking(
+    uint32_t stream, void *dest, const void *src, size_t len) {
+  const uint32_t dest_addr = (uint32_t)dest;
+  const uint32_t src_addr = (uint32_t)src;
+  const uint32_t dest_in_l1 = dest_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
+  const uint32_t src_in_l1 = src_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
+  const uint32_t l1_start = dest_in_l1 ? dest_addr : src_addr;
+  const uint32_t n = (uint32_t)len;
+  if (__builtin_expect(
+          DMA_COLLECTIVE_FAST_GEOMETRY &&
+              stream < (uint32_t)NUM_DMAS_PER_GROUP &&
+              dest_in_l1 != src_in_l1 && n != 0u && (size_t)n == len &&
+              ((l1_start | n) & (DMA_COLLECTIVE_ROW_BYTES - 1u)) == 0u &&
+              n <= (uint32_t)DMA_COLLECTIVE_TCDM_SIZE - l1_start,
+          1)) {
+    const uint32_t hart = mempool_get_core_id();
+    dma_collective_op_t op;
+    op.scope.level = (uint32_t)VC_LEVELS;
+    op.scope.base_group = 0u;
+    op.scope.num_groups = (uint32_t)NUM_GROUPS;
+    op.seq = dma_collective_core[hart].seq + 1u;
+    dma_collective_core[hart].seq = op.seq;
+    op.status = DMA_COLLECTIVE_OK;
+    if ((hart & ((uint32_t)NUM_CORES_PER_GROUP - 1u)) == 0u) {
+      DMA_PROF(0);
+      const uint32_t group = hart / (uint32_t)NUM_CORES_PER_GROUP;
+      const uint32_t off = group * (uint32_t)DMA_COLLECTIVE_GROUP_BYTES;
+      const dma_id_t id = dma_local_memcpy_2d_nonblocking(
+          stream, (void *)(dest_addr + off), (const void *)(src_addr + off),
+          DMA_COLLECTIVE_GROUP_BYTES, DMA_COLLECTIVE_ROW_BYTES,
+          DMA_COLLECTIVE_ROW_BYTES, n / (uint32_t)DMA_COLLECTIVE_ROW_BYTES);
+      if (__builtin_expect(id != 0u, 1))
+        dma_collective_group[group].last_id[stream] = id;
+      else
+        dma_collective_launch_failed(&op, group, stream);
+      DMA_PROF(1);
+    }
+    return op;
+  }
+  return dma_collective_submit_all_general(stream, dest, src, len);
+}
+
+dma_collective_op_t
+dma_collective_submit_nonblocking(const dma_collective_scope_t *scope,
+                                  uint32_t stream, void *dest, const void *src,
+                                  size_t len) {
+  if (scope->num_groups == (uint32_t)NUM_GROUPS && scope->base_group == 0u &&
+      scope->level == (uint32_t)VC_LEVELS)
+    return dma_collective_submit_all_nonblocking(stream, dest, src, len);
+  return dma_collective_submit_general(scope, stream, dest, src, len);
+}
+
+dma_collective_op_t dma_collective_submit_2d_nonblocking(
+    const dma_collective_scope_t *scope, uint32_t stream, void *dest,
+    const void *src, size_t len, uint32_t dst_stride, uint32_t src_stride,
+    uint32_t reps) {
+  DMA_PROF_COORD(0);
+  dma_collective_op_t op = dma_collective_begin(scope, stream);
+  if (op.status != DMA_COLLECTIVE_OK)
+    return op;
+  if (len == 0 || reps == 0) {
+    op.status = DMA_COLLECTIVE_ERROR_ARGUMENT;
+    return op;
+  }
+  if (!mempool_is_group_coordinator())
+    return op;
+
+  const dma_id_t id = dma_local_memcpy_2d_nonblocking(
+      stream, dest, src, len, dst_stride, src_stride, reps);
+  uint32_t error = DMA_COLLECTIVE_OK;
+  if (id == 0u) {
+    error = dma_local_error(stream);
+    if (error == 0u)
+      error = DMA_COLLECTIVE_ERROR_LAUNCH;
+  }
+  dma_collective_record(&op, stream, id, error);
+  DMA_PROF_COORD(1);
+  return op;
+}
+
+// Coordinator only: retire everything its group has outstanding, then publish
+// READY through `seq`. Waiting the last id waits every earlier one.
+static uint32_t dma_collective_retire(uint32_t seq) {
+  dma_collective_group_t *const control =
+      &dma_collective_group[mempool_get_group_id()];
+  uint32_t error = control->error;
+  for (uint32_t s = 0u; s < (uint32_t)NUM_DMAS_PER_GROUP; ++s) {
+    const dma_id_t id = control->last_id[s];
+    if (id == 0u)
+      continue;
+    const uint32_t wait_error = dma_local_wait_id(s, id);
+    if (error == DMA_COLLECTIVE_OK)
+      error = wait_error;
+    control->last_id[s] = 0u;
+  }
+  control->error = DMA_COLLECTIVE_OK;
+  // Plain store: readers reach it only after acquiring ready_seq below.
+  control->ready_error = error;
+  __atomic_store_n(&control->ready_seq, seq, __ATOMIC_RELEASE);
   return error;
-#else
+}
+
+// Any scope; dma_collective_wait() takes it beyond its whole-cluster fast path.
+DMA_COLD static uint32_t
+dma_collective_wait_general(const dma_collective_op_t *last) {
+  if (last == NULL || !dma_collective_scope_valid(&last->scope))
+    return DMA_COLLECTIVE_ERROR_ARGUMENT;
+  const uint32_t group = mempool_get_group_id();
+  if (!dma_collective_group_in_scope(&last->scope, group))
+    return DMA_COLLECTIVE_ERROR_SCOPE;
+
+  const uint32_t coordinator = mempool_is_group_coordinator();
+  const uint32_t seq = dma_collective_core[mempool_get_core_id()].seq;
+  uint32_t error = DMA_COLLECTIVE_OK;
   if (coordinator) {
-    error = dma_collective_wait_local(&control->handle);
-    DMA_PROF(11);
+    DMA_PROF(2);
+    error = dma_collective_retire(seq);
+    DMA_PROF(3);
     if (error != DMA_COLLECTIVE_OK) {
-      // Rare path: tell every group, then make the stores visible before the
-      // barrier that releases the readers.
-      for (uint32_t g = 0; g < (uint32_t)NUM_GROUPS; ++g) {
-        dma_collective_all_group[g].fence_error = error;
-        __atomic_store_n(&dma_collective_all_group[g].fence_generation,
-                         generation, __ATOMIC_RELEASE);
+      // Rare path: tell every group before the barrier releases anyone, so each
+      // core learns it from its own group's banks.
+      const uint32_t end = last->scope.base_group + last->scope.num_groups;
+      for (uint32_t g = last->scope.base_group; g < end; ++g) {
+        dma_collective_group[g].fence_error = error;
+        __atomic_store_n(&dma_collective_group[g].fence_seq, seq,
+                         __ATOMIC_RELEASE);
       }
       __sync_synchronize();
     }
   }
 
-  fsync_barrier_all(dma_collective_fsync_cnt, mempool_get_tile_id());
-  DMA_PROF(12);
+  dma_collective_barrier(&last->scope);
+  DMA_PROF_COORD(4);
 
-  // One load from this group's own banks, not a remote poll of all sixteen.
-  if (coordinator && error == DMA_COLLECTIVE_OK &&
-      __atomic_load_n(&control->fence_generation, __ATOMIC_ACQUIRE) ==
-          generation)
-    error = control->fence_error;
+  if (error == DMA_COLLECTIVE_OK &&
+      __atomic_load_n(&dma_collective_group[group].fence_seq,
+                      __ATOMIC_ACQUIRE) == seq)
+    error = dma_collective_group[group].fence_error;
   __sync_synchronize();
-  DMA_PROF(13);
+  DMA_PROF_COORD(5);
   return error;
-#endif
 }
 
-uint32_t dma_collective_all_memcpy_blocking(void *dest, const void *src,
-                                            size_t len) {
-  const uint32_t issue_error =
-      dma_collective_all_memcpy_nonblocking(dest, src, len);
-  if (issue_error != DMA_COLLECTIVE_OK)
-    return issue_error;
-  return dma_collective_all_wait();
+// Poll one stream's completion. The sticky error is re-read every 8 polls, so a
+// faulted engine cannot hang the loop, and once after completion.
+static inline uint32_t dma_collective_wait_id_fast(uint32_t stream,
+                                                   dma_id_t id) {
+  uint32_t polls = 0u;
+  while (!dma_local_done_id(stream, id)) {
+    if ((++polls & 7u) == 0u && dma_local_error(stream) != 0u)
+      break;
+    mempool_wait(4u);
+  }
+  __sync_synchronize();
+  return dma_local_error(stream);
+}
+
+DMA_COLD static void
+dma_collective_fence_scope(const dma_collective_scope_t *scope, uint32_t seq,
+                           uint32_t error) {
+  const uint32_t end = scope->base_group + scope->num_groups;
+  for (uint32_t g = scope->base_group; g < end; ++g) {
+    dma_collective_group[g].fence_error = error;
+    __atomic_store_n(&dma_collective_group[g].fence_seq, seq, __ATOMIC_RELEASE);
+  }
+  __sync_synchronize();
+}
+
+// Hot path: a whole-cluster operation. The identity is computed once and the
+// barrier aggregate was precomputed by dma_collective_runtime_init().
+DMA_HOT uint32_t dma_collective_wait(const dma_collective_op_t *last) {
+  if (__builtin_expect(DMA_COLLECTIVE_FAST_GEOMETRY && last != NULL &&
+                           last->scope.num_groups == (uint32_t)NUM_GROUPS &&
+                           last->scope.base_group == 0u &&
+                           last->scope.level == (uint32_t)VC_LEVELS,
+                       1)) {
+    const uint32_t hart = mempool_get_core_id();
+    const uint32_t group = hart / (uint32_t)NUM_CORES_PER_GROUP;
+    const uint32_t seq = dma_collective_core[hart].seq;
+    dma_collective_group_t *const control = &dma_collective_group[group];
+    uint32_t error = DMA_COLLECTIVE_OK;
+    if ((hart & ((uint32_t)NUM_CORES_PER_GROUP - 1u)) == 0u) {
+      DMA_PROF(2);
+      error = control->error;
+      for (uint32_t s = 0u; s < (uint32_t)NUM_DMAS_PER_GROUP; ++s) {
+        const dma_id_t id = control->last_id[s];
+        if (id == 0u)
+          continue;
+        const uint32_t wait_error = dma_collective_wait_id_fast(s, id);
+        if (error == DMA_COLLECTIVE_OK)
+          error = wait_error;
+        control->last_id[s] = 0u;
+      }
+      DMA_PROF(3);
+      control->error = DMA_COLLECTIVE_OK;
+      control->ready_error = error;
+      __atomic_store_n(&control->ready_seq, seq, __ATOMIC_RELEASE);
+      if (__builtin_expect(error != DMA_COLLECTIVE_OK, 0))
+        dma_collective_fence_scope(&last->scope, seq, error);
+    }
+#if FSYNC_TPG_SIDE != 0
+    const uint32_t aggr = dma_collective_core[hart].aggr_all;
+    if (aggr != 0u)
+      fsync_barrier(dma_collective_fsync_cnt,
+                    hart / (uint32_t)NUM_CORES_PER_TILE, FSYNC_ID_H, aggr);
+    else
+#endif
+      mempool_barrier((uint32_t)NUM_CORES);
+    DMA_PROF_COORD(4);
+    if (error == DMA_COLLECTIVE_OK &&
+        __atomic_load_n(&control->fence_seq, __ATOMIC_ACQUIRE) == seq)
+      error = control->fence_error;
+    __sync_synchronize();
+    DMA_PROF_COORD(5);
+    return error;
+  }
+  return dma_collective_wait_general(last);
+}
+
+uint32_t dma_collective_wait_ready(const dma_collective_op_t *op) {
+  if (op == NULL || !dma_collective_scope_valid(&op->scope))
+    return DMA_COLLECTIVE_ERROR_ARGUMENT;
+  if (!dma_collective_group_in_scope(&op->scope, mempool_get_group_id()))
+    return DMA_COLLECTIVE_ERROR_SCOPE;
+
+  uint32_t error = DMA_COLLECTIVE_OK;
+  if (mempool_is_group_coordinator())
+    error =
+        dma_collective_retire(dma_collective_core[mempool_get_core_id()].seq);
+
+  const uint32_t end = op->scope.base_group + op->scope.num_groups;
+  for (uint32_t g = op->scope.base_group; g < end; ++g) {
+    dma_collective_group_t *const control = &dma_collective_group[g];
+    while (!dma_collective_seq_done(
+        __atomic_load_n(&control->ready_seq, __ATOMIC_ACQUIRE), op->seq))
+      mempool_wait(4u);
+    if (error == DMA_COLLECTIVE_OK)
+      error = control->ready_error;
+  }
+  __sync_synchronize();
+  return error;
 }
