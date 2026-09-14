@@ -1,0 +1,16 @@
+diff --git a/hardware/deps/fpnew/src/fpnew_cast_multi.sv b/hardware/deps/fpnew/src/fpnew_cast_multi.sv
+index eb0571b..b4c04ee 100644
+--- a/hardware/deps/fpnew/src/fpnew_cast_multi.sv
++++ b/hardware/deps/fpnew/src/fpnew_cast_multi.sv
+@@ -64,7 +64,10 @@ module fpnew_cast_multi #(
+   // Constants
+   // ----------
+   localparam int unsigned NUM_INT_FORMATS = fpnew_pkg::NUM_INT_FORMATS;
+-  localparam int unsigned MAX_INT_WIDTH   = fpnew_pkg::max_int_width(IntFmtConfig);
++  // At least 1: a CONV lane with no integer format (e.g. an FP8-only SIMD lane) would
++  // otherwise declare [-1:0] vectors, which VCS rejects (Error-[UCTLAB]).
++  localparam int unsigned MAX_INT_WIDTH   =
++      fpnew_pkg::maximum(fpnew_pkg::max_int_width(IntFmtConfig), 1);
+ 
+   localparam fpnew_pkg::fp_encoding_t SUPER_FORMAT = fpnew_pkg::super_format(FpFmtConfig);
+ 
