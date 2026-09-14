@@ -1,0 +1,21 @@
+diff --git a/hardware/deps/spatz_vpu/hw/src/spatz_vlsu.sv b/hardware/deps/spatz_vpu/hw/src/spatz_vlsu.sv
+index cd6e284..f003920 100644
+--- a/hardware/deps/spatz_vpu/hw/src/spatz_vlsu.sv
++++ b/hardware/deps/spatz_vpu/hw/src/spatz_vlsu.sv
+@@ -327,6 +327,8 @@ module spatz_vlsu
+   logic  [NrMemPorts-1:0] rob_blk_req;
+   logic  [NrMemPorts-1:0] rob_room_block;
+   logic  [NrMemPorts-1:0][idx_width(NrOutstandingLoads):0] rob_block_dummy_cnt;
++  // Declared ahead of gen_block_dummy_cnt, which reads it; VCS rejects use before declaration.
++  logic  [NrMemPorts-1:0][BurstLenWidth-1:0] burst_len_calc;
+   logic                   burst_block_fire;
+   logic                   burst_reserved_q, burst_reserved_d;
+ 
+@@ -818,7 +820,6 @@ module spatz_vlsu
+   logic  [NrMemPorts-1:0]                    burst_mode_req;
+   logic  [NrMemPorts-1:0]                    burst_use;
+   logic  [NrMemPorts-1:0]                    burst_addr_aligned;
+-  logic  [NrMemPorts-1:0][BurstLenWidth-1:0] burst_len_calc;
+   logic  [NrMemPorts-1:0][BurstLenWidth-1:0] burst_len_issue;
+   logic  [NrMemPorts-1:0]                    burst_alloc_q, burst_alloc_d;
+   logic  [NrMemPorts-1:0][BurstLenWidth-1:0] burst_len_q, burst_len_d;
