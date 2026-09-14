@@ -395,11 +395,17 @@ module fsync_shim #(
         cause_q[c]     <= '0;
         evt_seq_q[c]   <= '0;
       end else begin
-        if (reg_wr && reg_addr_i == (REG_SUBSCRIBE + 8'(4*c)))
-          subscribe_q[c] <= reg_wdata_i[EvtWidth-1:0];
         // Set beats clear: an event landing in the same cycle as the wake is
         // kept for the next sleep rather than lost.
         pending_q[c] <= (pending_q[c] & ~{EvtWidth{evt_wake[c]}}) | evt_set;
+        // pending stays a subset of the subscription. An event recorded while
+        // the core was awake would otherwise outlive its unsubscribe and wake
+        // the next, unrelated sleep -- a barrier wait that then exits early.
+        if (reg_wr && reg_addr_i == (REG_SUBSCRIBE + 8'(4*c))) begin
+          subscribe_q[c] <= reg_wdata_i[EvtWidth-1:0];
+          pending_q[c]   <= ((pending_q[c] & ~{EvtWidth{evt_wake[c]}}) | evt_set)
+                            & reg_wdata_i[EvtWidth-1:0];
+        end
         if (evt_wake[c]) begin
           cause_q[c]   <= pending_q[c];
           evt_seq_q[c] <= evt_seq_q[c] + 8'd1;
