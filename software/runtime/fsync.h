@@ -333,9 +333,10 @@ static inline void fsync_clear_error(void) {
 // ---------------------------------------------------------------------------
 // Two-level barrier. EVERY core of the tile calls these.
 //
-// The core that arrives LAST publishes an issue epoch, triggers the tree, polls
-// BUSY, validates the returned level/id, and publishes the done epoch. Earlier
-// cores poll those epochs, so an idle shim before issue cannot release them.
+// The core that arrives LAST triggers the tree. Every participant, the trigger
+// core included, then sleeps until its own event count moves, which only the
+// tree's response can do: pending holds subscribed sources only, and a legacy
+// wake does not count.
 // Each tile counter occupies one full tile-bank stripe: address bits
 // immediately above the bank select encode the tile, so adjacent words would
 // all live in the first tile instead of beside their users. The array base must
@@ -390,17 +391,19 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
     tile_cnt[tile].count = 0;
     fsync_trigger(id, aggr);
     // Everything below is off every other core's critical path: they are
-    // released by the tree, not by this core. Keep the bookkeeping AFTER the
-    // trigger so it never delays the response the others are waiting for --
-    // the expected level/id are locals for the same reason.
+    // released by the tree, not by this core.
     const uint32_t exp_level = fsync_level_of_aggr(aggr);
-    // The BUSY loop is itself the re-check for this core, so a spurious wake
-    // costs it one extra MMIO read and nothing more.
-    mempool_wfi();
+    // Wait like every other participant. A bare wfi can return on a banked
+    // legacy wake; the response would then land while this core is awake and
+    // stay pending, releasing it early from its next barrier. The error bit
+    // ends the wait too, since a tree error releases BUSY without a response.
     uint32_t status;
     do {
+      mempool_wfi();
       status = fsync_status();
-    } while ((status & FSYNC_STATUS_BUSY_MASK) != 0u);
+    } while ((status & FSYNC_STATUS_BUSY_MASK) != 0u ||
+             ((status & FSYNC_STATUS_ERROR_MASK) == 0u &&
+              fsync_evt_seq_self() == seq0));
     if ((status & FSYNC_STATUS_ERROR_MASK) != 0u ||
         fsync_status_level(status) != exp_level ||
         fsync_status_id(status) != id)
