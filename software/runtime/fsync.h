@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-// Hardware barrier over the fractal_sync H-tree (roadmap Phase 3).
+// Hardware barrier over the fractal_sync H-tree.
 //
 // The register contract matches MAGIA's obi_slave_fsync / fsync_mm_utils.h so
 // their software reads directly against ours:
@@ -12,43 +12,38 @@
 //   +0x08 CONTROL W   bit0 = trigger, bit1 = clear sticky error
 //   +0x0C STATUS  R   bit0 done, bit1 error, bit2 BUSY, [7:4] lvl, [8+] rsp id
 //
+// The per-core event unit above that (SUBSCRIBE, CAUSE, EVT_SEQ) is described
+// in hardware/src/fsync_shim.sv.
+//
 // SCOPE MODEL. A barrier scope is a pow2-aligned SQUARE block of TILES, and
 // the leaf of the tree is a TILE, not a core. That is what keeps every scope a
 // COMPLETE subtree: a complete SxS subtree aggregates at every level it climbs,
 // so aggr is all-ones and every member computes the SAME value independently,
 // with no lock, no leader election and no communication. An incomplete scope
 // (some cores excluded, an asymmetric set) makes the members' aggr DIVERGE and
-// this whole O(1) scheme collapses -- measured, see scripts/fsync/.
+// this whole O(1) scheme collapses (scripts/fsync/ checks the arithmetic).
 //
 // USAGE is two-level, because the hardware's finest scope is a PAIR of tiles
 // and a single leaf is refused outright:
-//   1. the selected compute cores of a tile meet at a polling barrier in L1;
-//   2. the tile leader calls fsync_barrier() -- ONE arrival per tile;
-//   3. the last arrival polls the response and release-publishes a done epoch.
-// A dedicated DMA/control core simply stays out of step 1, which is why it
-// does not perturb the scope.
+//   1. the participating cores of a tile meet at an atomic counter in L1;
+//   2. the last of them triggers the tree -- ONE arrival per tile;
+//   3. every participant sleeps until the tree's response reaches it.
+// A dedicated DMA/control core stays out of step 1 and unsubscribes, which is
+// why it does not perturb the scope.
 
 #ifndef _FSYNC_H_
 #define _FSYNC_H_
 
-// Self-contained on purpose: this header uses NUM_BANKS_PER_TILE,
-// mempool_get_core_id() and mempool_wfi(), so an includer that reached it
-// before runtime.h used to fail with an implicit-declaration cascade rather
-// than a clear error.
-#include <stdint.h>
-
-#include "runtime.h"
-
 #include <stdint.h>
 
 #include "addrmap.h"
+#include "runtime.h"
 
 #define FSYNC_AGGR_REG_OFFSET (0x00)
 #define FSYNC_ID_REG_OFFSET (0x04)
 #define FSYNC_CONTROL_REG_OFFSET (0x08)
 #define FSYNC_STATUS_REG_OFFSET (0x0C)
 #define FSYNC_SUBSCRIBE_REG_OFFSET 0x20u
-#define FSYNC_CAUSE_REG_OFFSET 0x30u
 #define FSYNC_EVT_SEQ_REG_OFFSET 0x40u
 #define FSYNC_EVT_FSYNC 0x1u
 #define FSYNC_EVT_DMA 0x2u     // group engine went idle (busy falling)
@@ -56,9 +51,7 @@
 #define FSYNC_EVT_ENGINE 0x8u  // tile engine end-of-computation (RedMulE)
 
 #define FSYNC_CONTROL_TRIGGER (1u << 0)
-#define FSYNC_CONTROL_CLEAR (1u << 1)
 
-#define FSYNC_STATUS_DONE_MASK (1u << 0)
 #define FSYNC_STATUS_ERROR_MASK (1u << 1)
 // Bit 2, matching MAGIA's FSYNC_MM_STATUS_BUSY_MASK.
 #define FSYNC_STATUS_BUSY_MASK (1u << 2)
@@ -78,8 +71,6 @@ static inline uint32_t fsync_status_id(uint32_t status) {
 // links used when two adjacent tiles sit under DIFFERENT sibling nodes.
 #define FSYNC_ID_H (0u)
 #define FSYNC_ID_V (1u)
-#define FSYNC_ID_H_NBR (2u)
-#define FSYNC_ID_V_NBR (3u)
 
 // ---------------------------------------------------------------------------
 // Scope arithmetic. Pure integer maths, no hardware needed, so it is unit
@@ -145,51 +136,10 @@ static inline uint32_t fsync_aggr_of_rect(uint32_t w, uint32_t h,
 }
 
 // A virtual-cluster level k spans 2^k GROUPS per axis, hence 2^k * tiles per
-// group along each axis. This is invariant #9: a memory-side group level maps
-// to a barrier-side TILE level one log2(tiles-per-group-side) higher.
+// group along each axis: a memory-side group level maps to a barrier-side TILE
+// level one log2(tiles-per-group-side) higher.
 static inline uint32_t fsync_aggr_of_vc_level(uint32_t k) {
   return fsync_aggr_of_side((1u << k) * (uint32_t)FSYNC_TPG_SIDE);
-}
-
-// Distinct id for one of several CONCURRENT rectangular scopes.
-//
-// Required, not optional. A rectangle thinner than square has ZERO bits in its
-// aggregate: it PROPAGATES through the levels it skips rather than aggregating
-// there, so two such scopes meet at a shared node. With equal ids that node
-// pairs them and completes a barrier that does not exist -- demonstrated in
-// hardware/tb/tb_fractal_sync.sv test F, where row 0's left half and row 1's
-// right half woke together despite neither row being complete.
-//
-// SQUARE scopes do not need this: their aggregate is contiguous all-ones, so
-// they aggregate at every level up to their own root and never pass through a
-// node another scope could match at. Disjoint square VCs may all use id 0.
-//
-// `index` is the scope's position along the axis it is stacked on (which row
-// of VCs this is). Bit 0 must keep encoding the direction, so ids step by two.
-// The id field is finite, so this wraps like MAGIA's row_id_lookup_mm: only
-// scopes that can actually meet need to differ, and ones far enough apart
-// resolve below any shared node and may reuse.
-static inline uint32_t fsync_rect_id(uint32_t index, uint32_t vertical,
-                                     uint32_t n_concurrent) {
-  const uint32_t half = n_concurrent > 1 ? n_concurrent / 2 : 1;
-  const uint32_t i = (index < half) ? index : (index - half);
-  return (i << 1) | (vertical ? 1u : 0u);
-}
-
-// One VC-row: every virtual cluster sitting in the same row of VCs at level k.
-// Full mesh width by one VC height -- the second half of a
-// "reduce inside each VC, then combine across the row" pattern.
-static inline uint32_t fsync_aggr_of_vc_row(uint32_t k, uint32_t *id) {
-  return fsync_aggr_of_rect((uint32_t)FSYNC_TILE_SIDE,
-                            (1u << k) * (uint32_t)FSYNC_TPG_SIDE, id);
-}
-
-// The column equivalent. Note it comes back with id = FSYNC_ID_V: a taller
-// than wide region enters the VERTICAL network, so the id must be passed to
-// the hardware along with the aggregate, not assumed to be 0.
-static inline uint32_t fsync_aggr_of_vc_col(uint32_t k, uint32_t *id) {
-  return fsync_aggr_of_rect((1u << k) * (uint32_t)FSYNC_TPG_SIDE,
-                            (uint32_t)FSYNC_TILE_SIDE, id);
 }
 
 // Every tile of the machine.
@@ -206,7 +156,7 @@ static inline uint32_t fsync_status(void) {
   return *(volatile uint32_t *)(FSYNC_BASE + FSYNC_STATUS_REG_OFFSET);
 }
 
-// Arm a barrier. Does NOT block; pair with fsync_wait().
+// Arm a barrier. Does not block.
 static inline void fsync_trigger(uint32_t id, uint32_t aggr) {
   *(volatile uint32_t *)(FSYNC_BASE + FSYNC_AGGR_REG_OFFSET) = aggr;
   *(volatile uint32_t *)(FSYNC_BASE + FSYNC_ID_REG_OFFSET) = id;
@@ -232,12 +182,6 @@ static inline uint32_t fsync_wait_response(void) {
   return status;
 }
 
-// Returns non-zero if the tree reported an error (RF/CAM overflow), which
-// must NOT be ignored: the scope did not synchronise.
-static inline uint32_t fsync_wait(void) {
-  return fsync_wait_response() & FSYNC_STATUS_ERROR_MASK;
-}
-
 // Which event sources may wake THIS core. Per-core address, so a core writes
 // its own word: no read-modify-write and no race with its tile-mates.
 static inline void fsync_subscribe_self(uint32_t sources) {
@@ -246,7 +190,6 @@ static inline void fsync_subscribe_self(uint32_t sources) {
       sources;
 }
 
-// What woke this core, latched at the wake.
 // Monotonic count of THIS core's event wakes. Sample it before sleeping and
 // loop until it changes: that is the only way to tell "the tree answered me"
 // from "wfi returned for some other reason". wfi is source-agnostic, and the
@@ -259,21 +202,10 @@ static inline uint32_t fsync_evt_seq_self(void) {
          0xffu;
 }
 
-static inline uint32_t fsync_cause_self(void) {
-  const uint32_t lane = mempool_get_core_id() % (uint32_t)NUM_CORES_PER_TILE;
-  return *(volatile uint32_t *)(FSYNC_BASE + FSYNC_CAUSE_REG_OFFSET +
-                                4u * lane);
-}
-
 // Leave the tile's barrier events entirely. A core that takes no part in its
 // tile's barriers must unsubscribe: while subscribed, every response leaves a
 // pending bit that wakes its next sleep, and mempool_barrier has no re-check.
 static inline void fsync_unsubscribe_self(void) { fsync_subscribe_self(0u); }
-
-static inline void fsync_clear_error(void) {
-  *(volatile uint32_t *)(FSYNC_BASE + FSYNC_CONTROL_REG_OFFSET) =
-      FSYNC_CONTROL_CLEAR;
-}
 
 // ---------------------------------------------------------------------------
 // Two-level barrier. EVERY core of the tile calls these.
@@ -281,40 +213,44 @@ static inline void fsync_clear_error(void) {
 // The core that arrives LAST triggers the tree. Every participant, the trigger
 // core included, then sleeps until its own event count moves, which only the
 // tree's response can do: pending holds subscribed sources only, and a legacy
-// wake does not count.
-// Each tile counter occupies one full tile-bank stripe: address bits
-// immediately above the bank select encode the tile, so adjacent words would
-// all live in the first tile instead of beside their users. The array base must
-// also be aligned to a complete all-tile bank stripe so entry zero maps to tile
-// zero. Counters MUST be zeroed before first use (`.l1` is NOBITS and powers up
-// X).
+// wake does not count. A tree error or mismatched response traps.
 //
-// A tree error or mismatched response traps before any participant proceeds.
+// Each tile counter occupies one full tile-bank stripe, so entry t lands in
+// tile t's own banks, and the array base is aligned to a whole all-tile stripe.
+// The runtime owns one array, fsync_tile_counters, zeroed by
+// mempool_barrier_init(); a test that wants its own must zero it first (`.l1`
+// is NOBITS and powers up X).
+//
+// The epoch fields are bookkeeping for tests: they are only written when the
+// includer defines FSYNC_EPOCH_TRACK.
 // ---------------------------------------------------------------------------
+
+#if NUM_BANKS_PER_TILE < 6
+#error "fsync_tile_counter_t needs at least six banks per tile"
+#endif
 
 typedef struct {
   volatile uint32_t count;
   volatile uint32_t issue_epoch;
   volatile uint32_t done_epoch;
-  volatile uint32_t status_error;
   volatile uint32_t expected_level;
   volatile uint32_t expected_id;
-  uint32_t padding[NUM_BANKS_PER_TILE > 6 ? NUM_BANKS_PER_TILE - 6 : 1];
+  uint32_t padding[NUM_BANKS_PER_TILE - 5];
 } fsync_tile_counter_t;
 
 #define FSYNC_TILE_COUNTER_ALIGNMENT (NUM_BANKS * sizeof(uint32_t))
+
+#if FSYNC_TPG_SIDE != 0
+extern fsync_tile_counter_t fsync_tile_counters[];
+#endif
 
 static inline void
 fsync_tile_counter_init(volatile fsync_tile_counter_t *tile_cnt) {
   tile_cnt->count = 0u;
   tile_cnt->issue_epoch = 0u;
   tile_cnt->done_epoch = 0u;
-  tile_cnt->status_error = 0u;
   tile_cnt->expected_level = 0u;
   tile_cnt->expected_id = 0u;
-  for (uint32_t i = 0u;
-       i < (NUM_BANKS_PER_TILE > 6 ? NUM_BANKS_PER_TILE - 6 : 1); ++i)
-    tile_cnt->padding[i] = 0u;
 }
 
 static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
@@ -328,9 +264,8 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
   const uint32_t seq0 = fsync_evt_seq_self();
 
   // Intra-tile rendezvous. tile_cnt[tile] sits in THIS tile's own bank stripe,
-  // so the atomic is a local access; moving it into hardware would cost more
-  // than it saves (an arrival written to the shim serialises at the tile's
-  // fsync arbiter, measured at +16 cycles for four cores).
+  // so the atomic is a local access; an arrival written to the shim instead
+  // would serialise at the tile's fsync arbiter.
   if (__atomic_fetch_add(&tile_cnt[tile].count, 1, __ATOMIC_RELAXED) ==
       participants - 1u) {
     tile_cnt[tile].count = 0;
@@ -353,35 +288,17 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
         fsync_status_level(status) != exp_level ||
         fsync_status_id(status) != id)
       __builtin_trap();
-    // Observability only -- no core waits on these. They are what makes
-    // fsync_epoch_smoke able to assert that every tile really did trigger on
-    // every generation rather than merely that everyone got out.
+#ifdef FSYNC_EPOCH_TRACK
     tile_cnt[tile].expected_level = exp_level;
     tile_cnt[tile].expected_id = id;
     ++tile_cnt[tile].issue_epoch;
     ++tile_cnt[tile].done_epoch;
+#endif
   } else {
-    // Released by the tree response, re-checked against the event sequence.
-    //
-    // A bare wfi is NOT sufficient: it is source-agnostic, and wake_up_all from
-    // mempool_barrier banks a credit on any core that is awake when it fires --
-    // measured, 15 such credits in a four-barrier run -- so a later wfi returns
-    // immediately with the barrier still outstanding. Dropping the re-check
-    // entirely deadlocked fsync_epoch_smoke: cores left barriers whose tiles
-    // had not triggered.
-    //
-    // The sequence counter is what the two-epoch handshake used to provide,
-    // without the cost: the old code waited for the TRIGGER core to read
-    // STATUS, validate, and publish done_epoch, which put its MMIO read on
-    // every other core's critical path. This is two local MMIO reads instead.
-#ifdef FSYNC_NEGATIVE_SKIP_SEQ_RECHECK
-    // Deliberate gate falsification: accept ANY wake, including a legacy credit
-    // banked while this core was awake. Production builds never define this.
-    mempool_wfi();
-#else
+    // Released by the tree response. A bare wfi is not enough: it also returns
+    // on a legacy wake banked while this core was awake.
     while (fsync_evt_seq_self() == seq0)
       mempool_wfi();
-#endif
   }
 }
 
@@ -390,38 +307,9 @@ static inline void fsync_barrier(volatile fsync_tile_counter_t *tile_cnt,
   fsync_barrier_n(tile_cnt, tile, id, aggr, NUM_CORES_PER_TILE);
 }
 
-static inline void fsync_barrier_vc(volatile fsync_tile_counter_t *tile_cnt,
-                                    uint32_t tile, uint32_t k) {
-  fsync_barrier(tile_cnt, tile, FSYNC_ID_H, fsync_aggr_of_vc_level(k));
-}
-
-// Combine across a row of VCs. Pair with fsync_barrier_vc() for the two-phase
-// pattern: every VC reduces internally, then the row combines. Note the id is
-// NOT always FSYNC_ID_H -- a taller-than-wide scope enters the vertical
-// network -- so it is taken from the helper.
-static inline void fsync_barrier_vc_row(volatile fsync_tile_counter_t *tile_cnt,
-                                        uint32_t tile, uint32_t k) {
-  uint32_t id;
-  const uint32_t aggr = fsync_aggr_of_vc_row(k, &id);
-  fsync_barrier(tile_cnt, tile, id, aggr);
-}
-
-static inline void fsync_barrier_vc_col(volatile fsync_tile_counter_t *tile_cnt,
-                                        uint32_t tile, uint32_t k) {
-  uint32_t id;
-  const uint32_t aggr = fsync_aggr_of_vc_col(k, &id);
-  fsync_barrier(tile_cnt, tile, id, aggr);
-}
-
 static inline void fsync_barrier_all(volatile fsync_tile_counter_t *tile_cnt,
                                      uint32_t tile) {
   fsync_barrier(tile_cnt, tile, FSYNC_ID_H, fsync_aggr_global());
-}
-
-static inline void fsync_barrier_all_n(volatile fsync_tile_counter_t *tile_cnt,
-                                       uint32_t tile, uint32_t participants) {
-  fsync_barrier_n(tile_cnt, tile, FSYNC_ID_H, fsync_aggr_global(),
-                  participants);
 }
 
 // Single-arrival form, for a caller that has ALREADY established that exactly

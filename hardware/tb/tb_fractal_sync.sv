@@ -312,7 +312,7 @@ module tb_fractal_sync;
     // shared id and this one does not.
     //
     // Asserted here in its CORRECT form -- distinct ids -- because that is the
-    // contract software must honour (software/runtime/fsync.h, fsync_rect_id).
+    // contract any software issuing such scopes concurrently must honour.
     reset_dut(); clear_woke();
     arrive_id(0, 0, 5, 0); arrive_id(1, 0, 5, 0);   // row 0, left,  id 0
     arrive_id(2, 1, 5, 2); arrive_id(3, 1, 5, 2);   // row 1, right, id 2

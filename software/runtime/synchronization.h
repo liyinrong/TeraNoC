@@ -10,15 +10,11 @@
 // Barrier functions
 void mempool_barrier_init(uint32_t core_id);
 void mempool_barrier(uint32_t num_cores);
-void mempool_strided_barrier(uint32_t *barrier, uint32_t num_cores,
-                             uint32_t stride, uint32_t offset);
 void mempool_log_barrier(uint32_t step, uint32_t core_id);
 void mempool_anyradixlog_barrier(uint32_t radix, uint32_t core_id);
 void mempool_log_partial_barrier(uint32_t step, uint32_t core_id,
                                  uint32_t num_cores_barrier);
 void mempool_linlog_barrier(uint32_t step, uint32_t core_id);
-void mempool_strided_log_barrier(uint32_t step, uint32_t core_id,
-                                 uint32_t stride, uint32_t offset);
 // ---------------------------------------------------------------------------
 // Polling barriers.
 //
@@ -45,8 +41,6 @@ static inline void mempool_barrier_poll_init(mempool_poll_slot_t *slot) {
 }
 
 void mempool_barrier_poll_slot(mempool_poll_slot_t *slot, uint32_t num_cores);
-// One shared slot, zeroed by mempool_barrier_init().
-void mempool_barrier_poll(uint32_t num_cores);
 
 void mempool_partial_barrier(uint32_t volatile core_id,
                              uint32_t volatile core_init,

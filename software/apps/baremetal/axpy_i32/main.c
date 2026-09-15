@@ -26,7 +26,7 @@
 // as its own -- so the switch covers ALL of this app's barriers at once.
 #ifdef USE_FSYNC_BARRIER
 #include "fsync_app.h"
-#define APP_BARRIER_INIT(core) fsync_app_barrier_init(core)
+#define APP_BARRIER_INIT(core) mempool_barrier_init(core)
 #define APP_BARRIER(n) fsync_app_barrier()
 #define APP_KERNEL_BARRIER(core) fsync_app_barrier()
 #else

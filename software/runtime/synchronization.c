@@ -9,6 +9,7 @@
 
 #include "async_task.h"
 #include "dma.h"
+#include "fsync.h"
 #include "runtime.h"
 #include "synchronization.h"
 
@@ -25,10 +26,10 @@ uint32_t volatile log_barrier[NUM_CORES * 4]
 uint32_t volatile partial_barrier[NUM_CORES * 4]
     __attribute__((aligned(NUM_CORES * 4), section(".l1")));
 
-// One shared slot for mempool_barrier_poll(). Two words, not the per-core slot
-// array a general implementation would need: callers wanting an independent
-// scope pass their own slot to mempool_barrier_poll_slot().
-static mempool_poll_slot_t poll_slot __attribute__((section(".l1")));
+#if FSYNC_TPG_SIDE != 0
+fsync_tile_counter_t fsync_tile_counters[NUM_CORES / NUM_CORES_PER_TILE]
+    __attribute__((aligned(FSYNC_TILE_COUNTER_ALIGNMENT), section(".l1")));
+#endif
 
 void mempool_barrier_init(uint32_t core_id) {
   if (core_id == 0) {
@@ -44,8 +45,10 @@ void mempool_barrier_init(uint32_t core_id) {
     log_barrier[i] = 0;
     partial_barrier[i] = 0;
   }
-  if (core_id == 0u)
-    mempool_barrier_poll_init(&poll_slot);
+#if FSYNC_TPG_SIDE != 0
+  for (uint32_t t = core_id; t < NUM_CORES / NUM_CORES_PER_TILE; t += NUM_CORES)
+    fsync_tile_counter_init(&fsync_tile_counters[t]);
+#endif
   dma_collective_runtime_init();
   tnc_engine_runtime_init();
   mempool_barrier(NUM_CORES);
@@ -72,14 +75,10 @@ void mempool_barrier_poll_slot(mempool_poll_slot_t *slot, uint32_t num_cores) {
   }
 }
 
-void mempool_barrier_poll(uint32_t num_cores) {
-  mempool_barrier_poll_slot(&poll_slot, num_cores);
-}
-
 /* PLAIN BARRIER */
 
 // Why these sleep rather than poll: Snitch banks wakes that arrive while a core
-// is AWAKE in a 3-bit counter that WRAPS (snitch.sv:130,138,447), so the eighth
+// is AWAKE in a 3-bit counter that WRAPS (snitch.sv), so the eighth
 // unconsumed wake discards the other seven. The barriers below are safe because
 // they are credit-NEUTRAL: every participant executes exactly one wfi per wake
 // pulse it can receive. The last arrival wakes the scope and then falls into

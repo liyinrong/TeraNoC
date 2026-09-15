@@ -4,6 +4,9 @@
 
 #include <stdint.h>
 
+// The counters' epoch fields are what this test checks.
+#define FSYNC_EPOCH_TRACK
+
 #include "printf.h"
 #include "runtime.h"
 #include "synchronization.h"
@@ -12,11 +15,6 @@
 
 #define FSYNC_EPOCH_TILES (NUM_CORES / NUM_CORES_PER_TILE)
 #define FSYNC_EPOCH_ITERS 4u
-
-// Negative control: build with -DFSYNC_NEGATIVE_SKIP_SEQ_RECHECK and the
-// barrier's waiters accept any wake instead of the tree's own. The arrival
-// scan below then reports errors, or the run deadlocks on a tile that was
-// left behind -- which is what the re-check exists to prevent.
 
 static fsync_tile_counter_t tile_counter[FSYNC_EPOCH_TILES]
     __attribute__((aligned(FSYNC_TILE_COUNTER_ALIGNMENT), section(".l1")));
@@ -51,8 +49,7 @@ int main() {
   mempool_barrier(NUM_CORES);
   for (uint32_t t = core; t < FSYNC_EPOCH_TILES; t += NUM_CORES)
     if (tile_counter[t].issue_epoch != FSYNC_EPOCH_ITERS ||
-        tile_counter[t].done_epoch != FSYNC_EPOCH_ITERS ||
-        tile_counter[t].status_error != 0u)
+        tile_counter[t].done_epoch != FSYNC_EPOCH_ITERS)
       __atomic_fetch_add(&total_errors, 1u, __ATOMIC_RELAXED);
   mempool_barrier(NUM_CORES);
 

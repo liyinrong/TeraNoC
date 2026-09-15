@@ -83,11 +83,6 @@ static dma_collective_tile_lock_t
 static mempool_poll_slot_t dma_collective_poll[DMA_COLLECTIVE_LEVELS]
                                               [NUM_GROUPS]
     __attribute__((section(".l1")));
-#if FSYNC_TPG_SIDE != 0
-// One full bank stripe per tile, so a tile's counter lands in its own banks.
-static fsync_tile_counter_t dma_collective_fsync_cnt[DMA_COLLECTIVE_NUM_TILES]
-    __attribute__((aligned(FSYNC_TILE_COUNTER_ALIGNMENT), section(".l1")));
-#endif
 
 extern const char __dma_hot_start[], __dma_hot_end[];
 // Load the hot code into the group read-only cache by reading one word per
@@ -155,11 +150,6 @@ void dma_collective_runtime_init(void) {
 #else
   dma_collective_core[core].aggr_all = 0u;
 #endif
-#if FSYNC_TPG_SIDE != 0
-  for (uint32_t t = core; t < DMA_COLLECTIVE_NUM_TILES;
-       t += (uint32_t)NUM_CORES)
-    fsync_tile_counter_init(&dma_collective_fsync_cnt[t]);
-#endif
   if (mempool_is_group_coordinator()) {
     dma_collective_group_t *const control =
         &dma_collective_group[mempool_get_group_id()];
@@ -212,8 +202,7 @@ static void dma_collective_barrier(const dma_collective_scope_t *scope) {
       all ? fsync_aggr_global() : fsync_aggr_of_vc_level(scope->level);
   // A zero aggregate is a single-tile scope, which the tree refuses.
   if (aggr != 0u) {
-    fsync_barrier(dma_collective_fsync_cnt, mempool_get_tile_id(), FSYNC_ID_H,
-                  aggr);
+    fsync_barrier(fsync_tile_counters, mempool_get_tile_id(), FSYNC_ID_H, aggr);
     return;
   }
 #endif
@@ -736,8 +725,8 @@ DMA_HOT uint32_t dma_collective_wait(const dma_collective_op_t *last) {
 #if FSYNC_TPG_SIDE != 0
     const uint32_t aggr = dma_collective_core[hart].aggr_all;
     if (aggr != 0u)
-      fsync_barrier(dma_collective_fsync_cnt,
-                    hart / (uint32_t)NUM_CORES_PER_TILE, FSYNC_ID_H, aggr);
+      fsync_barrier(fsync_tile_counters, hart / (uint32_t)NUM_CORES_PER_TILE,
+                    FSYNC_ID_H, aggr);
     else
 #endif
       mempool_barrier((uint32_t)NUM_CORES);
