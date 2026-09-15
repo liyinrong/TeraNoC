@@ -163,24 +163,6 @@ static inline void fsync_trigger(uint32_t id, uint32_t aggr) {
       FSYNC_CONTROL_TRIGGER;
 }
 
-// Observe BUSY assertion before accepting its deassertion. The MMIO trigger
-// can take several cycles to reach the shim, so polling only for an idle level
-// can mistake the pre-issue state for completion.
-static inline uint32_t fsync_wait_response(void) {
-  uint32_t status;
-  do {
-    status = fsync_status();
-    if ((status & FSYNC_STATUS_BUSY_MASK) == 0u)
-      mempool_wait(4u);
-  } while ((status & FSYNC_STATUS_BUSY_MASK) == 0u);
-  do {
-    status = fsync_status();
-    if ((status & FSYNC_STATUS_BUSY_MASK) != 0u)
-      mempool_wait(4u);
-  } while ((status & FSYNC_STATUS_BUSY_MASK) != 0u);
-  return status;
-}
-
 // Which event sources may wake THIS core. Per-core address, so a core writes
 // its own word: no read-modify-write and no race with its tile-mates.
 static inline void fsync_subscribe_self(uint32_t sources) {
@@ -286,18 +268,6 @@ static inline void fsync_barrier(volatile fsync_tile_counter_t *tile_cnt,
 static inline void fsync_barrier_all(volatile fsync_tile_counter_t *tile_cnt,
                                      uint32_t tile) {
   fsync_barrier(tile_cnt, tile, FSYNC_ID_H, fsync_aggr_global());
-}
-
-// Single-arrival form, for a caller that has ALREADY established that exactly
-// one core per tile reaches it. Other tile cores must not enter this helper.
-static inline uint32_t fsync_barrier_global(void) {
-  fsync_trigger(FSYNC_ID_H, fsync_aggr_global());
-  const uint32_t status = fsync_wait_response();
-  if ((status & FSYNC_STATUS_ERROR_MASK) != 0u ||
-      fsync_status_level(status) != fsync_level_of_aggr(fsync_aggr_global()) ||
-      fsync_status_id(status) != FSYNC_ID_H)
-    return status | 0x80000000u;
-  return 0u;
 }
 
 #endif // FSYNC_BASE

@@ -16,11 +16,9 @@
 // scope. If the barrier released early, some slot is still at its initial
 // value.
 //
-// One arrival per TILE, from core 0 of the tile -- that is the invariant the
-// whole scope model rests on (a complete subtree, so aggr is uniform). The
-// other cores of the tile take no part here; the intra-tile software barrier
-// of the two-level design is a separate concern and is not what this gate is
-// testing.
+// Every core calls fsync_barrier_all(), so the last arrival in each tile
+// triggers the tree: one arrival per tile, the invariant the scope model rests
+// on. Core 0 of each tile publishes and checks.
 
 #include <stdint.h>
 
@@ -39,6 +37,8 @@
 // MUST be initialised explicitly: `.l1` is NOBITS and the bss range is empty,
 // so nothing zeroes it and every entry powers up X. An X compared here would
 // not merely mis-report, it would feed a branch.
+static fsync_tile_counter_t tile_cnt[NUM_TILES]
+    __attribute__((aligned(FSYNC_TILE_COUNTER_ALIGNMENT), section(".l1")));
 static volatile uint32_t slot[NUM_TILES] __attribute__((section(".l1")));
 static volatile uint32_t errors[NUM_TILES] __attribute__((section(".l1")));
 
@@ -50,8 +50,9 @@ int main() {
 
   mempool_barrier_init(core_id);
 
-  // Zero both arrays before anything reads them.
+  // Zero the arrays before anything reads them.
   for (uint32_t t = core_id; t < NUM_TILES; t += num_cores) {
+    fsync_tile_counter_init(&tile_cnt[t]);
     slot[t] = 0;
     errors[t] = 0;
   }
@@ -67,24 +68,20 @@ int main() {
     // issued -- the barrier orders arrivals, not posted writes.
     slot[tile] = tile + 1;
     __sync_synchronize();
+  }
 
-    // The whole machine is one scope here: every tile is a member, so this is
-    // the top-level square and id stays 0.
-    //
-    // FSYNC_BAR_NO_BARRIER is the negative control. Without it this test would
-    // be worthless: if the slot writes happen to land before the check anyway,
-    // a barrier that returns immediately passes just as well as a working one.
-    // Build with -DFSYNC_BAR_NO_BARRIER and this MUST report errors.
-#ifdef FSYNC_BAR_NO_BARRIER
-    const uint32_t err = 0;
-#else
-    const uint32_t err = fsync_barrier_global();
+  // The whole machine is one scope: the top-level square, id 0. A mismatched
+  // response traps.
+  //
+  // FSYNC_BAR_NO_BARRIER is the negative control. Without it this test would
+  // be worthless: if the slot writes happen to land before the check anyway, a
+  // barrier that returns immediately passes just as well as a working one.
+  // Build with -DFSYNC_BAR_NO_BARRIER and this MUST report errors.
+#ifndef FSYNC_BAR_NO_BARRIER
+  fsync_barrier_all(tile_cnt, tile);
 #endif
-    if (err) {
-      errors[tile]++;
-      printf("[fsync_bar] tile %u: barrier reported ERROR\n", (unsigned)tile);
-    }
 
+  if (is_leader) {
     // Every other tile must be visible now. If the barrier released early,
     // some slot is still 0.
     uint32_t bad = 0;

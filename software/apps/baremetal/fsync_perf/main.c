@@ -16,22 +16,18 @@
 // reported, because the gap between them is itself the interesting number: it
 // says how much of the win is "a tree" versus "a tree in hardware".
 //
-//   GLOBAL   sw_log : mempool_log_barrier(2, core_id)   -- every core
-//            sw_lin : mempool_barrier(num_cores)        -- every core
-//            hw     : fsync_barrier_all() -- last arrival triggers, all poll
-//   MECHONLY hw     : one core per tile driving the tree directly
-//     (the software half is omitted because this benchmark only records the
-//      hardware tree's one-arrival-per-tile mechanism cost.)
+//   sw_log : mempool_log_barrier(2, core_id)   -- every core
+//   sw_lin : mempool_barrier(num_cores)        -- every core
+//   hw     : fsync_barrier_all()               -- every core; the last arrival
+//            in each tile triggers the tree, and every participant sleeps
+//            until its response
 //
-// The MECHONLY pair has the same participant set on both sides and no
-// intra-tile term on either, so it isolates the barrier MECHANISM. The GLOBAL
-// pair is what a kernel would actually pay, including the intra-tile arrival
-// rendezvous that one-arrival-per-tile forces.
+// The hardware number includes the intra-tile arrival rendezvous, which is
+// what a kernel pays.
 //
-// PHASE DISCIPLINE. Phase 1 barriers poll generation-tagged state; no
-// steady-state path sleeps under the shared wake source. The software phase is
-// kept before the hardware phase so the reported sections remain comparable
-// with earlier measurements.
+// PHASE DISCIPLINE. The software phase runs first and the hardware phase after
+// it, never interleaved: a hardware barrier needs every legacy wake spent
+// before it sleeps (fsync.h).
 
 #include <stdint.h>
 
@@ -55,18 +51,14 @@
 static fsync_tile_counter_t tile_cnt[NUM_TILES]
     __attribute__((aligned(FSYNC_TILE_COUNTER_ALIGNMENT), section(".l1")));
 static uint32_t sw_bar __attribute__((section(".l1")));
-static uint32_t mech_done __attribute__((section(".l1")));
 static uint32_t c_log __attribute__((section(".l1")));
 static uint32_t c_lin __attribute__((section(".l1")));
 static uint32_t c_hw __attribute__((section(".l1")));
-static uint32_t c_sw_ldr __attribute__((section(".l1")));
-static uint32_t c_hw_ldr __attribute__((section(".l1")));
 
 int main() {
   const uint32_t core_id = mempool_get_core_id();
   const uint32_t num_cores = mempool_get_core_count();
   const uint32_t tile = core_id / NUM_CORES_PER_TILE;
-  const uint32_t is_leader = (core_id % NUM_CORES_PER_TILE) == 0;
   mempool_timer_t t0, t1;
 
   mempool_barrier_init(core_id);
@@ -74,8 +66,7 @@ int main() {
     fsync_tile_counter_init(&tile_cnt[t]);
   if (core_id == 0) {
     sw_bar = 0;
-    mech_done = 0;
-    c_log = c_lin = c_hw = c_sw_ldr = c_hw_ldr = 0;
+    c_log = c_lin = c_hw = 0;
   }
   mempool_barrier(num_cores);
 
@@ -101,8 +92,8 @@ int main() {
   mempool_barrier(num_cores);
 
   // ============ HARDWARE PHASE (no software barrier past here) ==========
-  // One call, every core. The last arrival in each tile triggers the tree; all
-  // participants poll the issue/done epochs and validate the returned status.
+  // One call, every core. The last arrival in each tile triggers the tree and
+  // checks its response; every participant sleeps until the response.
   for (uint32_t i = 0; i < WARMUP; i++)
     fsync_barrier_all(tile_cnt, tile);
   t0 = mempool_get_timer();
@@ -111,24 +102,6 @@ int main() {
   t1 = mempool_get_timer();
   if (core_id == 0)
     c_hw = (uint32_t)(t1 - t0);
-
-  // Mechanism only: ONE core per tile drives the tree directly, so there is no
-  // intra-tile term in the measured tree cost. Tile-mates poll a flag while
-  // the leader drives the tree.
-  if (is_leader) {
-    t0 = mempool_get_timer();
-    for (uint32_t i = 0; i < ITERS; i++)
-      fsync_barrier_global();
-    t1 = mempool_get_timer();
-    if (core_id == 0) {
-      c_hw_ldr = (uint32_t)(t1 - t0);
-      __sync_synchronize();
-      __atomic_store_n(&mech_done, 1, __ATOMIC_RELAXED);
-    }
-  } else {
-    while (__atomic_load_n(&mech_done, __ATOMIC_RELAXED) == 0)
-      ;
-  }
 
   // Final rendezvous on the HARDWARE barrier -- everything after the hw phase
   // must stay on the same mechanism. Without it the non-printing cores fall
@@ -146,8 +119,6 @@ int main() {
     printf("[fsync_perf] GLOBAL sw_log=%u sw_lin=%u hw=%u cyc/barrier\n",
            (unsigned)(c_log / ITERS), (unsigned)(c_lin / ITERS),
            (unsigned)(c_hw / ITERS));
-    printf("[fsync_perf] MECHONLY hw=%u cyc/barrier\n",
-           (unsigned)(c_hw_ldr / ITERS));
     if (c_hw)
       printf("[fsync_perf] hw vs sw_log x100 = %u\n",
              (unsigned)((c_log * 100u) / c_hw));
