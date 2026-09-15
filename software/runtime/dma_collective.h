@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "dma.h"
+#include "runtime.h"
 
 // Collective DMA over a virtual-cluster scope, from one group to the whole
 // cluster.
@@ -23,8 +23,8 @@
 //
 // QUEUEING. Submits may stack up. An engine retires requests in issue order and
 // counts retirements (idma_transfer_id_gen.sv), so waiting on a group's last id
-// waits every earlier one. The request FIFO holds 16 per stream
-// (mempool_idma_group.sv:12).
+// waits every earlier one. The request FIFO holds ReqFifoDepth per stream
+// (mempool_idma_group.sv); a full FIFO stalls the submit, it does not fail it.
 //
 // COMPLETION, two forms:
 //   dma_collective_wait        every core of the scope. Coordinators wait their
@@ -35,8 +35,6 @@
 //                              coordinator waits (either form), so a
 //                              coordinator that is still computing delays its
 //                              group.
-
-#define DMA_COLLECTIVE_GROUP_WORDS (NUM_BANKS / NUM_GROUPS)
 
 enum {
   DMA_COLLECTIVE_OK = 0,
@@ -58,25 +56,6 @@ typedef struct {
   uint32_t seq;    // identical on every core of the scope
   uint32_t status; // this core's submit error
 } dma_collective_op_t;
-
-#ifdef DMA_COLLECTIVE_PROFILE
-// Coordinator timestamps of the most recent operation. One full bank stripe per
-// group, so each coordinator writes only its own group's banks.
-//  0 submit entered     2 wait entered         4 barrier released
-//  1 descriptor issued  3 own engine retired   5 wait returned
-#define DMA_PROF_SLOTS 6u
-typedef struct {
-  volatile uint32_t t[DMA_PROF_SLOTS];
-  uint32_t pad[DMA_COLLECTIVE_GROUP_WORDS - DMA_PROF_SLOTS];
-} dma_prof_group_t;
-extern dma_prof_group_t dma_prof[];
-#define DMA_PROF(i)                                                            \
-  dma_prof[mempool_get_group_id()].t[i] = (uint32_t)mempool_get_timer()
-#else
-#define DMA_PROF(i)                                                            \
-  do {                                                                         \
-  } while (0)
-#endif
 
 // The level-`level` rectangle containing this core's group.
 static inline dma_collective_scope_t

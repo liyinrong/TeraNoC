@@ -7,7 +7,6 @@
 #ifndef _DMA_H_
 #define _DMA_H_
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -15,8 +14,8 @@
 #include "fsync.h"
 #include "runtime.h"
 
-// iDMA v0.6.5 reg32_3d register map. Every tile has an independent descriptor
-// bank, while status and transfer IDs observe the selected group-local stream.
+// iDMA v0.6.5 reg32_3d register map. The descriptor registers are one context
+// per group; status, transfer ids and errors are per stream.
 // Second 64 KiB of the peripheral window (mempool_pkg::DMABaseAddr).
 #define DMA_BASE (CONTROL_REGISTER_OFFSET + 0x10000u)
 #define DMA_CONF_OFFSET 0x000u
@@ -33,7 +32,6 @@
 #define DMA_SRC_STRIDE_3_OFFSET 0x108u
 #define DMA_REPS_3_OFFSET 0x110u
 #define DMA_ERROR_STATUS_OFFSET(stream) (0x120u + 4u * (stream))
-#define DMA_ERROR_ADDRESS_OFFSET(stream) (0x160u + 4u * (stream))
 
 #define DMA_CONF_ENABLE_ND_BIT 10u
 #define DMA_CONF_ENABLE_ND_MASK (0x3u << DMA_CONF_ENABLE_ND_BIT)
@@ -42,7 +40,6 @@
 typedef uint32_t dma_id_t;
 
 enum {
-  DMA_LOCAL_OK = 0,
   DMA_LOCAL_ERROR_ARGUMENT = 0x80000001u,
 };
 
@@ -59,13 +56,11 @@ enum {
 // caller that genuinely needs several tiles of a group to issue must bracket
 // the programming sequence with dma_group_ctx_lock()/dma_group_ctx_unlock().
 // Reads (status, done id, error) need no lock; they are single-register and
-// the arbiter serialises them.
+// the arbiter serialises them. A violation is silent: the transfer completes,
+// with the wrong address or length.
 //
-// This was safe without a lock while each tile owned its own context. It is
-// not any more, and it is silent when violated: the transfer completes, with
-// the wrong address or length.
-// Call once per group before the first lock, from every core (it elects the
-// tile agent internally). mempool_barrier_init() already does this for you.
+// dma_group_ctx_init() zeroes the lock; mempool_barrier_init() calls it on
+// every core.
 void dma_group_ctx_init(void);
 void dma_group_ctx_lock(void);
 void dma_group_ctx_unlock(void);
@@ -88,14 +83,6 @@ static inline dma_id_t dma_local_completed_id(uint32_t stream) {
 
 static inline uint32_t dma_local_error(uint32_t stream) {
   return *dma_local_reg(DMA_ERROR_STATUS_OFFSET(stream));
-}
-
-static inline uint32_t dma_local_error_address(uint32_t stream) {
-  return *dma_local_reg(DMA_ERROR_ADDRESS_OFFSET(stream));
-}
-
-static inline void dma_local_error_clear(uint32_t stream) {
-  *dma_local_reg(DMA_ERROR_STATUS_OFFSET(stream)) = 1;
 }
 
 static inline uint32_t dma_local_id_done(dma_id_t done, dma_id_t target) {
@@ -145,15 +132,11 @@ static inline uint32_t dma_local_wait(uint32_t stream) {
 // conservative otherwise: it fires when the last queued transfer retires, not
 // a named one. Do not build a per-id sleep on it.
 //
-// Order matters. Subscribe BEFORE testing idle: an edge that lands after the
-// subscribe is recorded in the level-held pending and the wfi returns at once,
-// but one that landed before the subscribe was never recorded and the core
-// would sleep forever. The loop re-tests because a wfi can also return for an
-// unrelated wake.
-//
-// The subscription is restored to the barrier event on the way out. A core that
-// stayed subscribed to a source it no longer sleeps for accumulates pending and
-// wakes early from the next barrier.
+// Subscribe BEFORE testing idle: an edge after the subscribe is held pending
+// and the wfi returns at once, one before it was never recorded. The loop
+// re-tests because a wfi can also return for an unrelated wake. Restoring the
+// barrier subscription on the way out also drops an engine event taken while
+// awake.
 static inline uint32_t dma_local_wait_sleep(uint32_t stream) {
   if (stream >= (uint32_t)NUM_DMAS_PER_GROUP)
     return DMA_LOCAL_ERROR_ARGUMENT;
@@ -178,31 +161,13 @@ dma_local_memcpy_nd_nonblocking(uint32_t stream, void *dest, const void *src,
                                 uint32_t dst_stride_3, uint32_t src_stride_3,
                                 uint32_t reps_3, uint32_t dimensions) {
   if (stream >= (uint32_t)NUM_DMAS_PER_GROUP || len == 0 || dimensions < 1 ||
-      dimensions > 3 || len > UINT32_MAX || dma_local_error(stream) != 0)
+      dimensions > 3 || dma_local_error(stream) != 0)
     return 0;
 
-  // Only program the dimensions this descriptor actually uses. CONF's
-  // ENABLE_ND field tells the ND midend how many dimensions to walk, so the
-  // registers above that are dead -- writing them costs an MMIO round trip
-  // each (~8 cycles) for a value the engine ignores. A 1-D transfer needs 3
-  // registers, a 2-D one 6, where the unconditional form always wrote 10.
-  //
-  // The sticky-error read in the guard above is kept, but NOT for the reason
-  // first given here. It is redundant for hang-avoidance: dma_local_wait_id
-  // re-reads the sticky status on every poll iteration and returns it, so a
-  // faulted engine surfaces at the wait rather than hanging it. All the guard
-  // buys is failing earlier.
-  //
-  // It is kept because removing it is free in the wrong direction -- measured
-  // 76 cycles for one 1-D descriptor with it and 76 without. An isolated probe
-  // showed 105 -> 40 for the same removal, but that shape has nothing to
-  // overlap the read; here its latency already hides behind the argument
-  // checks and the CONF access, exactly as the CONF read's own latency hides
-  // behind the address writes (shadowing CONF also gained nothing, 40 vs 44).
-  //
-  // The rule this exposes: on this register file an access is ~4 cycles of
-  // throughput, as cheap as L1. Cost comes from a dependent read with no
-  // independent work behind it, not from distance.
+  // Program only the dimensions this descriptor uses: CONF's ENABLE_ND field
+  // tells the ND midend how many to walk, so the registers above it are dead.
+  // The sticky-error read above fails a faulted engine early; the wait would
+  // report it too.
   uint32_t conf = *dma_local_reg(DMA_CONF_OFFSET);
   conf &= ~DMA_CONF_ENABLE_ND_MASK;
   if (dimensions >= 2)
@@ -253,15 +218,6 @@ static inline dma_id_t dma_local_memcpy_3d_nonblocking(
   return dma_local_memcpy_nd_nonblocking(stream, dest, src, len, dst_stride_2,
                                          src_stride_2, reps_2, dst_stride_3,
                                          src_stride_3, reps_3, 3);
-}
-
-static inline uint32_t dma_local_memcpy_blocking(uint32_t stream, void *dest,
-                                                 const void *src, size_t len) {
-  const dma_id_t id = dma_local_memcpy_nonblocking(stream, dest, src, len);
-  if (id != 0)
-    return dma_local_wait_id(stream, id);
-  const uint32_t error = dma_local_error(stream);
-  return error != 0 ? error : DMA_LOCAL_ERROR_ARGUMENT;
 }
 
 // The collective API, for every includer of dma.h. Last, because it builds on

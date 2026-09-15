@@ -117,8 +117,8 @@ DEFINES += -DPERIPH_BASE=$(periph_base)
 DEFINES += -DL1_BANK_SIZE=$(l1_bank_size)
 DEFINES += -DL2_BASE=$(l2_base)
 DEFINES += -DL2_SIZE=$(l2_size)
-# WP3 virtual-cluster windows, derived in config/config.mk and shared with
-# the RTL through hardware/Makefile's vlog_defs.
+# Virtual-cluster windows, derived in config/config.mk and shared with the RTL
+# through hardware/Makefile's vlog_defs.
 DEFINES += -DVIRTUAL_CLUSTER=$(virtual_cluster)
 DEFINES += -DVC_LEVELS=$(vc_levels)
 DEFINES += -DVC_REGION_END=$(vc_region_end)
@@ -135,6 +135,8 @@ DEFINES += -DREDMULE_H=$(redmule_height)
 DEFINES += -DREDMULE_P=$(redmule_regs)
 DEFINES += -DNUM_DMAS_PER_GROUP=$(dmas_per_group)
 DEFINES += -DAXI_DATA_WIDTH=$(axi_data_width)
+# Group read-only cache line width in bits; the DMA hot path aligns to it.
+DEFINES += -DRO_LINE_WIDTH=$(ro_line_width)
 DEFINES += -DAXI_WIDTH_INTERLEAVED=$(axi_width_interleaved)
 DEFINES += -DL2_BANKS=$(l2_banks)
 # Identify the MemPool platform to the C sources. Several apps (notably the

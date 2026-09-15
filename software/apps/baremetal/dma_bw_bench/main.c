@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include "dma.h"
+#include "dma_collective_prof.h"
 #include "printf.h"
 #include "runtime.h"
 #include "synchronization.h"
