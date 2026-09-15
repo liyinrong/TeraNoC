@@ -2,7 +2,7 @@
 // Solderpad Hardware License, Version 0.51, see LICENSE for details.
 // SPDX-License-Identifier: SHL-0.51
 
-// Per-TILE shim between software and one fractal_sync leaf (roadmap T3.1).
+// Per-TILE shim between software and one fractal_sync leaf.
 //
 // One shim per tile, not per core. The barrier scope must be a COMPLETE square
 // subtree or the members' (aggr, id) diverge and the O(1) closed form is lost,
@@ -33,6 +33,7 @@
 //   +0x0C STATUS  R   {rsp_id, lvl, error, BUSY(bit2), done}
 //   +0x20+4c SUBSCRIBE[c] RW  event sources that may wake core c of this tile
 //   +0x30+4c CAUSE[c]     R   what woke it, latched at the wake
+//   +0x40+4c EVT_SEQ[c]   R   count of core c's event wakes
 //
 // E1, the event-unit core. A core is woken ONLY while it is asleep:
 //
@@ -49,43 +50,10 @@
 //
 // pending is level-held, so events arriving while the core runs simply wait:
 // N events before one sleep produce ONE wake with N bits set. It clears on the
-// wake and snapshots into CAUSE, so nothing has to be acked and the barrier
-// needs no software change. SUBSCRIBE resets to the fsync bit, so existing code
-// behaves exactly as before.
-//
-//   +0x18 ARM     W1S set a core's ARMED bit. A core arms itself, then sleeps.
-//                     The tree's response pulses a core's wake ONLY while it is
-//                     armed, and the pulse clears the bit -- so there is
-//                     EXACTLY ONE pulse per arm, and a core that never arms is
-//                     never woken.
-//
-//                     This is what makes sleeping safe on a counted wake
-//                     counter. wake_up_q increments on every cycle the wake is
-//                     asserted while the core is awake (snitch.sv:447) and
-//                     wraps at eight without saturating, so any wake a core did
-//                     not ask for is a latent hang. Arming bounds the count by
-//                     the number of wfis by construction, for participants and
-//                     non-participants alike.
-//
-//                     Race-free in both orders: if the response lands before
-//                     the core reaches its wfi the pulse is banked as the one
-//                     credit that wfi then spends; if after, the core is asleep
-//                     and the pulse wakes it.
-//   +0x14 WAKECLR W   write-1-to-clear on WAKEMSK. A core removes ITSELF with a
-//                     single write; the read-modify-write that +0x10 forces is
-//                     a lost-update race when several cores of the tile do it
-//                     at once, which cost 1024 missed wake-ups the first time
-//                     it was exercised.
-//   +0x10 WAKEMSK RW  one bit per core of the tile; 1 = this core receives the
-//                     tree's wake. Resets to all-ones, which is the historical
-//                     behaviour.
-//
-// WAKEMSK exists because fs_wake is broadcast to every core of the tile and
-// wake_up_q is a saturating-free 3-bit counter: a core that receives the wake
-// without ever sleeping for it banks a credit per barrier, and the eighth wrap
-// destroys all eight. That is harmless while every core of the tile takes part
-// in every barrier, and a latent hang as soon as one does not -- a dedicated
-// DMA/control core in the tile being exactly that case.
+// wake and snapshots into CAUSE, so nothing has to be acked. Writing SUBSCRIBE
+// also drops the pending bits of every source it removes, so an event taken
+// while awake cannot wake a later, unrelated sleep. SUBSCRIBE resets to the
+// fsync bit, so existing code behaves exactly as before.
 //
 // BUSY deliberately sits at bit 2, matching MAGIA's FSYNC_MM_STATUS_BUSY_MASK.
 // The bus port is intentionally generic (req/we/addr/wdata/rdata) rather than
@@ -107,8 +75,8 @@ module fsync_shim #(
   // Group-level engine status, reduced across streams by the group. The iDMA
   // exposes no completion pulse -- software polls the cumulative done_id
   // register -- so "the stream went idle" is derived from busy falling. That is
-  // exact for the one-outstanding-transfer contract the solo path uses, and
-  // conservative otherwise (it waits for every queued transfer, not just one).
+  // exact while one transfer is outstanding, and conservative otherwise (it
+  // waits for every queued transfer, not just one).
   input  logic                 dma_busy_i,
   input  logic                 dma_error_i,
   // Tile engine end-of-computation (RedMulE today). A PULSE, so it is taken as
@@ -139,7 +107,6 @@ module fsync_shim #(
   // Per-core wake pulses. wake_o stays scalar for the existing unit test and
   // for any consumer that wants the raw tree response.
   output logic [NumCores-1:0]  wake_vec_o,
-  output logic [NumCores-1:0]  wake_mask_o,
   output logic                 error_o,
   output logic                 busy_o,
   output logic [LvlWidth-1:0]  lvl_o,
@@ -164,9 +131,6 @@ module fsync_shim #(
   localparam logic [7:0] REG_ID        = 8'h04;
   localparam logic [7:0] REG_CONTROL   = 8'h08;
   localparam logic [7:0] REG_STATUS    = 8'h0C;
-  localparam logic [7:0] REG_WAKE_MSK  = 8'h10;
-  localparam logic [7:0] REG_WAKE_CLR  = 8'h14;
-  localparam logic [7:0] REG_ARM       = 8'h18;
   localparam logic [7:0] REG_SUBSCRIBE = 8'h20;  // +4 per core
   localparam logic [7:0] REG_CAUSE     = 8'h30;  // +4 per core
   localparam logic [7:0] REG_EVT_SEQ   = 8'h40;  // +4 per core
@@ -181,9 +145,6 @@ module fsync_shim #(
 
   logic [AggrWidth-1:0] reg_aggr_q;
   logic [IdWidth-1:0]   reg_id_q;
-  logic [NumCores-1:0]  reg_wake_mask_q;
-  logic [NumCores-1:0]  armed_q;
-  logic [NumCores-1:0]  wake_pulse;
   logic [EvtWidth-1:0]  subscribe_q [NumCores];
   logic [EvtWidth-1:0]  pending_q   [NumCores];
   logic [EvtWidth-1:0]  cause_q     [NumCores];
@@ -219,19 +180,11 @@ module fsync_shim #(
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      reg_aggr_q      <= '0;
-      reg_id_q        <= '0;
-      // Every core wakes, so a design that never writes the mask behaves
-      // exactly as before it existed.
-      reg_wake_mask_q <= '1;
+      reg_aggr_q <= '0;
+      reg_id_q   <= '0;
     end else if (reg_wr) begin
-      if (reg_addr_i == REG_AGGR)     reg_aggr_q      <= reg_wdata_i[AggrWidth-1:0];
-      if (reg_addr_i == REG_ID)       reg_id_q        <= reg_wdata_i[IdWidth-1:0];
-      if (reg_addr_i == REG_WAKE_MSK) reg_wake_mask_q <= reg_wdata_i[NumCores-1:0];
-      // Write-1-to-clear: independent of the current value, so concurrent
-      // callers from different cores of the tile cannot lose each other's bits.
-      if (reg_addr_i == REG_WAKE_CLR)
-        reg_wake_mask_q <= reg_wake_mask_q & ~reg_wdata_i[NumCores-1:0];
+      if (reg_addr_i == REG_AGGR) reg_aggr_q <= reg_wdata_i[AggrWidth-1:0];
+      if (reg_addr_i == REG_ID)   reg_id_q   <= reg_wdata_i[IdWidth-1:0];
     end
   end
 
@@ -244,9 +197,6 @@ module fsync_shim #(
       reg_rdata_o[2]  = busy_q;     // FSYNC_MM_STATUS_BUSY_MASK
       reg_rdata_o[7:4]                 = lvl_q;
       reg_rdata_o[8+IdWidth-1 -: IdWidth] = rsp_id_q;
-    end
-    if (reg_req_i && !reg_we_i && reg_addr_i == REG_WAKE_MSK) begin
-      reg_rdata_o[NumCores-1:0] = reg_wake_mask_q;
     end
     for (int unsigned c = 0; c < NumCores; c++) begin
       if (reg_req_i && !reg_we_i && reg_addr_i == (REG_SUBSCRIBE + 8'(4*c)))
@@ -414,51 +364,14 @@ module fsync_shim #(
     end
   end
 
-  // A core is woken only while armed, and the pulse disarms it. Set beats
-  // clear when a core arms in the same cycle a response lands, so an arm is
-  // never silently lost.
-  assign wake_pulse = armed_q & reg_wake_mask_q & {NumCores{wake}};
-
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      armed_q <= '0;
-    end else begin
-      logic [NumCores-1:0] arm_set;
-      // Arming rides on the trigger: the barrier already writes CONTROL, so
-      // every masked-in core is armed for free. Four cores each writing ARM
-      // instead cost 16 cycles a barrier -- they serialise at the tile's fsync
-      // arbiter -- which is 24% of a 67-cycle barrier for a property one write
-      // already provides. WAKEMSK is therefore the participant set, and the
-      // explicit ARM register remains for a bare trigger/wfi pair that is not
-      // going through the barrier.
-      arm_set = ((reg_wr && reg_addr_i == REG_ARM) ? reg_wdata_i[NumCores-1:0]
-                                                   : '0) |
-                (reg_trigger ? reg_wake_mask_q : '0);
-      armed_q <= (armed_q & ~wake_pulse) | arm_set;
-    end
-  end
-
   assign wake_o     = wake;
-  // EVERY path is gated on the core being asleep. That is the single rule the
-  // event unit rests on: an awake core is never pulsed, so wake_up_q
-  // (snitch.sv:447) can never increment and the counted-credit model cannot be
-  // violated by any source. The arm path is kept for a bare trigger/wfi pair
-  // and is subject to the same gate.
-  // ADDITIVE, not a replacement. The legacy wake (wake_up_q, from the control
-  // registers) stays UNGATED in the tile: mempool_barrier_init has core 0 do
-  // wake_up_all() then wfi -- it pulses itself and sleeps to spend its own
-  // credit -- and boot and mempool_barrier rely on the same banking. Gating
-  // that path deadlocks the cluster before the first barrier.
-  //
-  // The event unit is a second, independent source for cores that opt in via
-  // SUBSCRIBE. It never wakes an awake core, so it cannot bank a credit; the
-  // legacy path keeps its old semantics for the startup handshake and for any
-  // software that still uses it.
-  //
-  // The arm path is gone: it overlapped this one, and armed_q was consumed by a
-  // pulse whose delivery a gate could block, which is where the lost wake was.
+  // Every event wake is gated on the core being asleep, so an awake core is
+  // never pulsed and wake_up_q (snitch.sv) never increments from this path.
+  // It is additive: the legacy wake (wake_up_q, from the control registers)
+  // stays ungated in the tile, because mempool_barrier_init has core 0 pulse
+  // itself and sleep to spend the credit, and boot and mempool_barrier rely on
+  // the same banking.
   assign wake_vec_o = evt_wake;
-  assign wake_mask_o = reg_wake_mask_q;
   assign busy_o   = busy_q;
   assign error_o  = error_q;
   assign lvl_o    = lvl_q;

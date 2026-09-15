@@ -2099,7 +2099,6 @@ module mempool_tile
   logic [idx_width(NumSoCPorts)-1:0] fs_arb_idx;
   logic [31:0]                       fs_rdata;
   logic                              fs_wake;
-  logic [NumCoresPerTile-1:0]        fs_wake_mask;
   logic [NumCoresPerTile-1:0]        fs_wake_vec;
   // Engine end-of-computation, visible at tile scope so the event unit can fan
   // it out to every subscribed core. Zero on tiles with no engine.
@@ -2247,7 +2246,6 @@ module mempool_tile
     .v_rsp_i      (fsync_v_rsp_i       ),
     .wake_o       (fs_wake             ),
     .wake_vec_o   (fs_wake_vec         ),
-    .wake_mask_o  (fs_wake_mask        ),
     .error_o      (                    ),
     .busy_o       (                    ),
     .lvl_o        (                    ),
@@ -2319,11 +2317,6 @@ module mempool_tile
       .target             (redmule_rmcfg             )
     );
 
-    // Gate the tree's wake per core. fs_wake used to reach every core of the
-    // tile unconditionally, so a core that never sleeps for a barrier still
-    // banked a credit per barrier and wrapped wake_up_q every eighth one.
-    // The mask resets to all-ones, so this is behaviourally identical until
-    // software narrows it.
     // RETIRED: redmule_evt no longer wakes core 0 directly.
     //
     // The direct path could only ever reach core 0, so a second consumer had to

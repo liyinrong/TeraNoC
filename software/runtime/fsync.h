@@ -47,9 +47,6 @@
 #define FSYNC_ID_REG_OFFSET (0x04)
 #define FSYNC_CONTROL_REG_OFFSET (0x08)
 #define FSYNC_STATUS_REG_OFFSET (0x0C)
-#define FSYNC_WAKE_MASK_REG_OFFSET 0x10u
-#define FSYNC_WAKE_CLEAR_REG_OFFSET 0x14u
-#define FSYNC_ARM_REG_OFFSET 0x18u
 #define FSYNC_SUBSCRIBE_REG_OFFSET 0x20u
 #define FSYNC_CAUSE_REG_OFFSET 0x30u
 #define FSYNC_EVT_SEQ_REG_OFFSET 0x40u
@@ -241,28 +238,6 @@ static inline uint32_t fsync_wait(void) {
   return fsync_wait_response() & FSYNC_STATUS_ERROR_MASK;
 }
 
-// Per-core wake mask, one bit per core of THIS tile; 1 = that core receives the
-// tree's wake. Resets to all-ones.
-//
-// fs_wake is broadcast to the whole tile, and wake_up_q is a 3-bit counter that
-// wraps without saturating, so a core that receives the wake without sleeping
-// for it banks a credit per barrier and loses eight of them on the eighth. Any
-// core of the tile that does not take part in the barriers -- a dedicated
-// DMA/control core, say -- must clear its bit or it will eventually sleep
-// forever.
-static inline void fsync_set_wake_mask(uint32_t mask) {
-  *(volatile uint32_t *)(FSYNC_BASE + FSYNC_WAKE_MASK_REG_OFFSET) = mask;
-}
-
-static inline uint32_t fsync_wake_mask(void) {
-  return *(volatile uint32_t *)(FSYNC_BASE + FSYNC_WAKE_MASK_REG_OFFSET);
-}
-
-// Drop this core out of the tile's barrier wakes. Call from a core that will
-// not participate, BEFORE the others start running barriers.
-// Single write, no read-modify-write: several cores of a tile may call this
-// concurrently. Doing it as a RMW on the shared mask loses updates -- measured
-// as 1024 missed wake-ups when three cores per tile raced.
 // Which event sources may wake THIS core. Per-core address, so a core writes
 // its own word: no read-modify-write and no race with its tile-mates.
 static inline void fsync_subscribe_self(uint32_t sources) {
@@ -290,40 +265,10 @@ static inline uint32_t fsync_cause_self(void) {
                                 4u * lane);
 }
 
-// Leave the tile's barrier events entirely.
-//
-// A core that stays SUBSCRIBED but never sleeps for the event accumulates
-// pending -- it is level-held on purpose -- and the moment it next sleeps for
-// something else, that stale pending wakes it. mempool_barrier's sleeping path
-// has no re-check loop, so it would leave the barrier early. Any core that does
-// not take part in its tile's barriers must unsubscribe, not merely be masked:
-// WAKEMSK no longer gates the event path.
+// Leave the tile's barrier events entirely. A core that takes no part in its
+// tile's barriers must unsubscribe: while subscribed, every response leaves a
+// pending bit that wakes its next sleep, and mempool_barrier has no re-check.
 static inline void fsync_unsubscribe_self(void) { fsync_subscribe_self(0u); }
-
-static inline void fsync_wake_mask_exclude_self(void) {
-  // Kept as the name existing gates use; under the event unit the meaningful
-  // action is unsubscribing.
-  fsync_unsubscribe_self();
-  const uint32_t bit =
-      1u << (mempool_get_core_id() % (uint32_t)NUM_CORES_PER_TILE);
-  *(volatile uint32_t *)(FSYNC_BASE + FSYNC_WAKE_CLEAR_REG_OFFSET) = bit;
-}
-
-// Arm a core explicitly. NOT needed for fsync_barrier_*: the trigger arms every
-// core in WAKEMSK. Use it for a bare trigger/wfi pair outside the barrier.
-//
-// Arm this core for exactly ONE wake from the tree, then sleep. The pulse only
-// reaches an armed core and clears the arm, so the wake count can never exceed
-// the number of wfis -- which is what makes sleeping safe on a counted,
-// non-saturating wake counter. A core that never arms is never woken, so a
-// non-participant needs no mask and cannot leak a credit.
-//
-// Correct in both orders: a response landing before the wfi is banked as the
-// single credit that wfi spends; one landing after finds the core asleep.
-static inline void fsync_arm_self(void) {
-  *(volatile uint32_t *)(FSYNC_BASE + FSYNC_ARM_REG_OFFSET) =
-      1u << (mempool_get_core_id() % (uint32_t)NUM_CORES_PER_TILE);
-}
 
 static inline void fsync_clear_error(void) {
   *(volatile uint32_t *)(FSYNC_BASE + FSYNC_CONTROL_REG_OFFSET) =
