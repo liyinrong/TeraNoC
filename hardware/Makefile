@@ -638,11 +638,13 @@ sim: clean-dasm compile
 # of a config. It also makes the cost an attributable build step rather than a
 # surcharge on whichever app happens to run first.
 .PHONY: compile_questa_opt
-compile_questa_opt: compile $(buildpath)/.questa_opt_stamp
+compile_questa_opt: compile $(buildpath)/.questa_opt_stamp_$(top_level)
 # Keyed on compile.tcl, which is regenerated whenever a source changes, so vopt
 # re-runs exactly when the design does. A .PHONY recipe here would re-elaborate
-# on every single app and defeat the purpose.
-$(buildpath)/.questa_opt_stamp: $(buildpath)/compile.tcl
+# on every single app and defeat the purpose. One stamp per top level: the
+# standalone gates share the build, and a single stamp made the second top skip
+# its vopt and fail to load.
+$(buildpath)/.questa_opt_stamp_$(top_level): $(buildpath)/compile.tcl
 	cd $(buildpath) && \
 	$(questa_cmd) vopt -work $(library) $(top_level) -o $(top_level)_opt
 	touch $@
