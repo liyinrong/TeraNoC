@@ -19,6 +19,8 @@
   zero.
 */
 
+#include <stdbool.h>
+
 #define FIX_MUL(a, b, fp) ((a * b) >> fp)
 #define FIX_DIV(a, b, fp) ((a << fp) / b)
 
