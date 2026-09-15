@@ -3,21 +3,15 @@
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Step 0 of the Morton (Z-order) group-numbering change: prove the encoding
-before any RTL is touched.
+"""Reference for the virtual-cluster address permuter with Morton (Z-order)
+group ids, and the generator of the golden vectors tb_vc_scrambler.sv replays.
 
-Today the group field of an address is the raster concatenation {gx, gy}, so a
-level-k rectangle is NOT a contiguous range of group ids and the base mask has
-to be applied per axis (INVARIANT #4,
-docs/plan/wp2-wp4-implementation-roadmap.md:68-69).  Under Morton the field is
-the bit interleave of gx and gy, which makes a rectangle a contiguous id range
-and collapses the per-axis mask into one flat mask.
-
-This module implements the Morton permuter independently of vc_permute.py and
-checks the properties the raster oracle was proven to have, plus the two new
-claims that motivate the change.  It is deliberately a separate file: an
-independent derivation is worth more than an edit to the model it is meant to
-cross-check.
+The group field of an address is the bit interleave of gx and gy, so a level-k
+rectangle is a contiguous id range and the requester's base is one flat mask.
+Checks, per geometry and level: the permuter equals the software arithmetic,
+stays inside the requester's rectangle and never maps two offsets to one
+address, and every rectangle is contiguous and square. With --emit DIR the
+vectors are written to DIR, only when every check passes. See README.md.
 """
 
 import sys
@@ -29,8 +23,8 @@ def clog2(v: int) -> int:
 
 
 def morton(gx: int, gy: int, bits: int) -> int:
-    """Interleave, gy in the even (low) positions to match the raster layout's
-    gy-low convention (mempool_cluster_floonoc_wrapper.sv:249)."""
+    """Interleave, gy in the even (low) positions: the gy-low convention of
+    mempool_cluster_floonoc_wrapper.sv."""
     v = 0
     for i in range(bits):
         v |= ((gy >> i) & 1) << (2 * i)
@@ -201,13 +195,16 @@ GEOMS = [
     Geom("monsterpool8x8", 8, 8, 4, 64, 1024),
 ]
 
+# The geometries hardware/tb/tb_vc_scrambler.sv replays; --emit writes these.
+REPLAYED = ("terapool", "dse_s1_winner", "monsterpool8x8")
+
 
 def emit(g: Geom, out_dir: str) -> str:
-    """Golden vectors in the seven-column hex format the replay testbench
-    already parses (README section "Replaying from SystemVerilog"):
-        k  gx_i  gy_i  chunk_base  chunk_rows  offset  phys
-    chunk_base is always 0 and chunk_rows always words_per_bank under the
-    max-window design, so the columns stay compatible with the raster files.
+    """Golden vectors in the hex format the replay testbench parses (README
+    section "Vector format"):
+        k  gx_i  gy_i  gid  chunk_base  chunk_rows  offset  phys
+    chunk_base is always 0 and chunk_rows always words_per_bank: a level's
+    window is the whole L1 of its rectangle.
     """
     rows: List[str] = []
     for k in range(0, g.max_level):
@@ -263,7 +260,8 @@ def main() -> int:
     if total == 0 and "--emit" in sys.argv:
         out = sys.argv[sys.argv.index("--emit") + 1]
         for g in GEOMS:
-            print("  emitted", emit(g, out))
+            if g.name in REPLAYED:
+                print("  emitted", emit(g, out))
     print(f"\ntotal failures: {total}")
     return 0 if total == 0 else 1
 
