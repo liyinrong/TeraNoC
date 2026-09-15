@@ -15,7 +15,7 @@ dependencies:
   snitch:               { path: "hardware/deps/snitch"                                                       }
   # Upstream Spatz VPU with the TeraNoC burst path (branch teranoc-new). This is
   # the only Spatz in this configuration -- the vendored fork is not built here.
-  spatz_vpu:            { git: "https://github.com/liyinrong/spatz_vpu.git",                rev: d8dbeb8     }
+  spatz_vpu:            { git: "https://github.com/liyinrong/spatz_vpu.git",                rev: 8b46477     }
   cluster_icache:       { git: "https://github.com/pulp-platform/cluster_icache.git",       version: 0.3.1   }
   tech_cells_generic:   { git: "https://github.com/pulp-platform/tech_cells_generic.git",   version: 0.2.14  }
   fpnew:                { git: "https://github.com/pulp-platform/cvfpu.git",                rev: pulp-v0.3.0 }

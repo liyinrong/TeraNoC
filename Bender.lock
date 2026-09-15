@@ -212,7 +212,7 @@ packages:
     - axi
     - common_cells
   spatz_vpu:
-    revision: d8dbeb835189c8c9747e71a96fdf1d1bb7efa27c
+    revision: 8b46477aa8ef0c3769810b665319a12a4b371255
     version: null
     source:
       Git: https://github.com/liyinrong/spatz_vpu.git
