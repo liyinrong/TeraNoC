@@ -2,18 +2,13 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-// WP3 virtual clusters: level and rectangle descriptors, the (level, id,
-// offset) -> global ND block-strided translation, and the per-level arena
-// allocator.
+// Virtual clusters: level and rectangle descriptors, the (level, offset) ->
+// global block-strided translation, and the per-level arena allocator.
 //
 // The address map is computed ONCE in config/config.mk and reaches this file
 // through software/runtime/runtime.mk; the RTL gets the identical numbers
 // through hardware/Makefile's vlog_defs and re-derives them, failing
 // elaboration on a mismatch. Never write a window constant here.
-//
-// Spec: docs/plan/wp2-wp4-implementation-roadmap.md §T2.1 (permuter) and
-// §T2.2 (map, translation table, vc_malloc), and the pinned contract note
-// "WP3 Address Map and Scrambler Contract".
 
 #ifndef _VC_H_
 #define _VC_H_
@@ -28,9 +23,9 @@
 // API stayed fully functional on a build whose permuter was compiled out, so a
 // VC pointer was just an address the cluster does not translate -- it leaves
 // with no decode error and no fault. vc.c defines VC_IMPL because it is
-// compiled into the runtime unconditionally (runtime.mk:211) and must still
-// build; every other includer is an application, and an application that wants
-// VC memory needs the hardware to be there.
+// compiled into the runtime unconditionally (runtime.mk) and must still build;
+// every other includer is an application, and an application that wants VC
+// memory needs the hardware to be there.
 #if !defined(VC_IMPL) && (!defined(VIRTUAL_CLUSTER) || !VIRTUAL_CLUSTER)
 #error "vc.h needs virtual_cluster=1: the VC permuter is not in this hardware"
 #endif
@@ -58,17 +53,12 @@
 
 // Bank rows the LINKER already owns at the bottom of L1. A level's window
 // maps ALL bank rows of its rectangle, including these, so every allocator
-// must start above them -- that separation is the allocator's job now that
-// S12 removed chunk_base and with it the hardware-enforced split between
-// levels.
+// must start above them; the hardware does not separate the levels.
 //
-// This is deliberately taken from `__heap_start` and not from
-// NUM_CORES*SEQ_MEM_SIZE. The contract's [allocator] observation names only
-// "the stack floor ... stacks and the sequential region", but link.ld:20-25
-// places `.l1_prio`, `.l1` and `.bss` ABOVE __seq_end and below __heap_start,
-// and those rows are just as clobberable. Deriving the floor from
-// __heap_start covers all of it and keeps covering it when a kernel adds a
-// static.
+// The floor is taken from `__heap_start`, not from NUM_CORES*SEQ_MEM_SIZE:
+// link.ld places `.l1_prio`, `.l1` and `.bss` above the sequential region and
+// below __heap_start, and those rows are just as clobberable. It keeps covering
+// them when a kernel adds a static.
 //
 // One global row-plane spans every bank of every group, so a global address
 // `a` lives in row a / (VC_ROW_BYTES * NUM_GROUPS).
@@ -106,25 +96,20 @@ typedef struct {
 } vc_rect_t;
 
 // ---------------------------------------------------------------------------
-// Global ND block-strided descriptor
+// Global block-strided descriptor
 //
-// A VC-contiguous buffer is NOT contiguous globally; its global shape is a
-// 3-D block-strided pattern, and that pattern is what a DMA must walk. The
-// dimensions fall straight out of the canonical field order
-// [ byte | bank | tile | gy | gx | word ]:
-//   dim0  contiguous, and it spans the whole vc_gy field as well, because gy
-//         is the LOW half of the group field, so the y-adjacent groups of a
-//         rectangle are already adjacent in the global alias
-//   dim1  one step per vc_gx
-//   dim2  one step per bank row
-// Track A checked this descriptor against the permuter on every probe (S8).
+// A VC-contiguous buffer is NOT contiguous globally. Under Morton group ids a
+// whole bank row of a rectangle is one contiguous global run, so the global
+// shape is 2-D: `len` bytes per bank row, repeated `reps` times at the global
+// word-plane `stride`. A flat L2 buffer is the same struct with reps = 1 and
+// stride = 0.
 // ---------------------------------------------------------------------------
 
 typedef struct {
-  uint32_t base;      // global byte address of the first element
-  uint32_t len;       // dim0, contiguous bytes
-  uint32_t count[2];  // dim1, dim2 repeat counts
-  uint32_t stride[2]; // dim1, dim2 byte strides
+  uint32_t base;   // global byte address of the first element
+  uint32_t len;    // contiguous bytes per step
+  uint32_t reps;   // steps: bank rows for a VC descriptor, 1 for a flat one
+  uint32_t stride; // bytes between steps; 0 marks a flat descriptor
 } vc_desc_t;
 
 // ---------------------------------------------------------------------------
@@ -151,8 +136,8 @@ static inline void *vc_ptr(uint32_t level, uint32_t offset) {
 }
 
 // The global alias of a VC-local offset, computed by arithmetic rather than
-// by the permuter's bit tricks. This is the DMA / cross-VC view, and gate
-// item 2 asserts the two resolve to the same physical bank.
+// by the permuter's bit tricks. This is the DMA / cross-VC view; vc_smoke
+// checks that both resolve to the same word.
 uint32_t vc_global_addr(const vc_rect_t *r, uint32_t offset);
 
 // The global ND descriptor for `bytes` starting at a VC-local `offset`.
@@ -165,7 +150,7 @@ vc_desc_t vc_descriptor(const vc_rect_t *r, uint32_t offset, uint32_t bytes);
 
 // False when vc_descriptor refused the arguments.
 static inline uint32_t vc_desc_valid(const vc_desc_t *d) {
-  return d->len != 0 && d->count[0] != 0 && d->count[1] != 0;
+  return d->len != 0 && d->reps != 0;
 }
 
 // One L2<->VC transfer over the caller's rectangle. Every core of the
@@ -174,14 +159,16 @@ static inline uint32_t vc_desc_valid(const vc_desc_t *d) {
 // or dma_collective_wait_ready.
 //
 // Both descriptors use global aliases. One side must be a VC descriptor and
-// the other flat L2 memory. Cross-group L1<->L1 still needs the WP2 wide plane.
+// the other flat L2 memory at least as long as the VC side's whole rows.
+// Cross-group L1<->L1 needs the wide TCDM plane. A refused request still counts
+// as an operation (dma_collective.h), and waiting it returns the error.
 dma_collective_op_t vc_dma_memcpy_nonblocking(const vc_desc_t *dst,
                                               const vc_desc_t *src);
 uint32_t vc_dma_memcpy_blocking(const vc_desc_t *dst, const vc_desc_t *src);
 
 // Address-derived forms. Stride, rectangle and group scope all follow from
 // the addresses, so the caller passes only (dest, src, len); exactly one side
-// must point into a VC window.
+// must point into a VC window, and `len` must be whole rows of its level.
 dma_collective_op_t vc_dma_memcpy_auto_nonblocking(void *dest, const void *src,
                                                    size_t len);
 uint32_t vc_dma_memcpy_auto_blocking(void *dest, const void *src, size_t len);

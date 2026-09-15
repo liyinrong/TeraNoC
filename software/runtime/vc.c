@@ -62,7 +62,7 @@ const uint32_t vc_window_size_tab[VC_MAX_LEVELS] = {
 // ---------------------------------------------------------------------------
 // Allocator state, INDEXED BY CORE.
 //
-// This runtime has ONE address space: link.ld:20-25 puts `.bss` into `.l1`,
+// This runtime has ONE address space: link.ld puts `.bss` into `.l1`,
 // so a plain file-scope `static` is a single object shared by every core, not
 // a per-core variable. The allocator is collective and deterministic -- each
 // core independently computes the same offsets -- which only works if each
@@ -81,18 +81,9 @@ static uint32_t vc_used_rows[NUM_CORES][VC_MAX_LEVELS]
 static uint32_t vc_reserved_rows[NUM_CORES][VC_MAX_LEVELS]
     __attribute__((section(".l1")));
 
-// First bank row of a level's arena.
-//
-// The levels must occupy DISJOINT row ranges. The bank-row index is one axis
-// shared by every level -- a level-k allocation occupies the same row indices
-// in all 4^k groups of its rectangle -- so if two levels started at the same
-// row their buffers would alias on whatever group the rectangles share. That
-// is what the contract's capacity rule means by "the SUM of per-level usage":
-// sum, not max. Reading "an independent bump pointer" as "each rewinds to the
-// floor" gives overlapping arenas, which the coexistence check catches as a
-// level-1 write showing up under a level-0 pointer.
-// Lay the row axis out LARGEST SCOPE FIRST: level k starts above the levels
-// above it, not below it.
+// First bank row of a level's arena. The levels occupy disjoint row ranges
+// (see the allocator notes in vc.h), laid out LARGEST SCOPE FIRST: level k
+// starts above the levels above it, not below it.
 //
 // The direction is load-bearing. Agreement is required among the members of one
 // rectangle at one level, and a level-k rectangle sits entirely INSIDE every
@@ -112,7 +103,6 @@ static uint32_t vc_base_row(uint32_t c, uint32_t k) {
   return row;
 }
 
-// Recomputed rather than stored; see above.
 // De-interleave a Morton group id. Must mirror mempool_pkg::group_xy_of; both
 // directions of the encoding live in exactly two places, one per language.
 static void vc_unmorton(uint32_t gid, uint32_t *gx, uint32_t *gy) {
@@ -133,8 +123,8 @@ static vc_rect_t vc_rect_of(uint32_t k) {
   r.level = k;
   r.side = 1u << k;
   r.ngroups = r.side * r.side;
-  // The whole point of Morton: the rectangle is a contiguous id range, so the
-  // base is ONE flat mask rather than a per-axis one (the old INVARIANT #4).
+  // Under Morton the rectangle is a contiguous id range, so the base is one
+  // flat mask.
   r.base_gid = gid & ~(r.ngroups - 1u);
   r.rx = gx >> k;
   r.ry = gy >> k;
@@ -146,7 +136,7 @@ static vc_rect_t vc_rect_of(uint32_t k) {
 
 // Global byte strides of the canonical layout. gy is the LOW half of the
 // group field, so one gy step is one group's L1 and one gx step is NUM_Y of
-// them (hardware/src/mempool_cluster_floonoc_wrapper.sv:249).
+// them (hardware/src/mempool_cluster_floonoc_wrapper.sv).
 #define VC_GY_STRIDE ((uint32_t)VC_ROW_BYTES)
 #define VC_GX_STRIDE ((uint32_t)VC_ROW_BYTES * NUM_Y)
 #define VC_WORD_STRIDE ((uint32_t)VC_ROW_BYTES * NUM_X * NUM_Y)
@@ -166,15 +156,10 @@ vc_rect_t vc_rect(uint32_t level) { return vc_rect_of(level); }
 // Translation
 // ---------------------------------------------------------------------------
 
-// The arithmetic twin of the hardware permuter. Decomposes the VC-local
-// offset by division rather than by masking and reassembles the global
-// address by addition, which is exactly the property invariant #4 exists to
-// guarantee: with a per-axis base mask, OR equals +.
+// The arithmetic twin of the hardware permuter: decompose the VC-local offset
+// by division and reassemble the global address by addition. Under Morton the
+// offset's group field is one 4^k-wide index.
 uint32_t vc_global_addr(const vc_rect_t *r, uint32_t offset) {
-  // Morton group ids: the rectangle is a contiguous id range, so the offset's
-  // group field is ONE 4^k-wide index and the base is one flat mask. The
-  // per-axis split this used to do only existed because the raster id made a
-  // rectangle discontiguous.
   const uint32_t ngroups = r->ngroups;
   const uint32_t byte_in_row = offset % VC_ROW_BYTES;
   const uint32_t rest = offset / VC_ROW_BYTES;
@@ -186,52 +171,29 @@ uint32_t vc_global_addr(const vc_rect_t *r, uint32_t offset) {
 }
 
 vc_desc_t vc_descriptor(const vc_rect_t *r, uint32_t offset, uint32_t bytes) {
-  vc_desc_t d;
-  const uint32_t side = r->side;
-  // dim0 spans one bank row of one group TIMES the whole vc_gy field, since
-  // the y-adjacent groups are contiguous in the global alias.
-  // Under Morton a whole rectangle bank row is CONTIGUOUS, so dim0 is the
-  // entire row and the gx dimension disappears: the descriptor is 2-D.
-  const uint32_t inner = (uint32_t)VC_ROW_BYTES * side * side;
-  const uint32_t stride = inner; // == vc_row_stride(r->level)
-  // Round UP, as vc_malloc does. Truncating here made the natural idiom
-  // p = vc_malloc(k,n); d = vc_descriptor(&r, off, n) under-copy, and a
-  // sub-row `bytes` produced count[1] == 0, a descriptor that silently moves
-  // nothing.
-  const uint32_t rows = (bytes + stride - 1) / stride;
-
-  // The shape is only valid at a whole level row. A misaligned offset does not
-  // merely shift the copy, it walks into a NEIGHBOURING rectangle at the same
-  // row indices its own members use. There is no error channel here, so refuse
-  // by returning a descriptor that moves nothing -- vc_desc_valid() reports it.
-  if (offset % stride != 0) {
-    d.base = vc_global_addr(r, offset);
-    d.len = 0;
-    d.count[0] = 0;
-    d.count[1] = 0;
-    d.stride[0] = 0;
-    d.stride[1] = 0;
+  // One whole rectangle bank row is contiguous globally.
+  const uint32_t row = vc_row_stride(r->level);
+  vc_desc_t d = {.base = vc_global_addr(r, offset)};
+  // Only a whole level row gives a valid shape: a misaligned offset walks into
+  // a neighbouring rectangle at the rows its own members use. There is no error
+  // channel here, so refuse with a descriptor that moves nothing.
+  if (offset % row != 0)
     return d;
-  }
-
-  d.base = vc_global_addr(r, offset);
-  d.len = inner;  // one whole rectangle row, contiguous
-  d.count[0] = 1; // no gx dimension under Morton
-  d.stride[0] = 0;
-  d.count[1] = rows; // one step per bank row
-  d.stride[1] = VC_WORD_STRIDE;
+  d.len = row;
+  // Round up, as vc_malloc does, so a sub-row `bytes` still moves its row.
+  d.reps = (bytes + row - 1) / row;
+  d.stride = VC_WORD_STRIDE;
   return d;
 }
 
-// An op no core counted: its scope is invalid, so every wait on it returns the
-// error at once and no core enters a barrier.
-static dma_collective_op_t vc_dma_invalid_op(uint32_t status) {
-  const dma_collective_op_t op = {
-      .scope = {.level = UINT32_MAX, .base_group = 0, .num_groups = 0},
-      .seq = 0,
-      .status = status,
-  };
-  return op;
+// A refused request is still submitted, under an invalid scope: every core of
+// the rectangle then counts it, as the collective requires, and every wait on
+// it returns the argument error without entering a barrier.
+static dma_collective_op_t vc_dma_invalid_op(void) {
+  const dma_collective_scope_t none = {
+      .level = UINT32_MAX, .base_group = 0u, .num_groups = 0u};
+  return dma_collective_submit_2d_nonblocking(&none, 0u, NULL, NULL, 0u, 0u, 0u,
+                                              0u);
 }
 
 // Morton makes a level-k rectangle a contiguous range of 4^k group ids.
@@ -247,36 +209,31 @@ static dma_collective_scope_t vc_dma_scope(const vc_desc_t *vc) {
 
 dma_collective_op_t vc_dma_memcpy_nonblocking(const vc_desc_t *dst,
                                               const vc_desc_t *src) {
-  if (!vc_desc_valid(dst) || !vc_desc_valid(src))
-    return vc_dma_invalid_op(DMA_COLLECTIVE_ERROR_ARGUMENT);
-
-  // vc_descriptor leaves stride[1] nonzero even for a one-row allocation, so
-  // it remains distinguishable from the caller's flat L2 descriptor.
-  const uint32_t dst_vc = dst->stride[1] != 0;
-  const uint32_t src_vc = src->stride[1] != 0;
-  if (dst_vc == src_vc)
-    return vc_dma_invalid_op(DMA_COLLECTIVE_ERROR_ARGUMENT);
-
+  // A VC descriptor always has a row stride, even for one row; a flat one
+  // never.
+  const uint32_t dst_vc = dst->stride != 0u;
   const vc_desc_t *const vc = dst_vc ? dst : src;
-  if (vc->count[0] != 1 || vc->len % VC_ROW_BYTES != 0)
-    return vc_dma_invalid_op(DMA_COLLECTIVE_ERROR_ARGUMENT);
+  const vc_desc_t *const flat = dst_vc ? src : dst;
+  // The collective walks vc->reps whole rectangle rows on BOTH sides, so a
+  // shorter flat buffer would be overrun.
+  if (!vc_desc_valid(dst) || !vc_desc_valid(src) || vc->stride == 0u ||
+      flat->stride != 0u || vc->len % VC_ROW_BYTES != 0u ||
+      flat->len / vc->len < vc->reps)
+    return vc_dma_invalid_op();
 
+  // A group outside the scope is refused, and counted, by the collective.
   const dma_collective_scope_t scope = vc_dma_scope(vc);
-  const uint32_t gid = mempool_get_group_id();
-  if (gid < scope.base_group || gid >= scope.base_group + scope.num_groups)
-    return vc_dma_invalid_op(DMA_COLLECTIVE_ERROR_SCOPE);
-
   // Each group moves one bank-row stripe; the flat side advances by the full
   // rectangle row and the VC side by the global word-plane stride.
   const uint32_t group_offset =
-      (gid - scope.base_group) * (uint32_t)VC_ROW_BYTES;
-  const uint32_t dst_stride = dst_vc ? dst->stride[1] : vc->len;
-  const uint32_t src_stride = src_vc ? src->stride[1] : vc->len;
+      (mempool_get_group_id() - scope.base_group) * (uint32_t)VC_ROW_BYTES;
+  const uint32_t dst_stride = dst_vc ? dst->stride : vc->len;
+  const uint32_t src_stride = dst_vc ? vc->len : src->stride;
 
   return dma_collective_submit_2d_nonblocking(
       &scope, 0u, (void *)(dst->base + group_offset),
       (const void *)(src->base + group_offset), VC_ROW_BYTES, dst_stride,
-      src_stride, vc->count[1]);
+      src_stride, vc->reps);
 }
 
 uint32_t vc_dma_memcpy_blocking(const vc_desc_t *dst, const vc_desc_t *src) {
@@ -321,7 +278,7 @@ static uint32_t vc_dma_auto_descs(void *dest, const void *src, size_t len,
   const uint32_t d_vc = d_lvl < (uint32_t)VC_LEVELS;
   const uint32_t s_vc = s_lvl < (uint32_t)VC_LEVELS;
 
-  if (d_vc == s_vc || len == 0u || len > UINT32_MAX)
+  if (d_vc == s_vc || len == 0u)
     return DMA_COLLECTIVE_ERROR_ARGUMENT;
 
   const uint32_t level = d_vc ? d_lvl : s_lvl;
@@ -332,7 +289,7 @@ static uint32_t vc_dma_auto_descs(void *dest, const void *src, size_t len,
   if (!vc_desc_valid(&vd))
     return DMA_COLLECTIVE_ERROR_ARGUMENT;
 
-  // The flat side must be OUTSIDE L1. Cross-group L1<->L1 needs the WP2 wide
+  // The flat side must be OUTSIDE L1. Cross-group L1<->L1 needs the wide TCDM
   // plane (see vc.h), and a global-L1 flat pointer would otherwise be accepted
   // here and produce a transfer the engines cannot make.
   const uint32_t flat_addr = d_vc ? s_addr : d_addr;
@@ -342,10 +299,8 @@ static uint32_t vc_dma_auto_descs(void *dest, const void *src, size_t len,
   // The flat side is one contiguous run; the collective gives it the VC side's
   // rectangle-row stride, which is what makes VC-local offset o hold flat
   // byte o.
-  const vc_desc_t fd = {.base = flat_addr,
-                        .len = (uint32_t)len,
-                        .count = {1, 1},
-                        .stride = {0, 0}};
+  const vc_desc_t fd = {
+      .base = flat_addr, .len = (uint32_t)len, .reps = 1u, .stride = 0u};
   *dst_desc = d_vc ? vd : fd;
   *src_desc = d_vc ? fd : vd;
   return DMA_COLLECTIVE_OK;
@@ -357,7 +312,7 @@ dma_collective_op_t vc_dma_memcpy_auto_nonblocking(void *dest, const void *src,
   const uint32_t error =
       vc_dma_auto_descs(dest, src, len, &dst_desc, &src_desc);
   if (error != DMA_COLLECTIVE_OK)
-    return vc_dma_invalid_op(error);
+    return vc_dma_invalid_op();
   return vc_dma_memcpy_nonblocking(&dst_desc, &src_desc);
 }
 

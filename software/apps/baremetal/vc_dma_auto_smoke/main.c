@@ -81,6 +81,14 @@ int main() {
   }
   mempool_barrier(num_cores);
 
+  // A length short of a whole row would overrun the flat side, so every core
+  // must refuse it. The refusal still counts as an operation: if it did not,
+  // the control transfer below would be numbered differently on each core.
+  const uint32_t short_error =
+      vc_dma_memcpy_auto_blocking(dst, l2_src, AUTO_ROW - 4u);
+  if (short_error != DMA_COLLECTIVE_ERROR_ARGUMENT)
+    __atomic_fetch_add(&total_errors, 1u, __ATOMIC_RELAXED);
+
   // Negative control: one rectangle row of source shift. If the readback above
   // were insensitive to placement this would pass too.
   for (uint32_t i = core_id; i < AUTO_WORDS; i += num_cores)

@@ -387,8 +387,8 @@ int main() {
               (uint32_t)(qwen_l2_w + (uint32_t)(qwen_vc_first + e) *
                                          QWEN_TILE_N * QWEN_COLS_PER_ENGINE),
           .len = QWEN_VC_W_BYTES_PER_ENGINE,
-          .count = {1, 1},
-          .stride = {0, 0}};
+          .reps = 1u,
+          .stride = 0u};
       vc_dma_memcpy_blocking(&dst, &src);
     }
   }

@@ -147,19 +147,17 @@ int main() {
       // and check it at a row-aligned offset, which is the real precondition.
       const uint32_t aoff = off - (off % vc_row_stride(k));
       vc_desc_t d = vc_descriptor(r, aoff, vc_row_stride(k));
-      check(vc_desc_valid(&d), "descriptor valid", d.len, d.count[1]);
-      check(d.len * d.count[0] * d.count[1] == vc_row_stride(k),
-            "descriptor covers one row", d.len * d.count[0] * d.count[1],
+      check(vc_desc_valid(&d), "descriptor valid", d.len, d.reps);
+      check(d.len * d.reps == vc_row_stride(k), "descriptor covers one row",
+            d.len * d.reps, vc_row_stride(k));
+      // Under Morton each step is the WHOLE rectangle row.
+      check(d.len == vc_row_stride(k) && d.reps == 1, "descriptor row", d.len,
             vc_row_stride(k));
-      // Under Morton dim0 is the WHOLE rectangle row -- the gx dimension is
-      // gone, which is the point of the encoding. It was VC_ROW_BYTES * side.
-      check(d.len == vc_row_stride(k) && d.count[0] == 1, "descriptor dim0",
-            d.len, vc_row_stride(k));
       // A misaligned offset must be refused, not silently aimed at a neighbour.
       if (vc_row_stride(k) > VC_ROW_BYTES) {
         vc_desc_t bad = vc_descriptor(r, aoff + VC_ROW_BYTES, vc_row_stride(k));
         check(!vc_desc_valid(&bad), "misaligned descriptor refused", bad.len,
-              bad.count[1]);
+              bad.reps);
       }
     }
   }
