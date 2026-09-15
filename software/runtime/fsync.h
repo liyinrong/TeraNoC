@@ -12,7 +12,7 @@
 //   +0x08 CONTROL W   bit0 = trigger, bit1 = clear sticky error
 //   +0x0C STATUS  R   bit0 done, bit1 error, bit2 BUSY, [7:4] lvl, [8+] rsp id
 //
-// The per-core event unit above that (SUBSCRIBE, CAUSE, EVT_SEQ) is described
+// The per-core event unit above that (SUBSCRIBE) is described
 // in hardware/src/fsync_shim.sv.
 //
 // SCOPE MODEL. A barrier scope is a pow2-aligned SQUARE block of TILES, and
@@ -44,7 +44,6 @@
 #define FSYNC_CONTROL_REG_OFFSET (0x08)
 #define FSYNC_STATUS_REG_OFFSET (0x0C)
 #define FSYNC_SUBSCRIBE_REG_OFFSET 0x20u
-#define FSYNC_EVT_SEQ_REG_OFFSET 0x40u
 #define FSYNC_EVT_FSYNC 0x1u
 #define FSYNC_EVT_DMA 0x2u     // group engine went idle (busy falling)
 #define FSYNC_EVT_DMA_ERR 0x4u // group engine latched a fault
@@ -190,18 +189,6 @@ static inline void fsync_subscribe_self(uint32_t sources) {
       sources;
 }
 
-// Monotonic count of THIS core's event wakes. Sample it before sleeping and
-// loop until it changes: that is the only way to tell "the tree answered me"
-// from "wfi returned for some other reason". wfi is source-agnostic, and the
-// legacy global wake banks a credit on any core that happens to be awake, so a
-// bare wfi can return with nothing about the barrier having changed.
-static inline uint32_t fsync_evt_seq_self(void) {
-  const uint32_t lane = mempool_get_core_id() % (uint32_t)NUM_CORES_PER_TILE;
-  return *(volatile uint32_t *)(FSYNC_BASE + FSYNC_EVT_SEQ_REG_OFFSET +
-                                4u * lane) &
-         0xffu;
-}
-
 // Leave the tile's barrier events entirely. A core that takes no part in its
 // tile's barriers must unsubscribe: while subscribed, every response leaves a
 // pending bit that wakes its next sleep, and mempool_barrier has no re-check.
@@ -210,10 +197,13 @@ static inline void fsync_unsubscribe_self(void) { fsync_subscribe_self(0u); }
 // ---------------------------------------------------------------------------
 // Two-level barrier. EVERY core of the tile calls these.
 //
-// The core that arrives LAST triggers the tree. Every participant, the trigger
-// core included, then sleeps until its own event count moves, which only the
-// tree's response can do: pending holds subscribed sources only, and a legacy
-// wake does not count. A tree error or mismatched response traps.
+// The core that arrives LAST triggers the tree, and every participant, the
+// trigger core included, sleeps once. A participant is subscribed to the tree
+// event only (the reset value, which every event wait restores), and pending
+// holds the response if it lands before the sleep, so the wake is always the
+// response. That needs every legacy wake_up to be spent before the barrier: a
+// software barrier before or after a phase of these is fine, one interleaved
+// with them is not. A mismatched response traps.
 //
 // Each tile counter occupies one full tile-bank stripe, so entry t lands in
 // tile t's own banks, and the array base is aligned to a whole all-tile stripe.
@@ -259,10 +249,6 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
   if (participants == 0u || participants > (uint32_t)NUM_CORES_PER_TILE)
     __builtin_trap();
 
-  // Sample BEFORE arriving: a response cannot be missed, only observed as a
-  // change that already happened.
-  const uint32_t seq0 = fsync_evt_seq_self();
-
   // Intra-tile rendezvous. tile_cnt[tile] sits in THIS tile's own bank stripe,
   // so the atomic is a local access; an arrival written to the shim instead
   // would serialise at the tile's fsync arbiter.
@@ -273,18 +259,10 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
     // Everything below is off every other core's critical path: they are
     // released by the tree, not by this core.
     const uint32_t exp_level = fsync_level_of_aggr(aggr);
-    // Wait like every other participant. A bare wfi can return on a banked
-    // legacy wake; the response would then land while this core is awake and
-    // stay pending, releasing it early from its next barrier. The error bit
-    // ends the wait too, since a tree error releases BUSY without a response.
-    uint32_t status;
-    do {
-      mempool_wfi();
-      status = fsync_status();
-    } while ((status & FSYNC_STATUS_BUSY_MASK) != 0u ||
-             ((status & FSYNC_STATUS_ERROR_MASK) == 0u &&
-              fsync_evt_seq_self() == seq0));
-    if ((status & FSYNC_STATUS_ERROR_MASK) != 0u ||
+    mempool_wfi();
+    // BUSY still set means something other than the response woke this core.
+    const uint32_t status = fsync_status();
+    if ((status & (FSYNC_STATUS_ERROR_MASK | FSYNC_STATUS_BUSY_MASK)) != 0u ||
         fsync_status_level(status) != exp_level ||
         fsync_status_id(status) != id)
       __builtin_trap();
@@ -295,10 +273,8 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
     ++tile_cnt[tile].done_epoch;
 #endif
   } else {
-    // Released by the tree response. A bare wfi is not enough: it also returns
-    // on a legacy wake banked while this core was awake.
-    while (fsync_evt_seq_self() == seq0)
-      mempool_wfi();
+    // Released by the tree response.
+    mempool_wfi();
   }
 }
 
