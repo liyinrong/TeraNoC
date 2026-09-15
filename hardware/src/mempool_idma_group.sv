@@ -2,9 +2,9 @@
 // Solderpad Hardware License, Version 0.51, see LICENSE for details.
 // SPDX-License-Identifier: SHL-0.51
 
-// One mainstream iDMA v0.6.5 frontend per MemPool group. Each tile owns an
-// independent register context, while the frontend arbitrates accepted
-// descriptors onto the configured backend streams.
+// One mainstream iDMA v0.6.5 frontend per MemPool group. Every tile of the
+// group reaches the same register context through mempool_group.sv's
+// arbiter; accepted descriptors go to the configured backend streams.
 
 module mempool_idma_group import mempool_pkg::*; #(
   parameter int unsigned NumRegs          = 1,

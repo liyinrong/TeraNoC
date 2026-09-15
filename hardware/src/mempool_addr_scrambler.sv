@@ -6,14 +6,13 @@
 // independently-gated address transforms, in this order:
 //   Stage 1 (EnableSeqInterleaveSwap, sequential region): swap the
 //     {tile_id, scramble} fields so HW sees an interleaved-bank layout.
-//   Stage 2 (EnableVirtualCluster, virtual-cluster windows): the WP3 level rule —
+//   Stage 2 (EnableVirtualCluster, virtual-cluster windows): the level rule —
 //     re-place a window-relative offset inside the requester's 2^k x 2^k
-//     group rectangle. See docs/plan/wp2-wp4-implementation-roadmap.md
-//     §T2.1 (revised 2026-08-23).
+//     group rectangle.
 //   Stage 3 (EnableTileIdRemap, non-sequential TCDM): spread accesses
 //     across the NumTilesPerDma tiles of a DMA group.
 //
-// BRANCH ORDER IS LOAD-BEARING (roadmap §T2.1, Track A finding S9). The VC
+// BRANCH ORDER IS LOAD-BEARING. The VC
 // branch must sit between stage 1 and stage 3. Appended after stage 3 it
 // would never fire on a config with EnableTileIdRemap=1, because a VC
 // address is inside the decoded TCDM region and above the sequential region,
@@ -43,10 +42,10 @@ module mempool_addr_scrambler
   parameter logic [31:0]          TCDMMask                 = '1 << 28,
   parameter bit                   EnableSeqInterleaveSwap  = 1'b1,
   parameter bit                   EnableTileIdRemap        = 1'b0,
-  // --- WP3 virtual-cluster remap (roadmap §T2.1) --------------------------
+  // --- Virtual-cluster remap ------------------------------------------------
   // Total decoded global TCDM region. Replaces TCDMMask as the region test:
   // the global window plus the per-level VC windows is 1.33x L1 and never a
-  // power of two, so one mask cannot express it (Track A finding S11).
+  // power of two, so one mask cannot express it.
   parameter logic [AddrWidth-1:0] TCDMSize                 = 0,
   // Geometry. NumTilesPerGroup, NumX and NumY are NEW and must NOT be
   // replaced by TileIdBits, which spans the FLAT {group,tile} field that
@@ -73,12 +72,12 @@ module mempool_addr_scrambler
 ) (
   input  logic [AddrWidth-1:0]    address_i,
   // Requesting group's flat mesh id, {gx, gy} with gy in the LOW half
-  // (hardware/src/mempool_cluster_floonoc_wrapper.sv:249). Unused unless
+  // (hardware/src/mempool_cluster_floonoc_wrapper.sv). Unused unless
   // EnableVirtualCluster.
   input  logic [GroupIdWidth-1:0] group_id_i,
   // Asserted when this request was remapped by the VC branch, with the level
   // it matched. Carried to the request routers so the confinement assertion
-  // (roadmap §T2.3 item 3) can tell VC traffic from ordinary global traffic
+  // can tell VC traffic from ordinary global traffic
   // AND know which rectangle to check against. Constant 0 when the VC branch
   // is disabled. Verification-only; nothing in the datapath reads them.
   output logic                    vc_hit_o,
@@ -96,8 +95,8 @@ module mempool_addr_scrambler
   localparam int unsigned ConstantBitsLSB   = ByteOffset + BankOffsetBits;
   localparam int unsigned ScrambleBits      = SeqPerTileBits - ConstantBitsLSB;
 
-  // ---- WP3 virtual-cluster geometry (all compile-time constants) --------
-  // Canonical physical layout, low to high (roadmap §"Canonical layout"):
+  // ---- Virtual-cluster geometry (all compile-time constants) ------------
+  // Canonical physical layout, low to high:
   //   [ byte | bank | tile | gy | gx | word_in_bank ]
   localparam int unsigned VcTileBits = $clog2(NumTilesPerGroup);
   localparam int unsigned VcGyBits   = $clog2(NumY);
@@ -127,7 +126,7 @@ module mempool_addr_scrambler
   endfunction
 
   // Packed DESCENDING by size immediately above the global region, so every
-  // window lands on its natural alignment with zero padding (roadmap §T2.2).
+  // window lands on its natural alignment with zero padding.
   function automatic longint unsigned vc_window_base (input int unsigned k);
     automatic longint unsigned acc = TCDMBaseAddr + TCDMSize;
     for (int unsigned j = VcLevels; j > k + 1; j--) begin
@@ -136,7 +135,7 @@ module mempool_addr_scrambler
     vc_window_base = acc;
   endfunction
 
-  // The level rule of roadmap §T2.1. `offset` is window-relative.
+  // The level rule. `offset` is window-relative.
   function automatic logic [AddrWidth-1:0] vc_permute (
       input int unsigned          k,
       input logic [AddrWidth-1:0] offset,
@@ -269,7 +268,7 @@ module mempool_addr_scrambler
   if (SeqMemSizePerTile % (2**ByteOffset*NumBanksPerTile) != 0)
     $fatal(1, "SeqMemSizePerTile must be a multiple of BankWidth*NumBanksPerTile!");
 
-  // ---- WP3 virtual-cluster checks ---------------------------------------
+  // ---- Virtual-cluster checks -------------------------------------------
   if (EnableVirtualCluster) begin : gen_vc_checks
     // The range compares must decode exactly the region the old mask did,
     // so switching to them cannot move an existing config's global window.
@@ -280,8 +279,8 @@ module mempool_addr_scrambler
              TCDMMask, TCDMSize);
     if (TCDMBaseAddr % TCDMSize != 0)
       $fatal(1, "TCDMBaseAddr must be TCDMSize aligned for the composition ORs to equal addition.");
-    // GATE item 4 (roadmap §T2.3): level <= mesh. After S12 this is the only
-    // illegal descriptor that still exists, and it is elaboration-time.
+    // Level <= mesh: the only illegal descriptor left, and it is caught at
+    // elaboration.
     if (VcLevels > VcMeshLog2)
       $fatal(1, "VC level %0d exceeds the mesh (min(NumX,NumY)=%0d, log2=%0d).",
              VcLevels, (NumX < NumY ? NumX : NumY), VcMeshLog2);
@@ -309,9 +308,8 @@ module mempool_addr_scrambler
   end
 
 `ifndef SYNTHESIS
-  // GATE item 5 (roadmap §T2.3): the TOP level is the identity map. That is
-  // invariant #10 expressed on the permuter, and it is the arithmetic reason
-  // the top-level window is dropped from the address map (finding S7/S11).
+  // The TOP level is the identity map, which is why the address map has no
+  // top-level window.
   // Checked at time 0 over every field corner rather than a token sample.
   if (EnableVirtualCluster && (NumX == NumY)) begin : gen_vc_identity_check
     initial begin : p_top_level_identity

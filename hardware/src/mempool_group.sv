@@ -779,7 +779,7 @@ module mempool_group
       .TCDMMask                (TCDMMask         ),
       .EnableSeqInterleaveSwap (1'b0             ),
       .EnableTileIdRemap       (TileIdRemap      ),
-      // Deliberately VC-BLIND (roadmap §T2.1): the DMA must never remap, so a
+      // Deliberately VC-BLIND: the DMA must never remap, so a
       // descriptor cannot carry a virtual-cluster address. DmaRegionStart/End
       // stays the global window only, which makes that a hardware property
       // rather than a convention.

@@ -2,23 +2,20 @@
 // Solderpad Hardware License, Version 0.51, see LICENSE for details.
 // SPDX-License-Identifier: SHL-0.51
 
-// Standalone replay of the WP3 virtual-cluster golden vectors against the
-// RTL permuter. Instantiates ONLY mempool_addr_scrambler, so it runs in
-// seconds and can be used long before any tile or group port changes.
+// Standalone replay of the virtual-cluster golden vectors against the RTL
+// permuter. Instantiates ONLY mempool_addr_scrambler, so it runs in seconds.
 //
-// GATE item 1 of docs/plan/wp2-wp4-implementation-roadmap.md §T2.3: the
-// bijection check is PRIMARY. Track A finding S4 showed that one of the two
-// wrong readings of invariant #4 collides without ever escaping the
-// rectangle's bounding box, so the confinement SVA of gate item 3 would pass
-// a broken permuter. Only replaying the vectors catches it.
+// The bijection check is the primary one: a permuter can map two offsets onto
+// one word without ever leaving the rectangle's bounding box, which the
+// confinement assertions would pass. Only replaying the vectors catches it.
 //
-// The DUTs are instantiated with EnableTileIdRemap = 1 ON PURPOSE. That is
-// the configuration in which a VC branch appended last would be swallowed by
-// the tile-id branch (finding S9), so this testbench is the S9 regression.
+// The DUTs are instantiated with EnableTileIdRemap = 1 ON PURPOSE: in that
+// configuration a VC branch placed after the tile-id branch would be
+// swallowed by it, so this testbench guards the scrambler's branch order.
 //
-// Vectors: scripts/vc/golden/vc_golden_{terapool,monsterpool8x8}_v1.txt,
-// format documented in scripts/vc/README.md §"Vector file format". All
-// columns are hex without a 0x prefix, and the offsets are window relative.
+// Vectors: scripts/vc/golden/vc_golden_{terapool,monsterpool8x8}_v1.txt, in
+// the format documented in scripts/vc/README.md. All columns are hex without a
+// 0x prefix, and the offsets are window relative.
 
 module vc_replay #(
   parameter string       GoldenFile        = "",

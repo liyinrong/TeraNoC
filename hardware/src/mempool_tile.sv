@@ -158,7 +158,7 @@ module mempool_tile
   `FF(wake_up_q, wake_up_i, '0, clk_i, rst_ni);
 
   // Group ID
-  // ---- WP3 virtual-cluster remap enables --------------------------------
+  // ---- Virtual-cluster remap enables ------------------------------------
   // Deliberately THREE named constants, one per COMPUTE scrambler, with an
   // elaboration check that they agree. Enabling VC at only some of the three
   // is exactly the regression this guards: forgetting the wide RedMulE site
@@ -166,7 +166,7 @@ module mempool_tile
   // when the wide plane is on, which is invisible on every narrow build.
   // The DMA scrambler in mempool_group.sv is deliberately NOT in this set --
   // it stays virtual-cluster blind so a descriptor can never carry a VC
-  // address (roadmap §T2.1, and DmaRegionStart/End is the global window only).
+  // address (DmaRegionStart/End is the global window only).
   localparam bit VirtualClusterCore     = VirtualCluster;
   localparam bit VirtualClusterRmWide   = VirtualCluster;
   localparam bit VirtualClusterRmNarrow = VirtualCluster;
@@ -1280,7 +1280,7 @@ module mempool_tile
   );
 
 `ifndef SYNTHESIS
-  // GATE item 3 (roadmap §T2.3), network-side half. The scrambler already
+  // VC confinement, network-side half. The scrambler already
   // asserts confinement where the address is produced; this repeats it on the
   // ROUTER's decoded target group, so anything that rewrites the address
   // between the two is caught as well. Gated on vc_hit so ordinary global
@@ -2335,7 +2335,7 @@ module mempool_tile
     assign wake_up = wake_up_q | fs_wake_vec;
 
     // ----------------------------------------------------------------------
-    // WP2 wide source path: issue each RedMulE HCI beat as one raw wide access.
+    // Wide-plane source path: issue each RedMulE HCI beat as one raw wide access.
     // Own-tile accesses bypass locally; the engine's TCDM shim separates
     // same-group and inter-group traffic. Each access carries ini_addr/src_group_id,
     // and RedMulE's hci_core_rob reorders by meta_id, so out-of-order is fine.
@@ -2417,7 +2417,7 @@ module mempool_tile
     assign remote_wide_req_interco[WidePortIdx].tgt_addr = remote_wide_req_tgt_addr[WidePortIdx];
 
 `ifndef SYNTHESIS
-    // GATE item 3 (roadmap §T2.3), wide half. Same clocked check as the
+    // VC confinement, wide half. Same clocked check as the
     // narrow ports; it lives here because WidePortIdx is scoped to this
     // block. Without it a RedMulE using the wide plane could leave its
     // rectangle on exactly the configs where the wide plane is enabled.
@@ -2524,7 +2524,7 @@ module mempool_tile
     // No narrow interco slots for RedMulE in the wide plane (RMNarrowPorts = 0).
 
 `ifndef SYNTHESIS
-    // WP2 assumes WIDE_W-aligned RedMulE accesses: one access lands in one
+    // Wide-plane RedMulE accesses are WIDE_W aligned: one access lands in one
     // superbank and never crosses a tile.
     localparam int unsigned RmWideAlignW = $clog2(WideTcdmDataWidth/DataWidth);
     always_ff @(posedge clk_i) begin
@@ -2893,7 +2893,7 @@ module mempool_tile
            WideTcdmDataWidth, spatz_pkg::MaxBurstWords, DataWidth);
   `endif
 
-  // Wide TCDM plane (WP2): the raw master side is driven per tile by gen_redmule
+  // Wide TCDM plane: the raw master side is driven per tile by gen_redmule
   // or gen_redmule_tieoff.
 
 endmodule : mempool_tile
