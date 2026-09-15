@@ -59,7 +59,9 @@ int main() {
     if (core == 0u) {
       fsync_subscribe_self(FSYNC_EVT_DMA);
       (void)dma_local_memcpy_nonblocking(0u, l1_buf, l2_buf, GATE_BYTES);
-      (void)dma_local_wait(0u); // polls: the idle event lands while awake
+      // Poll, not dma_local_wait(): the idle event must land while awake.
+      while (!dma_local_idle(0u))
+        mempool_wait(16u);
       mempool_wait(256u);
       fsync_subscribe_self(FSYNC_EVT_FSYNC);
     } else {

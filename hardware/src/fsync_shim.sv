@@ -75,10 +75,10 @@ module fsync_shim #(
   // One bit per core of the tile, high while that core is in WFI.
   input  logic [NumCores-1:0]  core_asleep_i,
   // Group-level engine status, reduced across streams by the group. The iDMA
-  // exposes no completion pulse -- software polls the cumulative done_id
-  // register -- so "the stream went idle" is derived from busy falling. That is
-  // exact while one transfer is outstanding, and conservative otherwise (it
-  // waits for every queued transfer, not just one).
+  // exposes no completion pulse, so "the engine went idle" is derived from busy
+  // falling. Busy clears no earlier than the cycle done_id passes the last
+  // request, so a core sleeping on it may wake late, behind queued transfers,
+  // but never before its own has retired.
   input  logic                 dma_busy_i,
   input  logic                 dma_error_i,
   // Tile engine end-of-computation (RedMulE today). A PULSE, so it is taken as

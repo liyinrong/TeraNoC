@@ -93,65 +93,50 @@ static inline uint32_t dma_local_done_id(uint32_t stream, dma_id_t id) {
   return dma_local_id_done(dma_local_completed_id(stream), id);
 }
 
+// The waits below sleep. The event unit has no per-transfer event: it wakes a
+// subscribed core when the group engine goes idle (busy falling) or latches a
+// fault. Busy covers a request from its launch until the cycle DONE_ID passes
+// it (mempool_idma_group.sv busy_o, through the backend's outstanding count),
+// so an outstanding request always has an idle edge still to come, no earlier
+// than its completion. With later requests queued behind it that edge comes
+// when the last one retires: late, never lost.
+//
+// Subscribe, and fence so the subscription is in place, BEFORE the first test:
+// an edge after that is held pending and the wfi returns at once. The loops
+// re-test because a wfi also returns for an unrelated wake. The exit restores
+// the barrier subscription, which also drops an engine event taken while awake.
+static inline void dma_local_sleep_enter(void) {
+  fsync_subscribe_self(FSYNC_EVT_DMA | FSYNC_EVT_DMA_ERR);
+  __sync_synchronize();
+}
+
+static inline uint32_t dma_local_sleep_exit(uint32_t stream) {
+  fsync_subscribe_self(FSYNC_EVT_FSYNC);
+  __sync_synchronize();
+  // Error and completion can become visible together: re-read the sticky error.
+  return dma_local_error(stream);
+}
+
+// Wait until one request has landed; waiting an id waits every earlier one.
 static inline uint32_t dma_local_wait_id(uint32_t stream, dma_id_t id) {
   if (stream >= (uint32_t)NUM_DMAS_PER_GROUP || id == 0)
     return DMA_LOCAL_ERROR_ARGUMENT;
-  while (!dma_local_done_id(stream, id)) {
-    const uint32_t error = dma_local_error(stream);
-    if (error != 0)
-      return error;
-    mempool_wait(4u);
-  }
-  __sync_synchronize();
-  // Error and retirement can become visible together. Re-read the sticky
-  // status after observing the target ID so that completion cannot bypass an
-  // error which landed between the loop's last two MMIO reads.
-  return dma_local_error(stream);
+  dma_local_sleep_enter();
+  while (!dma_local_done_id(stream, id) && dma_local_error(stream) == 0u)
+    mempool_wfi();
+  return dma_local_sleep_exit(stream);
 }
 
-// Wait until every request accepted by one stream has landed. The hardware
-// status includes the frontend FIFO, ND midend, and backend, so an immediate
-// wait after an asynchronous launch cannot observe a false idle gap.
+// Wait until every request accepted by one stream has landed. The status
+// includes the frontend FIFO, ND midend and backend, so a wait right after an
+// asynchronous launch cannot observe a false idle gap.
 static inline uint32_t dma_local_wait(uint32_t stream) {
   if (stream >= (uint32_t)NUM_DMAS_PER_GROUP)
     return DMA_LOCAL_ERROR_ARGUMENT;
-  while (!dma_local_idle(stream)) {
-    const uint32_t error = dma_local_error(stream);
-    if (error != 0)
-      return error;
-    mempool_wait(4u);
-  }
-  __sync_synchronize();
-  return dma_local_error(stream);
-}
-
-// Sleep until this group's engine is idle, instead of polling done_id.
-//
-// The iDMA exposes no completion pulse, so the event unit derives one from busy
-// FALLING. That is exact while a single transfer is outstanding, and
-// conservative otherwise: it fires when the last queued transfer retires, not
-// a named one. Do not build a per-id sleep on it.
-//
-// Subscribe BEFORE testing idle: an edge after the subscribe is held pending
-// and the wfi returns at once, one before it was never recorded. The loop
-// re-tests because a wfi can also return for an unrelated wake. Restoring the
-// barrier subscription on the way out also drops an engine event taken while
-// awake.
-static inline uint32_t dma_local_wait_sleep(uint32_t stream) {
-  if (stream >= (uint32_t)NUM_DMAS_PER_GROUP)
-    return DMA_LOCAL_ERROR_ARGUMENT;
-  fsync_subscribe_self(FSYNC_EVT_DMA | FSYNC_EVT_DMA_ERR);
-  while (!dma_local_idle(stream)) {
-    const uint32_t error = dma_local_error(stream);
-    if (error != 0) {
-      fsync_subscribe_self(FSYNC_EVT_FSYNC);
-      return error;
-    }
+  dma_local_sleep_enter();
+  while (!dma_local_idle(stream) && dma_local_error(stream) == 0u)
     mempool_wfi();
-  }
-  fsync_subscribe_self(FSYNC_EVT_FSYNC);
-  __sync_synchronize();
-  return dma_local_error(stream);
+  return dma_local_sleep_exit(stream);
 }
 
 static inline dma_id_t

@@ -25,8 +25,7 @@
 #define DMA_COLLECTIVE_STORAGE                                                 \
   __attribute__((aligned(NUM_BANKS * sizeof(uint32_t)), section(".l1")))
 
-#define DMA_COLLECTIVE_POLL_CYCLES 4u // delay between completion polls
-#define DMA_COLLECTIVE_ERROR_POLLS 8u // re-read the sticky error this often
+#define DMA_COLLECTIVE_POLL_CYCLES 4u // delay between lock and READY polls
 
 #ifndef RO_LINE_WIDTH
 #error "RO_LINE_WIDTH undefined: the runtime must be built through runtime.mk"
@@ -565,23 +564,9 @@ dma_collective_op_t dma_collective_submit_2d_nonblocking(
   return op;
 }
 
-// Poll one stream's completion. The sticky error is re-read every few polls,
-// so a faulted engine cannot hang the loop, and once after completion.
-static inline uint32_t dma_collective_wait_id_fast(uint32_t stream,
-                                                   dma_id_t id) {
-  uint32_t polls = 0u;
-  while (!dma_local_done_id(stream, id)) {
-    if ((++polls & (DMA_COLLECTIVE_ERROR_POLLS - 1u)) == 0u &&
-        dma_local_error(stream) != 0u)
-      break;
-    mempool_wait(DMA_COLLECTIVE_POLL_CYCLES);
-  }
-  __sync_synchronize();
-  return dma_local_error(stream);
-}
-
-// Coordinator only: retire everything its group has outstanding, then publish
-// READY through `seq`. Waiting the last id waits every earlier one.
+// Coordinator only: sleep until everything its group has outstanding retires,
+// then publish READY through `seq`. Waiting the last id waits every earlier
+// one.
 static inline __attribute__((always_inline)) uint32_t
 dma_collective_retire(dma_collective_group_t *control, uint32_t seq) {
   uint32_t error = control->error;
@@ -589,7 +574,7 @@ dma_collective_retire(dma_collective_group_t *control, uint32_t seq) {
     const dma_id_t id = control->last_id[s];
     if (id == 0u)
       continue;
-    const uint32_t wait_error = dma_collective_wait_id_fast(s, id);
+    const uint32_t wait_error = dma_local_wait_id(s, id);
     if (error == DMA_COLLECTIVE_OK)
       error = wait_error;
     control->last_id[s] = 0u;

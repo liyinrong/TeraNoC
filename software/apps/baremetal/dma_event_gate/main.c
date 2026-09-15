@@ -2,14 +2,13 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-// E2 gate: a core SLEEPS until its DMA completes, instead of polling done_id.
+// E2 gate: a core SLEEPS until its DMA completes, instead of polling.
 //
 // Two arms move the same bytes with the same engine and verify the same data.
 // The only difference is how the issuing core waits:
 //
-//   poll   dma_local_wait   -- spins on the status register
-//   sleep  dma_local_wait_sleep -- subscribes to the engine's idle event and
-//   wfi
+//   poll   wait_poll()      -- spins on the status register
+//   sleep  dma_local_wait() -- subscribes to the engine's idle event and wfi
 //
 // The gate is that BOTH land the data. The interesting number is retired
 // instructions: a sleeping core executes almost none while it waits, which is
@@ -39,6 +38,12 @@ static uint32_t volatile cyc[2] __attribute__((section(".l1")));
 static uint32_t volatile instr[2] __attribute__((section(".l1")));
 static uint32_t volatile errs[2] __attribute__((section(".l1")));
 
+static uint32_t wait_poll(uint32_t stream) {
+  while (!dma_local_idle(stream) && dma_local_error(stream) == 0u)
+    mempool_wait(4u);
+  return dma_local_error(stream);
+}
+
 static void arm(uint32_t which, uint32_t core, uint32_t ncores,
                 uint32_t group) {
   for (uint32_t i = core; i < EVT_WORDS; i += ncores)
@@ -53,7 +58,7 @@ static void arm(uint32_t which, uint32_t core, uint32_t ncores,
         0u, (void *)((uint32_t)l1_buf + off),
         (const void *)((uint32_t)l2_buf + off), GROUP_BYTES, ROW_BYTES,
         ROW_BYTES, EVT_ROWS);
-    const uint32_t e = which ? dma_local_wait_sleep(0u) : dma_local_wait(0u);
+    const uint32_t e = which ? dma_local_wait(0u) : wait_poll(0u);
     const mempool_timer_t t1 = mempool_get_timer();
     const uint32_t i1 = (uint32_t)read_csr(minstret);
     if (group == 0u) {
