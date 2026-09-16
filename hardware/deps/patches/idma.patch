@@ -1,0 +1,126 @@
+diff --git a/hardware/deps/idma/src/frontend/reg/tpl/idma_reg.sv.tpl b/hardware/deps/idma/src/frontend/reg/tpl/idma_reg.sv.tpl
+index 27de593..022ea59 100644
+--- a/hardware/deps/idma/src/frontend/reg/tpl/idma_reg.sv.tpl
++++ b/hardware/deps/idma/src/frontend/reg/tpl/idma_reg.sv.tpl
+@@ -41,7 +41,9 @@ module idma_${identifier} #(
+   /// Status signals
+   input  cnt_width_t           [NumStreams-1:0] done_id_i,
+   input  idma_pkg::idma_busy_t [NumStreams-1:0] busy_i,
+-  input  logic                 [NumStreams-1:0] midend_busy_i
++  input  logic                 [NumStreams-1:0] midend_busy_i,
++  /// Completion: one pulse per stream per retired transfer
++  output logic                 [NumStreams-1:0] done_evt_o
+ );
+ 
+   /// Maximum number of streams is set to 16. It can be enlarged, but the register file
+@@ -210,4 +212,25 @@ module idma_${identifier} #(
+     .idx_o   ( /* NC */    )
+   );
+ 
++
++  // Completion events. The front end already samples done_id_i, and the id
++  // generator advances it by exactly one per retired transfer, so a change in
++  // it IS a completion -- no response path has to be routed here. The first
++  // cycle is suppressed: done_id_i comes up at the generator's reset value,
++  // which is not a retirement.
++  cnt_width_t [NumStreams-1:0] done_id_q;
++  logic                        done_evt_primed_q;
++
++  always_ff @(posedge clk_i or negedge rst_ni) begin
++    if (!rst_ni) begin
++      done_id_q         <= '0;
++      done_evt_primed_q <= 1'b0;
++    end else begin
++      done_id_q         <= done_id_i;
++      done_evt_primed_q <= 1'b1;
++    end
++  end
++
++  assign done_evt_o = done_evt_primed_q ? (done_id_i != done_id_q) : '0;
++
+ endmodule
+diff --git a/hardware/deps/idma/target/rtl/idma_generated.sv b/hardware/deps/idma/target/rtl/idma_generated.sv
+index bf8116b..45c5f37 100644
+--- a/hardware/deps/idma/target/rtl/idma_generated.sv
++++ b/hardware/deps/idma/target/rtl/idma_generated.sv
+@@ -19475,7 +19475,9 @@ module idma_reg32_3d #(
+   /// Status signals
+   input  cnt_width_t           [NumStreams-1:0] done_id_i,
+   input  idma_pkg::idma_busy_t [NumStreams-1:0] busy_i,
+-  input  logic                 [NumStreams-1:0] midend_busy_i
++  input  logic                 [NumStreams-1:0] midend_busy_i,
++  /// Completion: one pulse per stream per retired transfer
++  output logic                 [NumStreams-1:0] done_evt_o
+ );
+ 
+   /// Maximum number of streams is set to 16. It can be enlarged, but the register file
+@@ -19623,6 +19625,27 @@ module idma_reg32_3d #(
+     .idx_o   ( /* NC */    )
+   );
+ 
++
++  // Completion events. The front end already samples done_id_i, and the id
++  // generator advances it by exactly one per retired transfer, so a change in
++  // it IS a completion -- no response path has to be routed here. The first
++  // cycle is suppressed: done_id_i comes up at the generator's reset value,
++  // which is not a retirement.
++  cnt_width_t [NumStreams-1:0] done_id_q;
++  logic                        done_evt_primed_q;
++
++  always_ff @(posedge clk_i or negedge rst_ni) begin
++    if (!rst_ni) begin
++      done_id_q         <= '0;
++      done_evt_primed_q <= 1'b0;
++    end else begin
++      done_id_q         <= done_id_i;
++      done_evt_primed_q <= 1'b1;
++    end
++  end
++
++  assign done_evt_o = done_evt_primed_q ? (done_id_i != done_id_q) : '0;
++
+ endmodule
+ 
+ // Copyright 2023 ETH Zurich and University of Bologna.
+diff --git a/hardware/deps/idma/target/rtl/idma_reg32_3d_top.sv b/hardware/deps/idma/target/rtl/idma_reg32_3d_top.sv
+index d16821c..0e8fc6d 100644
+--- a/hardware/deps/idma/target/rtl/idma_reg32_3d_top.sv
++++ b/hardware/deps/idma/target/rtl/idma_reg32_3d_top.sv
+@@ -41,7 +41,9 @@ module idma_reg32_3d #(
+   /// Status signals
+   input  cnt_width_t           [NumStreams-1:0] done_id_i,
+   input  idma_pkg::idma_busy_t [NumStreams-1:0] busy_i,
+-  input  logic                 [NumStreams-1:0] midend_busy_i
++  input  logic                 [NumStreams-1:0] midend_busy_i,
++  /// Completion: one pulse per stream per retired transfer
++  output logic                 [NumStreams-1:0] done_evt_o
+ );
+ 
+   /// Maximum number of streams is set to 16. It can be enlarged, but the register file
+@@ -189,5 +191,26 @@ module idma_reg32_3d #(
+     .idx_o   ( /* NC */    )
+   );
+ 
++
++  // Completion events. The front end already samples done_id_i, and the id
++  // generator advances it by exactly one per retired transfer, so a change in
++  // it IS a completion -- no response path has to be routed here. The first
++  // cycle is suppressed: done_id_i comes up at the generator's reset value,
++  // which is not a retirement.
++  cnt_width_t [NumStreams-1:0] done_id_q;
++  logic                        done_evt_primed_q;
++
++  always_ff @(posedge clk_i or negedge rst_ni) begin
++    if (!rst_ni) begin
++      done_id_q         <= '0;
++      done_evt_primed_q <= 1'b0;
++    end else begin
++      done_id_q         <= done_id_i;
++      done_evt_primed_q <= 1'b1;
++    end
++  end
++
++  assign done_evt_o = done_evt_primed_q ? (done_id_i != done_id_q) : '0;
++
+ endmodule
+ 

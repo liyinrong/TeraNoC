@@ -5,6 +5,11 @@
 // One mainstream iDMA v0.6.5 frontend per MemPool group. Every tile of the
 // group reaches the same register context through mempool_group.sv's
 // arbiter; accepted descriptors go to the configured backend streams.
+//
+// The engine has no interrupt output, so its only event is done_evt_o: one
+// pulse per retired transfer, taken from the ID generator's completed_id,
+// which the frontend already samples. Software polls STATUS for everything
+// else; see software/runtime/dma.h.
 
 module mempool_idma_group import mempool_pkg::*; #(
   parameter int unsigned NumRegs          = 1,
@@ -21,8 +26,7 @@ module mempool_idma_group import mempool_pkg::*; #(
   parameter type         axi_req_t        = axi_tile_req_t,
   parameter type         axi_rsp_t        = axi_tile_resp_t,
   parameter type         read_meta_t      = idma_read_meta_channel_t,
-  parameter type         write_meta_t     = idma_write_meta_channel_t,
-  parameter type         error_payload_t  = idma_err_payload_t
+  parameter type         write_meta_t     = idma_write_meta_channel_t
 ) (
   input  logic                    clk_i,
   input  logic                    rst_ni,
@@ -31,10 +35,9 @@ module mempool_idma_group import mempool_pkg::*; #(
   output reg_rsp_t [NumRegs-1:0] ctrl_rsp_o,
   output axi_req_t [NumStreams-1:0] axi_req_o,
   input  axi_rsp_t [NumStreams-1:0] axi_rsp_i,
-  input  logic     [NumStreams-1:0] error_clear_i,
-  output logic     [NumStreams-1:0] error_o,
-  output error_payload_t [NumStreams-1:0] error_payload_o,
-  output logic     [NumStreams-1:0] busy_o
+  // One pulse per retired transfer on ANY stream. The group engine's only
+  // event; software/runtime/fsync.h subscribes to it.
+  output logic                      done_evt_o
 );
 
   localparam int unsigned StreamWidth = NumStreams > 1 ? $clog2(NumStreams) : 1;
@@ -72,47 +75,19 @@ module mempool_idma_group import mempool_pkg::*; #(
   idma_counter_t [NumStreams-1:0] completed_id;
   logic          [NumStreams-1:0] issue_id;
   logic          [NumStreams-1:0] retire_id;
+  logic          [NumStreams-1:0] stream_done_evt;
 
   axi_req_t [NumStreams-1:0] axi_read_req, axi_write_req;
   axi_rsp_t [NumStreams-1:0] axi_read_rsp, axi_write_rsp;
   reg_req_t [NumRegs-1:0] frontend_ctrl_req;
   reg_rsp_t [NumRegs-1:0] frontend_ctrl_rsp;
-  logic     [NumStreams-1:0] csr_error_clear;
-  logic     [NumStreams-1:0] error_clear;
-
-  // The generated register frontend has no error CSRs. Overlay two compact
-  // per-stream read windows after its last register: STATUS is W1C and returns
-  // {cause, type, valid}; ADDRESS returns the failing AXI burst address.
+  // The register file is the frontend's, unmodified: this wrapper used to
+  // overlay two per-stream error windows on top of it, which is gone with the
+  // rest of the error path.
   always_comb begin
     frontend_ctrl_req = ctrl_req_i;
-    ctrl_rsp_o         = frontend_ctrl_rsp;
-    csr_error_clear    = '0;
-    for (int r = 0; r < NumRegs; r++) begin
-      for (int s = 0; s < NumStreams; s++) begin
-        if (ctrl_req_i[r].valid &&
-            ctrl_req_i[r].addr == IdmaErrorStatusOffset + 4*s) begin
-          frontend_ctrl_req[r].valid = 1'b0;
-          ctrl_rsp_o[r].ready         = 1'b1;
-          ctrl_rsp_o[r].error         = 1'b0;
-          ctrl_rsp_o[r].rdata         = '0;
-          ctrl_rsp_o[r].rdata[0]      = error_o[s];
-          ctrl_rsp_o[r].rdata[2:1]    = error_payload_o[s].err_type;
-          ctrl_rsp_o[r].rdata[4:3]    = error_payload_o[s].cause;
-          if (ctrl_req_i[r].write && ctrl_req_i[r].wstrb[0] && ctrl_req_i[r].wdata[0])
-            csr_error_clear[s] = 1'b1;
-        end
-        if (ctrl_req_i[r].valid &&
-            ctrl_req_i[r].addr == IdmaErrorAddressOffset + 4*s) begin
-          frontend_ctrl_req[r].valid = 1'b0;
-          ctrl_rsp_o[r].ready         = 1'b1;
-          ctrl_rsp_o[r].error         = ctrl_req_i[r].write;
-          ctrl_rsp_o[r].rdata         = error_payload_o[s].burst_addr;
-        end
-      end
-    end
+    ctrl_rsp_o        = frontend_ctrl_rsp;
   end
-
-  assign error_clear = error_clear_i | csr_error_clear;
 
   always_comb begin
     frontend_stream_valid = '0;
@@ -146,8 +121,13 @@ module mempool_idma_group import mempool_pkg::*; #(
     .stream_idx_o   (frontend_stream    ),
     .done_id_i      (completed_id       ),
     .busy_i         (backend_busy       ),
-    .midend_busy_i  (nd_busy | req_fifo_busy)
+    .midend_busy_i  (nd_busy | req_fifo_busy),
+    .done_evt_o     (stream_done_evt    )
   );
+
+  // A retired transfer on any stream is the group's completion event. One bit
+  // is enough for the tile event unit, which cannot tell streams apart anyway.
+  assign done_evt_o = |stream_done_evt;
 
   for (genvar s = 0; s < NumStreams; s++) begin : gen_streams
     stream_fifo_optimal_wrap #(
@@ -207,7 +187,7 @@ module mempool_idma_group import mempool_pkg::*; #(
       .MaskInvalidData      (1'b0                          ),
       .HardwareLegalizer    (1'b1                          ),
       .RejectZeroTransfers  (1'b1                          ),
-      .ErrorCap             (idma_pkg::ERROR_HANDLING      ),
+      .ErrorCap             (idma_pkg::NO_ERROR_HANDLING   ),
       .PrintFifoInfo        (1'b0                          ),
       .idma_req_t           (idma_req_t                    ),
       .idma_rsp_t           (idma_rsp_t                    ),
@@ -228,7 +208,7 @@ module mempool_idma_group import mempool_pkg::*; #(
       .rsp_valid_o     (backend_rsp_valid[s] ),
       .rsp_ready_i     (backend_rsp_ready[s] ),
       .idma_eh_req_i   (idma_pkg::ABORT       ),
-      .eh_req_valid_i  (error_clear[s]        ),
+      .eh_req_valid_i  (1'b0                  ),
       .eh_req_ready_o  (                      ),
       .axi_read_req_o  (axi_read_req[s]      ),
       .axi_read_rsp_i  (axi_read_rsp[s]      ),
@@ -269,23 +249,6 @@ module mempool_idma_group import mempool_pkg::*; #(
     assign issue_id[s] = frontend_stream_valid[s] & frontend_stream_ready[s];
     assign retire_id[s] = nd_rsp_valid[s] & nd_rsp_ready[s];
     assign req_fifo_busy[s] = |req_fifo_usage[s];
-    assign busy_o[s] = (|backend_busy[s]) | nd_busy[s] | req_fifo_busy[s];
-
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        error_o[s]         <= 1'b0;
-        error_payload_o[s] <= '0;
-      end else begin
-        if (error_clear[s]) error_o[s] <= 1'b0;
-        if (backend_rsp_valid[s] && backend_rsp_ready[s] && backend_rsp[s].error) begin
-          error_o[s]         <= 1'b1;
-          error_payload_o[s] <= backend_rsp[s].pld;
-        end else if (nd_rsp_valid[s] && nd_rsp_ready[s] && nd_rsp[s].error) begin
-          error_o[s]         <= 1'b1;
-          error_payload_o[s] <= nd_rsp[s].pld;
-        end
-      end
-    end
   end
 
   `ifndef SYNTHESIS

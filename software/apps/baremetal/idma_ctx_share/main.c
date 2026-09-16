@@ -80,14 +80,13 @@ int main() {
       // Unlocked reads, concurrent with the issuer's programming and with each
       // other. A dropped or misrouted response wedges the reader; a read that
       // returns another requester's data shows up as an impossible status.
+      // STATUS is the only per-stream register left to read this way: the
+      // error window was removed with the rest of the error path.
       uint32_t local = 0u;
       for (uint32_t i = 0; i < 256u; ++i) {
         const uint32_t st = dma_local_status(0u);
-        const uint32_t er = dma_local_error(0u);
         if (st <= 1u)
           ++local;
-        if (er != 0u)
-          __atomic_fetch_add(&errors, 1u, __ATOMIC_RELAXED);
       }
       __atomic_fetch_add(&polls, local, __ATOMIC_RELAXED);
     }

@@ -144,13 +144,11 @@ module mempool_group
   idma_reg_rsp_t  [NumTilesPerGroup-1:0] idma_ctrl_rsp;
   idma_reg_req_t                         idma_ctrl_req_mux;
 
-  // Declared ahead of the tile loop, which consumes idma_busy/idma_error for
-  // the per-tile event unit. Questa resolves the forward reference, but a
-  // forward-referenced signal can become an implicit net elsewhere and tie the
-  // connection to zero silently.
-  logic           [NumDmasPerGroup-1:0] idma_error;
-  idma_err_payload_t [NumDmasPerGroup-1:0] idma_error_payload;
-  logic           [NumDmasPerGroup-1:0] idma_busy;
+  // Declared ahead of the tile loop, which consumes it for the per-tile event
+  // unit. Questa resolves the forward reference, but a forward-referenced
+  // signal can become an implicit net elsewhere and tie the connection to zero
+  // silently.
+  logic                                 idma_done_evt;
 
   for (genvar t = 0; unsigned'(t) < NumTilesPerGroup; t++) begin: gen_tiles
     tile_id_t id;
@@ -196,10 +194,9 @@ module mempool_group
       .clk_i                   (clk_i                                          ),
       .rst_ni                  (rst_ni                                         ),
       .scan_enable_i           (scan_enable_i                                  ),
-      // Engine status for the tile event unit. Reduced across streams here so
-      // the tile interface stays a single bit per condition.
-      .dma_busy_i              (|idma_busy                                     ),
-      .dma_error_i             (|idma_error                                    ),
+      // Engine completion for the tile event unit. Reduced across streams
+      // here, so the tile interface stays a single bit.
+      .dma_done_evt_i          (idma_done_evt                                  ),
       .scan_data_i             (1'b0 /* stitched by DFT insertion */           ),
       .scan_data_o             (/* Unconnected */                              ),
       .tile_id_i               (id                                             ),
@@ -657,10 +654,7 @@ module mempool_group
     .ctrl_rsp_o      (idma_ctrl_rsp_arb    ),
     .axi_req_o       (axi_dma_premux_req   ),
     .axi_rsp_i       (axi_dma_premux_resp  ),
-    .error_clear_i   ('0                    ),
-    .error_o         (idma_error           ),
-    .error_payload_o (idma_error_payload   ),
-    .busy_o          (idma_busy            )
+    .done_evt_o      (idma_done_evt        )
   );
 
   // xbar

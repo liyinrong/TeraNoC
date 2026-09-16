@@ -15,7 +15,12 @@
 #include "runtime.h"
 
 // iDMA v0.6.5 reg32_3d register map. The descriptor registers are one context
-// per group; status, transfer ids and errors are per stream.
+// per group; status and transfer ids are per stream.
+//
+// The engine has no interrupt and no error register: software polls STATUS
+// (busy) and DONE_ID (completion), and both are exact. The one event the
+// hardware emits is the completion pulse behind FSYNC_EVT_DMA, which
+// dma_event_gate uses; the runtime polls.
 // Second 64 KiB of the peripheral window (mempool_pkg::DMABaseAddr).
 #define DMA_BASE (CONTROL_REGISTER_OFFSET + 0x10000u)
 #define DMA_CONF_OFFSET 0x000u
@@ -31,7 +36,6 @@
 #define DMA_DST_STRIDE_3_OFFSET 0x100u
 #define DMA_SRC_STRIDE_3_OFFSET 0x108u
 #define DMA_REPS_3_OFFSET 0x110u
-#define DMA_ERROR_STATUS_OFFSET(stream) (0x120u + 4u * (stream))
 
 #define DMA_CONF_ENABLE_ND_BIT 10u
 #define DMA_CONF_ENABLE_ND_MASK (0x3u << DMA_CONF_ENABLE_ND_BIT)
@@ -40,6 +44,7 @@
 typedef uint32_t dma_id_t;
 
 enum {
+  DMA_LOCAL_OK = 0,
   DMA_LOCAL_ERROR_ARGUMENT = 0x80000001u,
 };
 
@@ -55,7 +60,7 @@ enum {
 // mempool_is_group_coordinator() is how every caller in-tree elects one. A
 // caller that genuinely needs several tiles of a group to issue must bracket
 // the programming sequence with dma_group_ctx_lock()/dma_group_ctx_unlock().
-// Reads (status, done id, error) need no lock; they are single-register and
+// Reads (status, done id) need no lock; they are single-register and
 // the arbiter serialises them. A violation is silent: the transfer completes,
 // with the wrong address or length.
 //
@@ -81,10 +86,6 @@ static inline dma_id_t dma_local_completed_id(uint32_t stream) {
   return *dma_local_reg(DMA_DONE_ID_OFFSET(stream));
 }
 
-static inline uint32_t dma_local_error(uint32_t stream) {
-  return *dma_local_reg(DMA_ERROR_STATUS_OFFSET(stream));
-}
-
 static inline uint32_t dma_local_id_done(dma_id_t done, dma_id_t target) {
   return (int32_t)(done - target) >= 0;
 }
@@ -93,38 +94,20 @@ static inline uint32_t dma_local_done_id(uint32_t stream, dma_id_t id) {
   return dma_local_id_done(dma_local_completed_id(stream), id);
 }
 
-// The waits below sleep. The event unit has no per-transfer event: it wakes a
-// subscribed core when the group engine goes idle (busy falling) or latches a
-// fault. Busy covers a request from its launch until the cycle DONE_ID passes
-// it (mempool_idma_group.sv busy_o, through the backend's outstanding count),
-// so an outstanding request always has an idle edge still to come, no earlier
-// than its completion. With later requests queued behind it that edge comes
-// when the last one retires: late, never lost.
+// Both waits POLL. The engine's completion pulse (FSYNC_EVT_DMA) is exact, but
+// a poll is as cheap here -- the register file is ~4 cycles a read, L1 speed --
+// and it needs no subscription discipline: no unsubscribe to restore, no stale
+// pending bit to keep out of the next barrier. Measured on dse_s1_winner at
+// 512 KiB, sleeping instead of polling moved nothing: bw in 1559/1559.
 //
-// Subscribe, and fence so the subscription is in place, BEFORE the first test:
-// an edge after that is held pending and the wfi returns at once. The loops
-// re-test because a wfi also returns for an unrelated wake. The exit restores
-// the barrier subscription, which also drops an engine event taken while awake.
-static inline void dma_local_sleep_enter(void) {
-  fsync_subscribe_self(FSYNC_EVT_DMA | FSYNC_EVT_DMA_ERR);
-  __sync_synchronize();
-}
-
-static inline uint32_t dma_local_sleep_exit(uint32_t stream) {
-  fsync_subscribe_self(FSYNC_EVT_FSYNC);
-  __sync_synchronize();
-  // Error and completion can become visible together: re-read the sticky error.
-  return dma_local_error(stream);
-}
-
 // Wait until one request has landed; waiting an id waits every earlier one.
 static inline uint32_t dma_local_wait_id(uint32_t stream, dma_id_t id) {
   if (stream >= (uint32_t)NUM_DMAS_PER_GROUP || id == 0)
     return DMA_LOCAL_ERROR_ARGUMENT;
-  dma_local_sleep_enter();
-  while (!dma_local_done_id(stream, id) && dma_local_error(stream) == 0u)
-    mempool_wfi();
-  return dma_local_sleep_exit(stream);
+  while (!dma_local_done_id(stream, id))
+    mempool_wait(4u);
+  __sync_synchronize();
+  return DMA_LOCAL_OK;
 }
 
 // Wait until every request accepted by one stream has landed. The status
@@ -133,10 +116,10 @@ static inline uint32_t dma_local_wait_id(uint32_t stream, dma_id_t id) {
 static inline uint32_t dma_local_wait(uint32_t stream) {
   if (stream >= (uint32_t)NUM_DMAS_PER_GROUP)
     return DMA_LOCAL_ERROR_ARGUMENT;
-  dma_local_sleep_enter();
-  while (!dma_local_idle(stream) && dma_local_error(stream) == 0u)
-    mempool_wfi();
-  return dma_local_sleep_exit(stream);
+  while (!dma_local_idle(stream))
+    mempool_wait(4u);
+  __sync_synchronize();
+  return DMA_LOCAL_OK;
 }
 
 static inline dma_id_t
@@ -146,13 +129,11 @@ dma_local_memcpy_nd_nonblocking(uint32_t stream, void *dest, const void *src,
                                 uint32_t dst_stride_3, uint32_t src_stride_3,
                                 uint32_t reps_3, uint32_t dimensions) {
   if (stream >= (uint32_t)NUM_DMAS_PER_GROUP || len == 0 || dimensions < 1 ||
-      dimensions > 3 || dma_local_error(stream) != 0)
+      dimensions > 3)
     return 0;
 
   // Program only the dimensions this descriptor uses: CONF's ENABLE_ND field
   // tells the ND midend how many to walk, so the registers above it are dead.
-  // The sticky-error read above fails a faulted engine early; the wait would
-  // report it too.
   uint32_t conf = *dma_local_reg(DMA_CONF_OFFSET);
   conf &= ~DMA_CONF_ENABLE_ND_MASK;
   if (dimensions >= 2)

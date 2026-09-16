@@ -282,8 +282,6 @@ package mempool_pkg;
   localparam addr_t      DMABaseAddr            =
       (`ifdef PERIPH_BASE `PERIPH_BASE `else 32'h7000_0000 `endif) + 32'h0001_0000;
   localparam addr_t      DMAMask                = ~(IdmaRegSize - 1);
-  localparam addr_t      IdmaErrorStatusOffset  = 32'h0000_0120;
-  localparam addr_t      IdmaErrorAddressOffset = 32'h0000_0160;
 
   typedef logic [DmaNumWords*DataWidth-1:0] dma_data_t;
   typedef logic [DmaNumWords*DataWidth/8-1:0] dma_strb_t;

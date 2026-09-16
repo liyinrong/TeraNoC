@@ -78,6 +78,9 @@ module tb_fsync_shim;
     ) i_shim (
       .clk_i        (clk           ),
       .rst_ni       (rst_n         ),
+      // No engine on this fixture; the event logic under test is the tree's.
+      .dma_done_evt_i(1'b0         ),
+      .engine_evt_i (1'b0          ),
       .reg_req_i    (reg_req[c]    ),
       .reg_we_i     (reg_we[c]     ),
       .reg_addr_i   (reg_addr[c]   ),

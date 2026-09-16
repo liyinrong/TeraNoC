@@ -74,13 +74,10 @@ module fsync_shim #(
   input  logic                 rst_ni,
   // One bit per core of the tile, high while that core is in WFI.
   input  logic [NumCores-1:0]  core_asleep_i,
-  // Group-level engine status, reduced across streams by the group. The iDMA
-  // exposes no completion pulse, so "the engine went idle" is derived from busy
-  // falling. Busy clears no earlier than the cycle done_id passes the last
-  // request, so a core sleeping on it may wake late, behind queued transfers,
-  // but never before its own has retired.
-  input  logic                 dma_busy_i,
-  input  logic                 dma_error_i,
+  // Group engine completion, reduced across streams by the group. A PULSE, one
+  // per retired transfer (mempool_idma_group.sv): the iDMA exposes no
+  // interrupt, and this is the frontend's own view of its completed-ID counter.
+  input  logic                 dma_done_evt_i,
   // Tile engine end-of-computation (RedMulE today). A PULSE, so it is taken as
   // is rather than edge-detected. Routing it here is what makes an engine
   // dependency expressible for ANY core, and for SEVERAL at once: every core
@@ -135,13 +132,12 @@ module fsync_shim #(
   localparam logic [7:0] REG_STATUS    = 8'h0C;
   localparam logic [7:0] REG_SUBSCRIBE = 8'h20;  // +4 per core
 
-  // Event sources. Only FSYNC is wired today; the rest are the routing E2/E3
-  // will fill in (iDMA completion, engine, doorbell, tree error).
-  localparam int unsigned EvtWidth    = 8;
-  localparam int unsigned EVT_FSYNC   = 0;
-  localparam int unsigned EVT_DMA     = 1;  // group engine went idle
-  localparam int unsigned EVT_DMA_ERR = 2;  // group engine latched a fault
-  localparam int unsigned EVT_ENGINE  = 3;  // tile engine end-of-computation
+  // Event sources. The tree response is edge-detected (it is a level); the two
+  // engine completions arrive as pulses and are taken as they are.
+  localparam int unsigned EvtWidth   = 3;
+  localparam int unsigned EVT_FSYNC  = 0;
+  localparam int unsigned EVT_DMA    = 1; // one group DMA transfer retired
+  localparam int unsigned EVT_ENGINE = 2; // tile engine end-of-computation
 
   logic [AggrWidth-1:0] reg_aggr_q;
   logic [IdWidth-1:0]   reg_id_q;
@@ -155,10 +151,6 @@ module fsync_shim #(
   // no re-check loop. Edge-detect instead.
   logic                 wake_q;
   logic                 wake_edge;
-  logic                 dma_busy_q;
-  logic                 dma_idle_edge;
-  logic                 dma_error_q;
-  logic                 dma_error_edge;
   logic                 reg_wr;
   logic                 reg_trigger, reg_clear;
 
@@ -288,20 +280,6 @@ module fsync_shim #(
   end
   `endif
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      dma_busy_q  <= 1'b0;
-      dma_error_q <= 1'b0;
-    end else begin
-      dma_busy_q  <= dma_busy_i;
-      dma_error_q <= dma_error_i;
-    end
-  end
-  // Busy FALLING is the completion event; the error is sticky in the engine so
-  // its rising edge is taken once.
-  assign dma_idle_edge  = ~dma_busy_i & dma_busy_q;
-  assign dma_error_edge = dma_error_i & ~dma_error_q;
-
   for (genvar c = 0; c < NumCores; c++) begin : gen_events
     logic [EvtWidth-1:0] evt_set;
 
@@ -309,10 +287,11 @@ module fsync_shim #(
     // it asked for.
     always_comb begin
       evt_set = '0;
-      evt_set[EVT_FSYNC]   = wake_edge & subscribe_q[c][EVT_FSYNC];
-      evt_set[EVT_DMA]     = dma_idle_edge & subscribe_q[c][EVT_DMA];
-      evt_set[EVT_DMA_ERR] = dma_error_edge & subscribe_q[c][EVT_DMA_ERR];
-      evt_set[EVT_ENGINE]  = engine_evt_i & subscribe_q[c][EVT_ENGINE];
+      evt_set[EVT_FSYNC]  = wake_edge & subscribe_q[c][EVT_FSYNC];
+      // Both engine events are PULSES, so they are taken as they are: an
+      // engine edge detector would be a second, redundant filter.
+      evt_set[EVT_DMA]    = dma_done_evt_i & subscribe_q[c][EVT_DMA];
+      evt_set[EVT_ENGINE] = engine_evt_i & subscribe_q[c][EVT_ENGINE];
     end
 
     // Wake ONLY while the core is asleep. This is the whole safety argument:

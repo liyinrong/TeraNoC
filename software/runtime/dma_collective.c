@@ -167,11 +167,10 @@ void dma_collective_runtime_init(void) {
   dma_group_ctx_init();
 }
 
-// The engine refused a descriptor: its sticky error, or a generic launch
-// failure when it latched none.
-static inline uint32_t dma_collective_launch_error(uint32_t stream) {
-  const uint32_t error = dma_local_error(stream);
-  return error != 0u ? error : DMA_COLLECTIVE_ERROR_LAUNCH;
+// The engine accepted no descriptor: NEXT_ID read back as 0. Errors are a
+// software matter only -- the engine has no error report to fold in.
+static inline uint32_t dma_collective_launch_error(void) {
+  return DMA_COLLECTIVE_ERROR_LAUNCH;
 }
 
 static uint32_t
@@ -303,7 +302,7 @@ static dma_id_t dma_collective_issue_piece(uint32_t stream, uint32_t dest,
                                                 DMA_COLLECTIVE_ROW_BYTES, reps);
     ++*descriptors;
     if (last_id == 0) {
-      *error = dma_collective_launch_error(stream);
+      *error = dma_collective_launch_error();
       return 0;
     }
     l1_piece += chunk;
@@ -342,7 +341,7 @@ static dma_id_t dma_collective_issue_linear(uint32_t stream, void *dest,
         stream, piece_dest, piece_src, DMA_COLLECTIVE_GROUP_BYTES,
         DMA_COLLECTIVE_ROW_BYTES, DMA_COLLECTIVE_ROW_BYTES, rows);
     if (id == 0)
-      *error = dma_collective_launch_error(stream);
+      *error = dma_collective_launch_error();
     return id;
   }
 
@@ -471,7 +470,7 @@ dma_collective_submit_general(const dma_collective_scope_t *scope,
 DMA_COLD static void dma_collective_launch_failed(dma_collective_op_t *op,
                                                   uint32_t group,
                                                   uint32_t stream) {
-  const uint32_t error = dma_collective_launch_error(stream);
+  const uint32_t error = dma_collective_launch_error();
   op->status = error;
   if (dma_collective_group[group].error == DMA_COLLECTIVE_OK)
     dma_collective_group[group].error = error;
@@ -558,7 +557,7 @@ dma_collective_op_t dma_collective_submit_2d_nonblocking(
   const dma_id_t id = dma_local_memcpy_2d_nonblocking(
       stream, dest, src, len, dst_stride, src_stride, reps);
   const uint32_t error =
-      id != 0u ? DMA_COLLECTIVE_OK : dma_collective_launch_error(stream);
+      id != 0u ? DMA_COLLECTIVE_OK : dma_collective_launch_error();
   dma_collective_record(&op, stream, id, error);
   DMA_PROF_COORD(1);
   return op;
