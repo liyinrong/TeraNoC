@@ -66,6 +66,27 @@ enum {
 // construction. A caller that cannot keep to one issuer has no safe option
 // here; it must serialise at a higher level.
 //
+// ONE DESCRIPTOR MOVES AT MOST ONE STRIPE, ON BOTH SIDES.
+//
+// L1 and L2 are interleaved at a stripe (64 B on minpool: AXI_DATA_WIDTH/8 *
+// AXI_WIDTH_INTERLEAVED in the L2, NUM_BANKS/NUM_GROUPS*4 in the L1 map), and
+// a burst carries ONE start address, so the crossbar routes the whole burst by
+// it. A chunk that crosses a stripe boundary is therefore not rejected -- the
+// transfer retires normally and the data lands somewhere else. The AXI beats
+// are 32 B here, so a legal chunk can start unaligned but may not run past the
+// stripe end. dma_collective.c splits every linear transfer at exactly these
+// boundaries (DMA_COLLECTIVE_L2_STRIPE_BYTES, DMA_COLLECTIVE_GROUP_BYTES); a
+// raw dma_local_* caller has to respect them itself.
+//
+// The L1 side inherits a second consequence of the same geometry: the tile
+// takes the bank and word fields of an L1 address but drops the group field,
+// so a descriptor's L1 address is effectively rewritten to the ISSUING group.
+// An L1 buffer must therefore lie in the issuing group's own stripe of the
+// interleaved L1 map: a stripe belonging to another group is written into this
+// group at the same bank/word, which reads back as a payload landing one
+// stripe low. idma_smoke and idma_ctx_share are the legal shape -- one
+// row-aligned stripe per issuer, issued by mempool_is_group_coordinator().
+//
 // Reads (status, done id) are single-register, so the arbiter serialises them
 // and EVERY core may poll them freely -- that is what idma_ctx_share
 // exercises.
