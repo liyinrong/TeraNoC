@@ -40,7 +40,7 @@ module mempool_tcdm_bank_interco
   // Must be wide enough to address NumNarrowResp ports (logic [idx_width(NumNarrowResp)-1:0]).
   parameter type resp_idx_t    = logic [3:0],
   // DMA ingress. The `wide` qualifier stays on these because mempool_pkg already
-  // owns DmaDataWidth and dma_req_t (the DMA frontend descriptor, unrelated).
+  // owns DmaDataWidth and idma_req_t (the backend descriptor, unrelated).
   parameter int unsigned DmaWideDataWidth = 512,
   parameter type dma_wide_req_t  = tcdm_dma_req_t,
   parameter type dma_wide_resp_t = tcdm_dma_resp_t,

@@ -394,7 +394,7 @@ package mempool_pkg;
   // the RedMulE one, but reachable from EVERY core of the tile rather than
   // core 0 alone: the tile leader issues the barrier, and which core that is
   // is a software choice, not a wiring one. 256 B mirrors MAGIA's
-  // FSYNC_CTRL_SIZE; only four registers are used today.
+  // FSYNC_CTRL_SIZE; four barrier registers precede per-core SUBSCRIBE words.
   localparam integer unsigned FSyncRegSize  = 256;
   // DERIVED from RMBaseAddr, never hardcoded: RMBaseAddr follows PERIPH_BASE, so
   // this window moves with the peripheral map (0x7003_0000 at the default).

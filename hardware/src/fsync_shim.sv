@@ -40,15 +40,13 @@
 // asleep[c] needs no core change -- snitch.sv:287 already drives
 // inst_valid_o = ~wfi_q and mempool_tile.sv already routes it for the icache.
 //
-// This does not merely bound the wake counter, it BYPASSES it: wake_up_d
-// increments only when wake_up_sync_i && !wfi_q (snitch.sv:447), so a unit that
-// never wakes an awake core never increments it. The three-bit counter, its
-// wrap at eight, the drain, the mask discipline and the one-wfi-per-barrier
-// rule all stop being load-bearing.
+// This event path does not bank awake-core wake credits: Snitch increments
+// its counter only for a wake while awake. Independent legacy wake sources
+// still use that counter and must be consumed before an event-based wait.
 //
 // pending is level-held, so events arriving while the core runs simply wait:
-// N events before one sleep produce ONE wake with N bits set. It clears on the
-// wake, so nothing has to be acked. Writing SUBSCRIBE
+// Repeated events from a source coalesce into one pending bit. A wake consumes
+// the pending bits, so nothing has to be acked. Writing SUBSCRIBE
 // also drops the pending bits of every source it removes, so an event taken
 // while awake cannot wake a later, unrelated sleep. SUBSCRIBE resets to the
 // fsync bit, so existing code behaves exactly as before.

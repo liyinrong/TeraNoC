@@ -216,7 +216,6 @@ proc wave_cluster {} {
     global _nWave2
     wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/TCDMBaseAddr}
     wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/BootAddr}
-    wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/NumDMAReq}
     wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/NumAXIMasters}
     wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/clk_i}
     wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/rst_ni}

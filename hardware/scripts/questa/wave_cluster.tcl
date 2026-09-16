@@ -7,7 +7,6 @@
 add wave -noupdate -group cluster -divider Parameters
 add wave -noupdate -group cluster mempool_tb/dut/i_mempool_cluster/TCDMBaseAddr
 add wave -noupdate -group cluster mempool_tb/dut/i_mempool_cluster/BootAddr
-add wave -noupdate -group cluster mempool_tb/dut/i_mempool_cluster/NumDMAReq
 add wave -noupdate -group cluster mempool_tb/dut/i_mempool_cluster/NumAXIMasters
 add wave -noupdate -group cluster -divider Signals
 add wave -noupdate -group cluster mempool_tb/dut/i_mempool_cluster/clk_i

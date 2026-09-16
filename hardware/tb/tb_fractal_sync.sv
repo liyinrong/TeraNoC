@@ -4,13 +4,8 @@
 
 // Standalone gate for the fractal_sync H-tree barrier (roadmap Phase 3).
 //
-// Written BEFORE the per-core shim on purpose. The single lesson from WP3 is
-// that every gate item was satisfiable without ever crossing a group boundary,
-// and the lesson from the VC DMA is that a gate can be green while never once
-// performing the operation the feature exists for. So this drives the tree's
-// leaf ports directly -- no cores, no cluster, no shim -- and asserts the two
-// properties a barrier must have and that a "did it elaborate" check cannot
-// see:
+// Drive the tree's leaf ports directly, independently of the tile shim and
+// software runtime, and check barrier safety and isolation across groups:
 //
 //   SAFETY   a scope does not wake until its LAST member has arrived, and a
 //            scope never wakes a non-member;

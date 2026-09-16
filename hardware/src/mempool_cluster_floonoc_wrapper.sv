@@ -17,7 +17,6 @@ module mempool_cluster_floonoc_wrapper
   // Boot address
   parameter logic [31:0]   BootAddr      = 32'h0000_0000,
   // Dependent parameters. DO NOT CHANGE!
-  parameter int unsigned   NumDMAReq     = NumGroups * NumDmasPerGroup,
   parameter int unsigned   NumAXIMasters = NumGroups * NumAXIMastersPerGroup
 ) (
   // Clock and reset
@@ -361,9 +360,8 @@ module mempool_cluster_floonoc_wrapper
       // Indexed by GROUP ID, not by mesh position. mempool_group.sv:153 builds
       // tile ids from group_id_i (= gid_of_xy, Morton) and mempool_tile.sv:260
       // builds hart_id from those, so a raster index here permutes which
-      // physical group receives which group's signals. Invisible while wake is
-      // a broadcast and every group gets the same DMA descriptor; a wrong-group
-      // fault the moment P3 gives each group its own.
+      // physical group receives the signals. Broadcast wakes can hide this
+      // mistake; scoped wakes, tree leaves and cache control require GId.
           .wake_up_i                  (wake_up_q[GId*NumCoresPerGroup +: NumCoresPerGroup]),
           .fsync_h_req_o              (fsync_h_req[GId]),
           .fsync_h_rsp_i              (fsync_h_rsp[GId]),

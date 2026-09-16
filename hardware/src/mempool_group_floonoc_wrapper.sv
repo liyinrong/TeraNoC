@@ -48,9 +48,9 @@ module mempool_group_floonoc_wrapper
   input  logic              [NumCoresPerGroup-1:0]      wake_up_i,
 
   // fractal_sync leaves, one pair per tile, carried through to the cluster
-  // tree. These MUST be driven: the shim ORs the response's wake into every
-  // core's wake_up, so leaving the inputs unconnected propagates X into the
-  // wake of every core in the tile and nothing ever boots.
+  // tree. Drive both response inputs: the shim samples their wake/error fields
+  // and records subscribed events for sleeping cores. Unconnected responses
+  // can contaminate the shim's state and prevent progress.
   output fsync_req_t        [NumTilesPerGroup-1:0]      fsync_h_req_o,
   input  fsync_rsp_t        [NumTilesPerGroup-1:0]      fsync_h_rsp_i,
   output fsync_req_t        [NumTilesPerGroup-1:0]      fsync_v_req_o,
