@@ -630,6 +630,15 @@ vc-replay:
 	$(MAKE) simc top_level=tb_vc_scrambler config=$(config) \
 	  questa_simc_args="-c +GOLDEN_DIR=$(abspath ../scripts/vc/golden)/"
 
+# Standalone response-path gate for the tile's request-id remapper. No cores,
+# no cluster, no network: it drives the two arms by hand and checks that a
+# stalled arm cannot hold up the other one's response. Needs a config that
+# instantiates the remapper (RVF or RVD): it is a Spatz-target source.
+.PHONY: id-remap-gate
+id-remap-gate:
+	$(MAKE) simc top_level=tb_tcdm_id_remapper config=$(config) \
+	  questa_simc_args="-c"
+
 # Standalone fractal_sync barrier gate. Drives the tree's leaf ports directly --
 # no cores, no cluster, no shim -- so it runs in seconds and can be used while
 # the per-core shim is still being written.
