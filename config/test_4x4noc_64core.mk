@@ -4,11 +4,20 @@
 #
 # Author: Yichao Zhang, ETH Zurich
 
+#
+# NOT A SUPPORTED CONFIGURATION. This layout puts TWO tiles in a group, and
+# the tree takes only 1, 4, 16 or 64 tiles per group: a square tile block is
+# what makes a barrier scope a complete subtree.
+# The fractal_sync tree has no leaf for it, so fsync.h refuses to build a
+# barrier and every fsync-based synchronisation falls back to the flat software
+# barrier. Kept only as a record of the stage-1 DSE grid; do not measure on it.
+
 ###########################
 ## 1. Architecture Config
 ###########################
 
 # Global Control
+
 terapool ?= 1
 
 # FlooNoC configuration file
