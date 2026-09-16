@@ -56,7 +56,7 @@
 
 // Per-group control block, written by the group coordinator. Padded to one
 // group bank stripe, so entry g lands in group g's banks.
-#define DMA_COLLECTIVE_GROUP_FIELDS (6 + NUM_DMAS_PER_GROUP)
+#define DMA_COLLECTIVE_GROUP_FIELDS (5 + NUM_DMAS_PER_GROUP)
 #if DMA_COLLECTIVE_GROUP_WORDS <= DMA_COLLECTIVE_GROUP_FIELDS
 #error "The DMA group control block does not fit in one group bank stripe"
 #endif
@@ -68,7 +68,6 @@ typedef struct {
   volatile uint32_t ready_error; // error published with ready_seq
   volatile uint32_t fence_seq;   // operation whose barrier fence_error names
   volatile uint32_t fence_error; // stored into EVERY group of a failing scope
-  volatile uint32_t ctx_lock;    // dma_group_ctx_lock(), for raw dma_local_*
   uint32_t padding[DMA_COLLECTIVE_GROUP_WORDS - DMA_COLLECTIVE_GROUP_FIELDS];
 } dma_collective_group_t;
 
@@ -121,24 +120,6 @@ dma_prof_group_t dma_prof[NUM_GROUPS] DMA_COLLECTIVE_STORAGE;
 // per group. The collective does not need it -- it has one issuer per group --
 // but raw dma_local_* callers issuing from several tiles do (dma.h). `.l1`
 // powers up X, so the lock must be zeroed before the first acquire.
-void dma_group_ctx_init(void) {
-  if (mempool_is_group_coordinator())
-    dma_collective_group[mempool_get_group_id()].ctx_lock = 0u;
-  __sync_synchronize();
-}
-
-void dma_group_ctx_lock(void) {
-  const uint32_t group = mempool_get_group_id();
-  while (__atomic_exchange_n(&dma_collective_group[group].ctx_lock, 1,
-                             __ATOMIC_ACQUIRE) != 0)
-    mempool_wait(DMA_COLLECTIVE_POLL_CYCLES);
-}
-
-void dma_group_ctx_unlock(void) {
-  __atomic_store_n(&dma_collective_group[mempool_get_group_id()].ctx_lock, 0,
-                   __ATOMIC_RELEASE);
-}
-
 void dma_collective_runtime_init(void) {
   const uint32_t core = mempool_get_core_id();
   dma_collective_core[core].seq = 0u;
@@ -164,7 +145,6 @@ void dma_collective_runtime_init(void) {
       for (uint32_t g = 0u; g < (uint32_t)NUM_GROUPS; ++g)
         mempool_barrier_poll_init(&dma_collective_poll[k][g]);
   }
-  dma_group_ctx_init();
 }
 
 // The engine accepted no descriptor: NEXT_ID read back as 0. Errors are a

@@ -50,8 +50,6 @@ int main() {
   const uint32_t is_tile_issuer = mempool_is_group_coordinator();
 
   mempool_barrier_init(core);
-  // The lock is `.l1` and powers up X; without this every issuer spins forever.
-  dma_group_ctx_init();
   if (core == 0u) {
     errors = 0u;
     polls = 0u;
@@ -68,10 +66,11 @@ int main() {
     mempool_barrier(NUM_CORES);
 
     if (is_tile_issuer) {
-      dma_group_ctx_lock();
+      // ONE issuer per group, which the coordinator already is: the register
+      // context is shared by the whole group and nothing brackets the
+      // programming sequence any more (dma.h).
       const dma_id_t id = dma_local_memcpy_nonblocking(
           0u, l1_dst[tile], l2_src[tile], CTX_WORDS * sizeof(uint32_t));
-      dma_group_ctx_unlock();
       if (id == 0u)
         __atomic_fetch_add(&errors, 1u, __ATOMIC_RELAXED);
       else if (dma_local_wait_id(0u, id) != 0u)

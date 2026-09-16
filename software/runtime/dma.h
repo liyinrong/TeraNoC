@@ -52,23 +52,23 @@ enum {
 //
 // DMA_BASE carries no tile index: the context is selected by which tile's port
 // the access arrives on, and every tile of a group now reaches the SAME one
-// (mempool_group.sv arbitrates them). So two tiles of one group programming a
-// transfer concurrently interleave SRC/DST/LENGTH into a single register set
-// and each launches the other's descriptor.
+// (mempool_group.sv arbitrates them). Programming a transfer takes SEVERAL
+// writes -- CONF, SRC, DST, LENGTH, the strides, then the NEXT_ID read that
+// launches it -- and the arbiters make each access atomic but not the
+// sequence. Two issuers of one group therefore interleave their writes into
+// the single register set and each launches the other's descriptor, silently:
+// the transfer completes, with the wrong address or length.
 //
-// One issuer per group is therefore the contract for everything below --
-// mempool_is_group_coordinator() is how every caller in-tree elects one. A
-// caller that genuinely needs several tiles of a group to issue must bracket
-// the programming sequence with dma_group_ctx_lock()/dma_group_ctx_unlock().
-// Reads (status, done id) need no lock; they are single-register and
-// the arbiter serialises them. A violation is silent: the transfer completes,
-// with the wrong address or length.
+// ONE ISSUER PER GROUP IS THEREFORE ABSOLUTE, and there is no lock: the
+// centralized DMA this replaced had one context for the whole machine and no
+// lock either. mempool_is_group_coordinator() is how every caller in-tree
+// elects its issuer, and the collective has exactly one per group by
+// construction. A caller that cannot keep to one issuer has no safe option
+// here; it must serialise at a higher level.
 //
-// dma_group_ctx_init() zeroes the lock; mempool_barrier_init() calls it on
-// every core.
-void dma_group_ctx_init(void);
-void dma_group_ctx_lock(void);
-void dma_group_ctx_unlock(void);
+// Reads (status, done id) are single-register, so the arbiter serialises them
+// and EVERY core may poll them freely -- that is what idma_ctx_share
+// exercises.
 
 static inline volatile uint32_t *dma_local_reg(uint32_t offset) {
   return (volatile uint32_t *)(DMA_BASE + offset);
