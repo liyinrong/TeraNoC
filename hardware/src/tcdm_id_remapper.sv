@@ -157,6 +157,9 @@ module tcdm_id_remapper
     //  Response  //
     ////////////////
 
+    // Keep valid independent of ready: both LSUs may wait for valid before
+    // accepting a load. Backpressure here is an endpoint dependency, not a
+    // routing cycle. Do not infer a deadlock from an idle ready signal alone.
     stream_demux #(
       .N_OUP(NumIn)
     ) i_response_demux (

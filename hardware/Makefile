@@ -5,6 +5,8 @@
 # Author: Yichao Zhang, ETH Zurich
 
 SHELL = /usr/bin/env bash
+# A failed generator/endpoint check must not leave an up-to-date package.
+.DELETE_ON_ERROR:
 ROOT_DIR 		:= $(patsubst %/,%, $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 MEMPOOL_DIR 	:= $(shell git rev-parse --show-toplevel 2>/dev/null || echo $$MEMPOOL_DIR)
 INSTALL_DIR 	:= $(abspath $(ROOT_DIR)/../install)
@@ -20,6 +22,12 @@ include $(config_mk)
 # ============================================================================
 # Build paths
 buildpath        ?= build
+# Keep topology packages local to the build, including Bender's source lists.
+# Bender expands environment paths after prefixing the repository root, so
+# export a relative path even when buildpath is absolute.
+generated_dir    := $(abspath $(buildpath)/generated/$(config))
+export MEMPOOL_GENERATED_DIR := $(shell realpath -m --relative-to=$(MEMPOOL_DIR) $(generated_dir))
+generated_pkgs   := $(generated_dir)/floo_terapool_noc_pkg.sv $(generated_dir)/l2_bank_map_pkg.sv
 resultpath       ?= results
 # Questa library
 library          ?= work
@@ -533,8 +541,13 @@ l2map_addr_args = --l2-base $(l2_base) --l2-size $(l2_size) \
 	--bootrom-base $(bootrom_base) --periph-base $(periph_base)
 
 .PHONY: update-floogen
-update-floogen: update-l2map
-	$(MAKE) -C .. FLOO_CFG=./config/$(floo_noc_cfg) update-floonoc config=$(config)
+update-floogen: $(generated_pkgs)
+
+$(generated_dir)/floo_terapool_noc_pkg.sv: $(MEMPOOL_DIR)/config/$(floo_noc_cfg) \
+    $(MEMPOOL_DIR)/Bender.lock Makefile
+	mkdir -p $(generated_dir)
+	$(MAKE) -C $(MEMPOOL_DIR) FLOO_CFG=$(MEMPOOL_DIR)/config/$(floo_noc_cfg) \
+	  FLOO_GEN_OUTDIR=$(generated_dir) update-floonoc config=$(config)
 	@# floogen names the emitted package after the yml's `name:` field, but the
 	@# RTL imports floo_terapool_noc_pkg unconditionally. A yml whose name does
 	@# not match therefore leaves a STALE package in place and the design
@@ -546,7 +559,7 @@ update-floogen: update-l2map
 	@# count it from the yml rather than assuming a shape. It carries no `array:`,
 	@# which is why its presence means exactly one endpoint.
 	@ep=$$(grep -oE 'NumEndpoints = [0-9]+' \
-		$(MEMPOOL_DIR)/hardware/generated/floo_terapool_noc_pkg.sv \
+		$(generated_dir)/floo_terapool_noc_pkg.sv \
 		| grep -oE '[0-9]+'); \
 	peri=$$(grep -cE '^[[:space:]]*-[[:space:]]*name:[[:space:]]*"host_peri"' \
 		$(MEMPOOL_DIR)/config/$(floo_noc_cfg)); \
@@ -560,7 +573,7 @@ update-floogen: update-l2map
 	$(python) $(MEMPOOL_DIR)/hardware/scripts/gen_l2_bank_map.py \
 		--n $(num_x) --banks $(l2_banks) \
 		--check-yml $(MEMPOOL_DIR)/config/$(floo_noc_cfg) \
-		--check-sam $(MEMPOOL_DIR)/hardware/generated \
+		--check-sam $(generated_dir) \
 		$(l2map_addr_args)
 
 # L2/HBM bank -> mesh perimeter port map, and the system address map.
@@ -571,14 +584,17 @@ update-floogen: update-l2map
 # ranges. --check-bootrom catches a boot image left over from an older map:
 # it is PC-relative and checked in, so nothing else would notice.
 .PHONY: update-l2map
-update-l2map:
-	mkdir -p $(MEMPOOL_DIR)/hardware/generated
+update-l2map: $(generated_dir)/l2_bank_map_pkg.sv
+
+$(generated_dir)/l2_bank_map_pkg.sv: $(MEMPOOL_DIR)/config/$(floo_noc_cfg) \
+    $(MEMPOOL_DIR)/config/$(config).mk $(config_mk) scripts/gen_l2_bank_map.py Makefile
+	mkdir -p $(generated_dir)
 	$(python) $(MEMPOOL_DIR)/hardware/scripts/gen_l2_bank_map.py \
 		--n $(num_x) --banks $(l2_banks) \
 		--check-yml $(MEMPOOL_DIR)/config/$(floo_noc_cfg) \
 		$(l2map_addr_args) --boot-addr $(boot_addr) \
 		--check-bootrom $(MEMPOOL_DIR)/hardware/$(BOOTROM_IMAGE_PKG) \
-		-o $(MEMPOOL_DIR)/hardware/generated/l2_bank_map_pkg.sv
+		-o $(generated_dir)/l2_bank_map_pkg.sv
 
 # Compilation
 .PHONY: gen_selector
@@ -587,7 +603,7 @@ gen_selector: scripts/gen_xbar.py
 
 .PHONY: compile
 compile: update-floogen dpi lib $(buildpath) $(buildpath)/compile.tcl
-$(buildpath)/compile.tcl: $(SPATZ_PKG) $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
+$(buildpath)/compile.tcl: $(generated_pkgs) $(SPATZ_PKG) $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f) | lib
 	$(bender) script vsim --vlog-arg="$(vlog_args)" $(vlog_defs) -t rtl -t mempool_vsim $(bender_defs) > $(buildpath)/compile.tcl
 	echo "exit" >> $(buildpath)/compile.tcl
 	cd $(buildpath) && $(questa_cmd) vsim -work $(library) -c -do compile.tcl
@@ -643,6 +659,12 @@ fsync-shim-gate:
 	$(MAKE) simc top_level=tb_fsync_shim config=$(config) \
 	  questa_simc_args="-c"
 
+# Use a Spatz/FPU configuration so the remapper and matching id types are built.
+.PHONY: id-remap-gate
+id-remap-gate:
+	$(MAKE) simc top_level=tb_tcdm_id_remapper config=$(config) \
+	  questa_simc_args="-c -suppress 3009"
+
 # `quit -f` is not optional. Without it vsim drops to an interactive
 # `QuestaSim>` prompt when elaboration fails, so the run never terminates, the
 # runner keeps its flock, and every subsequent run is silently REFUSED -- while
@@ -672,7 +694,7 @@ $(buildpath)/$(dpi_library)/mempool_dpi.so: $(dpi)
 # Elaboration
 .PHONY: elabvcs elabvcs_debug
 elabvcs: dpivcs $(buildpath) $(buildpath)/compilevcs.sh
-$(buildpath)/compilevcs.sh: $(SPATZ_PKG) $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
+$(buildpath)/compilevcs.sh: $(generated_pkgs) $(SPATZ_PKG) $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f) | $(buildpath)
 	$(bender) script vcs --vlogan-bin="$(vcs_cmd) vlogan" --vlog-arg="$(vlogan_args) $(vlogan_opt_args)" $(vlog_defs) -t rtl -t mempool_vsim $(bender_defs) > $(buildpath)/compilevcs.sh
 	echo "exit" >> $(buildpath)/compilevcs.sh
 	# Call VCS
@@ -681,7 +703,7 @@ $(buildpath)/compilevcs.sh: $(SPATZ_PKG) $(bender) $(config_mk) Makefile $(MEMPO
 	./compilevcs.sh
 
 elabvcs_debug: dpivcs $(buildpath) $(buildpath)/compilevcs_debug.sh
-$(buildpath)/compilevcs_debug.sh: $(SPATZ_PKG) $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
+$(buildpath)/compilevcs_debug.sh: $(generated_pkgs) $(SPATZ_PKG) $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f) | $(buildpath)
 	$(bender) script vcs --vlogan-bin="$(vcs_cmd) vlogan" --vlog-arg="$(vlogan_args) $(vlogan_debug_args)" $(vlog_defs) -t rtl -t mempool_vsim $(bender_defs) > $(buildpath)/compilevcs_debug.sh
 	echo "exit" >> $(buildpath)/compilevcs_debug.sh
 	# Call VCS
@@ -764,7 +786,7 @@ endif
 ifeq ($(CI_REUSE_MODEL),true) # if ci already build the verilator model, don't rebuild again
 $(VERILATOR_MK): $(VERILATOR_CONF) $(VERILATOR_WAIVE) $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f) $(bender) $(config_mk) Makefile
 else
-$(VERILATOR_MK): update-floogen $(VERILATOR_CONF) $(VERILATOR_WAIVE) $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f) $(SPATZ_PKG) $(bender) $(config_mk) Makefile
+$(VERILATOR_MK): $(generated_pkgs) $(VERILATOR_CONF) $(VERILATOR_WAIVE) $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f) $(SPATZ_PKG) $(bender) $(config_mk) Makefile
 endif
 	rm -rf $(verilator_build); mkdir -p $(verilator_build)
 	# Overwrite Bootaddress to L2 base while we don't have a DPI to write a wake-up
@@ -831,7 +853,7 @@ lint-hier:
 
 # Build file list, use subst to remove the "32'd" which spyglass can't handle.
 # Always rebuilt, since it depends on the configuration.
-$(SPYGLASS_WORK_DIR)/tmp/files_%: $(BOOTROM_IMAGE_PKG) $(bender) FORCE
+$(SPYGLASS_WORK_DIR)/tmp/files_%: $(generated_pkgs) $(BOOTROM_IMAGE_PKG) $(bender) FORCE
 	mkdir -p $(SPYGLASS_WORK_DIR)/tmp
 	$(bender) script verilator $(subst 32\'d,,$(sg_defs)) -t rtl -t mempool_verilator $(bender_defs) > $@
 

@@ -291,6 +291,29 @@ app=apps/baremetal/hello_world make benchmark
 
 System configurations — such as total core count, tile size, and `xpulpimg` support — are set in [`config/config.mk`](config/config.mk).
 
+Run repository commands in the `teranoc` conda environment. Give concurrent RTL
+builds distinct `buildpath` values, for example `build_minpool` and `build_mempool`.
+Each hardware build generates its FlooNoC and L2-map packages under
+`<buildpath>/generated/<config>/`; Questa, VCS, Verilator, and lint source lists
+use those local packages. `make -C hardware update-floogen config=minpool
+buildpath=build_minpool` prepares them without compiling the RTL. Shared
+`hardware/generated/` files are not rewritten by hardware builds.
+
+Direct Bender invocations use the shared packages by default. To use a hardware
+build's packages, set `MEMPOOL_GENERATED_DIR` to their repository-relative path,
+such as `hardware/build_minpool/generated/minpool`. Software output directories
+remain shared: build applications sequentially and copy their ELFs before
+switching configurations. Use a fresh build directory or clean when changing
+the configuration or compile-time parameters of an existing build.
+Concurrent Verilator runs also need distinct `verilator_build` values, and lint
+runs need distinct `SPYGLASS_WORK_DIR` values for their tool outputs.
+
+The generation-isolation regression runs without a simulator license:
+`conda run -n teranoc python3 hardware/scripts/test_generated_isolation.py`.
+The remapper handshake regression runs with
+`make -C hardware id-remap-gate config=minpool_spatz4_fpu
+buildpath=build_remap_gate` in that environment.
+
 To simulate using **Verilator**, use the same command format, replacing `sim` with `verilate`:
 
 ```bash

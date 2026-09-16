@@ -65,8 +65,10 @@ sources:
   - hardware/src/floo_remapper.sv
   - hardware/src/routing_table_pkg.sv
   - hardware/src/mempool_group.sv
-  - hardware/generated/floo_terapool_noc_pkg.sv
-  - hardware/generated/l2_bank_map_pkg.sv
+  # Hardware builds export a repository-relative directory for their own
+  # generated packages. Direct Bender users retain the checked-in defaults.
+  - ${MEMPOOL_GENERATED_DIR:-hardware/generated}/floo_terapool_noc_pkg.sv
+  - ${MEMPOOL_GENERATED_DIR:-hardware/generated}/l2_bank_map_pkg.sv
   - hardware/src/mempool_group_floonoc_wrapper.sv
   # Level 3
   - hardware/src/mempool_cluster_floonoc_wrapper.sv
@@ -94,6 +96,9 @@ sources:
       # Shim driven only through its software-visible trigger, against a
       # real tree: covers id steering, wake broadcast and one-outstanding.
       - hardware/tb/tb_fsync_shim.sv
+      - target: spatz
+        files:
+          - hardware/tb/tb_tcdm_id_remapper.sv
       # Level 2
       - hardware/tb/mempool_tb.sv
       # DRAMsys
