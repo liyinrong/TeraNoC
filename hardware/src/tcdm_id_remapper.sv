@@ -4,11 +4,6 @@
 
 // Description: Merges N parallel TCDM requests into a single flow.
 //
-// The responses keep their per-requester identity in a table indexed by the id
-// the request went out with, and come back on one shared stream. Because a
-// requester can stop accepting before the network has finished with the
-// stream, each arm has its own one-entry buffer; see the skid below.
-//
 // Author: Matheus Cavalcante <matheusd@iis.ee.ethz.ch>
 
 module tcdm_id_remapper
@@ -162,66 +157,20 @@ module tcdm_id_remapper
     //  Response  //
     ////////////////
 
-    // Per-arm response skid.
-    //
-    // A plain demux would present oup_ready_i[sel] straight as the network
-    // accept, which means ONE arm that stops taking responses stops the WHOLE
-    // port: the tile stops accepting from the response network, and on the
-    // single-VC mesh every other requester of the tile starves behind it --
-    // including a scalar store-ack whose fence then never completes. That is
-    // the FFN decode wedge, and the FP sequence arm is the one that stalls: it
-    // waits for its own outstanding store, whose ack is queued behind the very
-    // response it is not accepting, so without a buffer here the wait is
-    // circular and permanent.
-    //
-    // One entry per arm breaks the cycle: the blocked response is absorbed, the
-    // stream advances, the ack lands, the arm unblocks and drains. A response
-    // that finds its arm ready with nothing older buffered goes straight
-    // through, so the common path keeps its latency, and per arm the order is
-    // exactly the arrival order.
-    logic               [NumIn-1:0] skid_valid_q;
-    snitch_pkg::dresp_t [NumIn-1:0] skid_data_q;
-
-    id_t sel;
-    assign sel = id_q[resp_i.id];
-
-    // The entry for this arm is free when it is empty, or when its content is
-    // being taken this cycle: a new response can land as the old one drains.
-    logic skid_drain, skid_free, resp_bypass;
-    assign skid_drain  = skid_valid_q[sel] & resp_ready_i[sel];
-    assign skid_free   = ~skid_valid_q[sel] | skid_drain;
-    assign resp_bypass = resp_valid_i & ~skid_valid_q[sel] & resp_ready_i[sel];
-
-    assign resp_ready_o = resp_valid_i ? (resp_bypass | skid_free) : 1'b1;
-
-    // Resolve the requester's own id on the way IN, never on the way out: the
-    // entry that maps it is freed as soon as this buffer takes the response, so
-    // by the time a stalled arm collects it the id may belong to a NEWER
-    // request and the arm would be handed someone else's id.
-    snitch_pkg::dresp_t resp_in;
-    always_comb begin
-      resp_in    = resp_i;
-      resp_in.id = remapped_id_q[resp_i.id];
-    end
-
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        skid_valid_q <= '0;
-      end else if (resp_valid_i & resp_ready_o & ~resp_bypass) begin
-        skid_valid_q[sel] <= 1'b1;
-      end else if (skid_drain) begin
-        skid_valid_q[sel] <= 1'b0;
-      end
-      if (resp_valid_i & resp_ready_o & ~resp_bypass)
-        skid_data_q[sel] <= resp_in;
-    end
+    stream_demux #(
+      .N_OUP(NumIn)
+    ) i_response_demux (
+      .inp_valid_i(resp_valid_i   ),
+      .inp_ready_o(resp_ready_o   ),
+      .oup_sel_i  (id_q[resp_i.id]),
+      .oup_ready_i(resp_ready_i   ),
+      .oup_valid_o(resp_valid_o   )
+    );
 
     always_comb begin
-      resp_o       = skid_data_q;
-      resp_valid_o = skid_valid_q;
-      if (resp_bypass) begin
-        resp_o[sel]       = resp_in;
-        resp_valid_o[sel] = 1'b1;
+      for (int i = 0; i < NumIn; i++) begin
+        resp_o[i]    = resp_i;
+        resp_o[i].id = remapped_id_q[resp_i.id];
       end
     end
   end: gen_remapper
