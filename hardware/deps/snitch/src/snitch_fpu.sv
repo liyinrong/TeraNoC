@@ -91,6 +91,9 @@ module snitch_fpu
     .vectorial_op_i  ( fpu_in.vectorial_op   ),
     .tag_i           ( fpu_in.tag            ),
     .simd_mask_i     ( '1                    ),
+    // PACE is not instantiated (no PACE formats configured)
+    .pace_param_i    ( '0                    ),
+    .pace_mode_i     ( '0                    ),
     .in_valid_i      ( in_valid_i            ),
     .in_ready_o      ( in_ready_o            ),
     .flush_i         ( 1'b0                  ),

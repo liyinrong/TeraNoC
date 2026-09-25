@@ -38,7 +38,7 @@ index 7310b02..eb9a217 100644
              `ifndef MEMPOOL_SPATZ
  
 diff --git a/hardware/deps/spatz_vpu/hw/src/spatz_vfu.sv b/hardware/deps/spatz_vpu/hw/src/spatz_vfu.sv
-index 714bd96..9a91657 100644
+index 714bd96..b16c900 100644
 --- a/hardware/deps/spatz_vpu/hw/src/spatz_vfu.sv
 +++ b/hardware/deps/spatz_vpu/hw/src/spatz_vfu.sv
 @@ -472,7 +472,17 @@ module spatz_vfu
@@ -133,6 +133,16 @@ index 714bd96..9a91657 100644
          `endif
          lat_count_d = (result_valid[0] || (red_hold_cnt_q != 0)) ? '0 : lat_count_q + 1;
  
+@@ -1745,6 +1768,9 @@ assign vfcmp_result_accepted = result_tag.is_cmp && &(result_valid | ~pending_re
+         .op_mod_i      (fpu_op_mode_q                                          ),
+         .tag_i         (input_tag_q                                            ),
+         .simd_mask_i   ('1                                                     ),
++        // PACE is not instantiated (no PACE formats configured)
++        .pace_param_i  ('0                                                     ),
++        .pace_mode_i   ('0                                                     ),
+         .rnd_mode_i    (rm_q                                                   ),
+         .result_o      (fpu_result[fpu*ELEN +: ELEN]                           ),
+         .out_valid_o   (int_fpu_result_valid                                   ),
 diff --git a/hardware/deps/spatz_vpu/hw/src/spatz_vsldu.sv b/hardware/deps/spatz_vpu/hw/src/spatz_vsldu.sv
 index 5182161..f478965 100644
 --- a/hardware/deps/spatz_vpu/hw/src/spatz_vsldu.sv

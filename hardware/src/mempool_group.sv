@@ -186,7 +186,7 @@ module mempool_group
       .clk_i                   (clk_i                                          ),
       .rst_ni                  (rst_ni                                         ),
       .scan_enable_i           (scan_enable_i                                  ),
-      .scan_data_i             (/* Unconnected */                              ),
+      .scan_data_i             (1'b0 /* stitched by DFT insertion */           ),
       .scan_data_o             (/* Unconnected */                              ),
       .tile_id_i               (id                                             ),
       // TCDM Master interfaces
