@@ -244,7 +244,7 @@ module mempool_cluster_floonoc_wrapper
           .rst_ni                     (rst_ni),
           .testmode_i                 (testmode_i),
           .scan_enable_i              (scan_enable_i),
-          .scan_data_i                (/* Unconnected */),
+          .scan_data_i                (1'b0), // stitched by DFT insertion
           .scan_data_o                (/* Unconnected */),
           .group_id_i                 (group_id_t'({group_id.x, group_id.y})),
           .floo_id_i                  (id_t'(GroupX0Y0 + x*NumY + y)),
@@ -280,7 +280,7 @@ module mempool_cluster_floonoc_wrapper
           .rst_ni                     (rst_ni),
           .testmode_i                 (testmode_i),
           .scan_enable_i              (scan_enable_i),
-          .scan_data_i                (/* Unconnected */),
+          .scan_data_i                (1'b0), // stitched by DFT insertion
           .scan_data_o                (/* Unconnected */),
           .group_id_i                 (group_id_t'({group_id.x, group_id.y})),
           .floo_id_i                  (id_t'(GroupX0Y0 + x*NumY + y)),

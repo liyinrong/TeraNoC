@@ -66,6 +66,9 @@ module tcdm_id_remapper
     // builds, where RobDepth == 2**MetaIdWidth already); this removes the implicit
     // invariant that made that true.
     localparam int unsigned NumIds = 2**MetaIdWidth;
+    // lzc count, widened explicitly into the (wider) meta_id_t
+    logic [cf_math_pkg::idx_width(NumIds)-1:0] next_idx;
+    assign next_id = meta_id_t'(next_idx);
 
     meta_id_t [NumIds-1:0] remapped_id_q, remapped_id_d;
     logic [NumIds-1:0] remapped_id_valid_q, remapped_id_valid_d;
@@ -81,7 +84,7 @@ module tcdm_id_remapper
       .WIDTH(NumIds)
     ) i_next_id_lzc (
       .in_i   (~remapped_id_valid_q),
-      .cnt_o  (next_id             ),
+      .cnt_o  (next_idx            ),
       .empty_o(no_free_id          )
     );
 
