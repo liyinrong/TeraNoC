@@ -1,0 +1,17 @@
+diff --git a/hardware/deps/redmule/rtl/redmule_scheduler.sv b/hardware/deps/redmule/rtl/redmule_scheduler.sv
+index e06e90e..4ed5d59 100644
+--- a/hardware/deps/redmule/rtl/redmule_scheduler.sv
++++ b/hardware/deps/redmule/rtl/redmule_scheduler.sv
+@@ -805,8 +805,10 @@ module redmule_scheduler
+     row_clk_en_d = '0;
+ 
+     if (computing && ~stall_engine) begin
+-      for (int i = 0; i < z_width; i++) begin
+-        row_clk_en_d[i] = 1'b1;
++      // Constant bound: z_width is $clog2(W)+1 bits, so a z_width-bounded loop
++      // unrolls past W and indexes out of range.
++      for (int i = 0; i < W; i++) begin
++        row_clk_en_d[i] = (i < z_width);
+       end
+     end
+   end
