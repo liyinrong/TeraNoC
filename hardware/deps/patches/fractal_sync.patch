@@ -14,7 +14,7 @@ index 1a6646c..6553eec 100644
  /*******************************************************/
  /**           Parameters and Definitions End          **/
 diff --git a/hardware/deps/fractal_sync/hw/fractal_sync_pkg.sv b/hardware/deps/fractal_sync/hw/fractal_sync_pkg.sv
-index 745cfa4..301336a 100644
+index 745cfa4..f6f50e1 100644
 --- a/hardware/deps/fractal_sync/hw/fractal_sync_pkg.sv
 +++ b/hardware/deps/fractal_sync/hw/fractal_sync_pkg.sv
 @@ -20,8 +20,8 @@
@@ -28,6 +28,20 @@ index 745cfa4..301336a 100644
  
    localparam int unsigned SD_WIDTH = 2;
  
+@@ -62,4 +62,12 @@ package fractal_sync_pkg;
+     EN_REMOTE_RF  = 1 
+   } en_remote_rf_e;
+ 
++  // Integer square root for elaboration-time sizing. $sqrt returns a real,
++  // and SpyGlass carries that real through int-typed localparams, turning the
++  // trees' integer / and % into rounded real ones (out-of-range indices).
++  function automatic int unsigned isqrt(input int unsigned n);
++    isqrt = 0;
++    for (int unsigned r = 1; r*r <= n; r++) isqrt = r;
++  endfunction
++
+ endpackage: fractal_sync_pkg
+\ No newline at end of file
 diff --git a/hardware/deps/fractal_sync/hw/fractal_sync_remote_rf.sv b/hardware/deps/fractal_sync/hw/fractal_sync_remote_rf.sv
 index 8f864c4..0f1ce23 100644
 --- a/hardware/deps/fractal_sync/hw/fractal_sync_remote_rf.sv
@@ -51,7 +65,7 @@ index 8f864c4..0f1ce23 100644
    localparam int unsigned                                          MAX_LOOKUP_LVL_WIDTH = LVL_LOOKUP_WIDTH-1;
    localparam logic[LVL_LOOKUP_WIDTH-1:0][MAX_LOOKUP_LVL_WIDTH-1:0] LVL_SIG_LOOKUP       = '{'b1010_1010_1010_1010,  // Sentinel
 diff --git a/hardware/deps/fractal_sync/hw/trees/fractal_sync_16x16.sv b/hardware/deps/fractal_sync/hw/trees/fractal_sync_16x16.sv
-index a1c4ae0..69770e9 100644
+index a1c4ae0..0772066 100644
 --- a/hardware/deps/fractal_sync/hw/trees/fractal_sync_16x16.sv
 +++ b/hardware/deps/fractal_sync/hw/trees/fractal_sync_16x16.sv
 @@ -65,8 +65,8 @@
@@ -65,6 +79,47 @@ index a1c4ae0..69770e9 100644
  
  package fractal_sync_16x16_pkg;
  
+@@ -288,11 +288,11 @@ module fractal_sync_16x16_core
+   for (genvar i = 0; i < N_LEAF_FSYNC_NETWORKS; i++) begin: gen_h_1d_leaf_fsync_net_req_rsp
+     for (genvar j = 0; j < N_1D_H_LEAF_PORTS; j++) begin
+       for (genvar k = 0; k < N_LINKS_IN; k++) begin
+-        localparam int unsigned LEAF_NET_ROWS = $sqrt(N_1D_H_LEAF_PORTS);
++        localparam int unsigned LEAF_NET_ROWS = fractal_sync_pkg::isqrt(N_1D_H_LEAF_PORTS);
+         localparam int unsigned LEAF_NET_COLS = LEAF_NET_ROWS;
+-        localparam int unsigned ROOT_NET_ROWS = $sqrt(N_LEAF_FSYNC_NETWORKS);
++        localparam int unsigned ROOT_NET_ROWS = fractal_sync_pkg::isqrt(N_LEAF_FSYNC_NETWORKS);
+         localparam int unsigned ROOT_NET_COLS = ROOT_NET_ROWS;
+-        localparam int unsigned NET_ROWS      = $sqrt(N_1D_H_PORTS);
++        localparam int unsigned NET_ROWS      = fractal_sync_pkg::isqrt(N_1D_H_PORTS);
+         localparam int unsigned NET_COLS      = NET_ROWS;
+ 
+         localparam int unsigned leaf_net_row_idx = j/LEAF_NET_COLS;
+@@ -312,11 +312,11 @@ module fractal_sync_16x16_core
+   for (genvar i = 0; i < N_LEAF_FSYNC_NETWORKS; i++) begin: gen_v_1d_leaf_fsync_net_req_rsp
+     for (genvar j = 0; j < N_1D_V_LEAF_PORTS; j++) begin
+       for (genvar k = 0; k < N_LINKS_IN; k++) begin
+-        localparam int unsigned LEAF_NET_ROWS = $sqrt(N_1D_V_LEAF_PORTS);
++        localparam int unsigned LEAF_NET_ROWS = fractal_sync_pkg::isqrt(N_1D_V_LEAF_PORTS);
+         localparam int unsigned LEAF_NET_COLS = LEAF_NET_ROWS;
+-        localparam int unsigned ROOT_NET_ROWS = $sqrt(N_LEAF_FSYNC_NETWORKS);
++        localparam int unsigned ROOT_NET_ROWS = fractal_sync_pkg::isqrt(N_LEAF_FSYNC_NETWORKS);
+         localparam int unsigned ROOT_NET_COLS = ROOT_NET_ROWS;
+-        localparam int unsigned NET_ROWS      = $sqrt(N_1D_V_PORTS);
++        localparam int unsigned NET_ROWS      = fractal_sync_pkg::isqrt(N_1D_V_PORTS);
+         localparam int unsigned NET_COLS      = NET_ROWS;
+ 
+         localparam int unsigned leaf_net_row_idx = j/LEAF_NET_COLS;
+@@ -511,8 +511,8 @@ module fractal_sync_16x16
+ /**        Parameters and Definitions Beginning       **/
+ /*******************************************************/
+ 
+-  localparam int unsigned N_H_NBR_NODES  = $sqrt(N_NBR_H_PORTS);
+-  localparam int unsigned N_V_NBR_NODES  = $sqrt(N_NBR_V_PORTS);
++  localparam int unsigned N_H_NBR_NODES  = fractal_sync_pkg::isqrt(N_NBR_H_PORTS);
++  localparam int unsigned N_V_NBR_NODES  = fractal_sync_pkg::isqrt(N_NBR_V_PORTS);
+   localparam int unsigned LAST_H_NBR_IDX = N_H_NBR_NODES-1;
+   localparam int unsigned LAST_V_NBR_IDX = N_V_NBR_NODES-1;
+   localparam int unsigned N_NBR_PORTS    = 2;
 diff --git a/hardware/deps/fractal_sync/hw/trees/fractal_sync_2x2.sv b/hardware/deps/fractal_sync/hw/trees/fractal_sync_2x2.sv
 index 8d5b4e9..f414984 100644
 --- a/hardware/deps/fractal_sync/hw/trees/fractal_sync_2x2.sv
@@ -81,7 +136,7 @@ index 8d5b4e9..f414984 100644
  package fractal_sync_2x2_pkg;
  
 diff --git a/hardware/deps/fractal_sync/hw/trees/fractal_sync_32x32.sv b/hardware/deps/fractal_sync/hw/trees/fractal_sync_32x32.sv
-index ec72a59..10480a0 100644
+index ec72a59..a513440 100644
 --- a/hardware/deps/fractal_sync/hw/trees/fractal_sync_32x32.sv
 +++ b/hardware/deps/fractal_sync/hw/trees/fractal_sync_32x32.sv
 @@ -65,8 +65,8 @@
@@ -95,8 +150,49 @@ index ec72a59..10480a0 100644
  
  package fractal_sync_32x32_pkg;
  
+@@ -292,11 +292,11 @@ module fractal_sync_32x32_core
+   for (genvar i = 0; i < N_LEAF_FSYNC_NETWORKS; i++) begin: gen_h_1d_leaf_fsync_net_req_rsp
+     for (genvar j = 0; j < N_1D_H_LEAF_PORTS; j++) begin
+       for (genvar k = 0; k < N_LINKS_IN; k++) begin
+-        localparam int unsigned LEAF_NET_ROWS = $sqrt(N_1D_H_LEAF_PORTS);
++        localparam int unsigned LEAF_NET_ROWS = fractal_sync_pkg::isqrt(N_1D_H_LEAF_PORTS);
+         localparam int unsigned LEAF_NET_COLS = LEAF_NET_ROWS;
+-        localparam int unsigned ROOT_NET_ROWS = $sqrt(N_LEAF_FSYNC_NETWORKS);
++        localparam int unsigned ROOT_NET_ROWS = fractal_sync_pkg::isqrt(N_LEAF_FSYNC_NETWORKS);
+         localparam int unsigned ROOT_NET_COLS = ROOT_NET_ROWS;
+-        localparam int unsigned NET_ROWS      = $sqrt(N_1D_H_PORTS);
++        localparam int unsigned NET_ROWS      = fractal_sync_pkg::isqrt(N_1D_H_PORTS);
+         localparam int unsigned NET_COLS      = NET_ROWS;
+ 
+         localparam int unsigned leaf_net_row_idx = j/LEAF_NET_COLS;
+@@ -316,11 +316,11 @@ module fractal_sync_32x32_core
+   for (genvar i = 0; i < N_LEAF_FSYNC_NETWORKS; i++) begin: gen_v_1d_leaf_fsync_net_req_rsp
+     for (genvar j = 0; j < N_1D_V_LEAF_PORTS; j++) begin
+       for (genvar k = 0; k < N_LINKS_IN; k++) begin
+-        localparam int unsigned LEAF_NET_ROWS = $sqrt(N_1D_V_LEAF_PORTS);
++        localparam int unsigned LEAF_NET_ROWS = fractal_sync_pkg::isqrt(N_1D_V_LEAF_PORTS);
+         localparam int unsigned LEAF_NET_COLS = LEAF_NET_ROWS;
+-        localparam int unsigned ROOT_NET_ROWS = $sqrt(N_LEAF_FSYNC_NETWORKS);
++        localparam int unsigned ROOT_NET_ROWS = fractal_sync_pkg::isqrt(N_LEAF_FSYNC_NETWORKS);
+         localparam int unsigned ROOT_NET_COLS = ROOT_NET_ROWS;
+-        localparam int unsigned NET_ROWS      = $sqrt(N_1D_V_PORTS);
++        localparam int unsigned NET_ROWS      = fractal_sync_pkg::isqrt(N_1D_V_PORTS);
+         localparam int unsigned NET_COLS      = NET_ROWS;
+ 
+         localparam int unsigned leaf_net_row_idx = j/LEAF_NET_COLS;
+@@ -515,8 +515,8 @@ module fractal_sync_32x32
+ /**        Parameters and Definitions Beginning       **/
+ /*******************************************************/
+ 
+-  localparam int unsigned N_H_NBR_NODES  = $sqrt(N_NBR_H_PORTS);
+-  localparam int unsigned N_V_NBR_NODES  = $sqrt(N_NBR_V_PORTS);
++  localparam int unsigned N_H_NBR_NODES  = fractal_sync_pkg::isqrt(N_NBR_H_PORTS);
++  localparam int unsigned N_V_NBR_NODES  = fractal_sync_pkg::isqrt(N_NBR_V_PORTS);
+   localparam int unsigned LAST_H_NBR_IDX = N_H_NBR_NODES-1;
+   localparam int unsigned LAST_V_NBR_IDX = N_V_NBR_NODES-1;
+   localparam int unsigned N_NBR_PORTS    = 2;
 diff --git a/hardware/deps/fractal_sync/hw/trees/fractal_sync_4x4.sv b/hardware/deps/fractal_sync/hw/trees/fractal_sync_4x4.sv
-index d73ea7a..085363c 100644
+index d73ea7a..abe0bcf 100644
 --- a/hardware/deps/fractal_sync/hw/trees/fractal_sync_4x4.sv
 +++ b/hardware/deps/fractal_sync/hw/trees/fractal_sync_4x4.sv
 @@ -65,8 +65,8 @@
@@ -110,8 +206,49 @@ index d73ea7a..085363c 100644
  
  package fractal_sync_4x4_pkg;
  
+@@ -276,11 +276,11 @@ module fractal_sync_4x4_core
+   for (genvar i = 0; i < N_LEAF_FSYNC_NETWORKS; i++) begin: gen_h_1d_leaf_fsync_net_req_rsp
+     for (genvar j = 0; j < N_1D_H_LEAF_PORTS; j++) begin
+       for (genvar k = 0; k < N_LINKS_IN; k++) begin
+-        localparam int unsigned LEAF_NET_ROWS = $sqrt(N_1D_H_LEAF_PORTS);
++        localparam int unsigned LEAF_NET_ROWS = fractal_sync_pkg::isqrt(N_1D_H_LEAF_PORTS);
+         localparam int unsigned LEAF_NET_COLS = LEAF_NET_ROWS;
+-        localparam int unsigned ROOT_NET_ROWS = $sqrt(N_LEAF_FSYNC_NETWORKS);
++        localparam int unsigned ROOT_NET_ROWS = fractal_sync_pkg::isqrt(N_LEAF_FSYNC_NETWORKS);
+         localparam int unsigned ROOT_NET_COLS = ROOT_NET_ROWS;
+-        localparam int unsigned NET_ROWS      = $sqrt(N_1D_H_PORTS);
++        localparam int unsigned NET_ROWS      = fractal_sync_pkg::isqrt(N_1D_H_PORTS);
+         localparam int unsigned NET_COLS      = NET_ROWS;
+ 
+         localparam int unsigned leaf_net_row_idx = j/LEAF_NET_COLS;
+@@ -300,11 +300,11 @@ module fractal_sync_4x4_core
+   for (genvar i = 0; i < N_LEAF_FSYNC_NETWORKS; i++) begin: gen_v_1d_leaf_fsync_net_req_rsp
+     for (genvar j = 0; j < N_1D_V_LEAF_PORTS; j++) begin
+       for (genvar k = 0; k < N_LINKS_IN; k++) begin
+-        localparam int unsigned LEAF_NET_ROWS = $sqrt(N_1D_V_LEAF_PORTS);
++        localparam int unsigned LEAF_NET_ROWS = fractal_sync_pkg::isqrt(N_1D_V_LEAF_PORTS);
+         localparam int unsigned LEAF_NET_COLS = LEAF_NET_ROWS;
+-        localparam int unsigned ROOT_NET_ROWS = $sqrt(N_LEAF_FSYNC_NETWORKS);
++        localparam int unsigned ROOT_NET_ROWS = fractal_sync_pkg::isqrt(N_LEAF_FSYNC_NETWORKS);
+         localparam int unsigned ROOT_NET_COLS = ROOT_NET_ROWS;
+-        localparam int unsigned NET_ROWS      = $sqrt(N_1D_V_PORTS);
++        localparam int unsigned NET_ROWS      = fractal_sync_pkg::isqrt(N_1D_V_PORTS);
+         localparam int unsigned NET_COLS      = NET_ROWS;
+ 
+         localparam int unsigned leaf_net_row_idx = j/LEAF_NET_COLS;
+@@ -499,8 +499,8 @@ module fractal_sync_4x4
+ /**        Parameters and Definitions Beginning       **/
+ /*******************************************************/
+ 
+-  localparam int unsigned N_H_NBR_NODES  = $sqrt(N_NBR_H_PORTS);
+-  localparam int unsigned N_V_NBR_NODES  = $sqrt(N_NBR_V_PORTS);
++  localparam int unsigned N_H_NBR_NODES  = fractal_sync_pkg::isqrt(N_NBR_H_PORTS);
++  localparam int unsigned N_V_NBR_NODES  = fractal_sync_pkg::isqrt(N_NBR_V_PORTS);
+   localparam int unsigned LAST_H_NBR_IDX = N_H_NBR_NODES-1;
+   localparam int unsigned LAST_V_NBR_IDX = N_V_NBR_NODES-1;
+   localparam int unsigned N_NBR_PORTS    = 2;
 diff --git a/hardware/deps/fractal_sync/hw/trees/fractal_sync_8x8.sv b/hardware/deps/fractal_sync/hw/trees/fractal_sync_8x8.sv
-index e174300..2132c40 100644
+index e174300..ff6ad34 100644
 --- a/hardware/deps/fractal_sync/hw/trees/fractal_sync_8x8.sv
 +++ b/hardware/deps/fractal_sync/hw/trees/fractal_sync_8x8.sv
 @@ -65,8 +65,8 @@
@@ -125,3 +262,44 @@ index e174300..2132c40 100644
  
  package fractal_sync_8x8_pkg;
  
+@@ -284,11 +284,11 @@ module fractal_sync_8x8_core
+   for (genvar i = 0; i < N_LEAF_FSYNC_NETWORKS; i++) begin: gen_h_1d_leaf_fsync_net_req_rsp
+     for (genvar j = 0; j < N_1D_H_LEAF_PORTS; j++) begin
+       for (genvar k = 0; k < N_LINKS_IN; k++) begin
+-        localparam int unsigned LEAF_NET_ROWS = $sqrt(N_1D_H_LEAF_PORTS);
++        localparam int unsigned LEAF_NET_ROWS = fractal_sync_pkg::isqrt(N_1D_H_LEAF_PORTS);
+         localparam int unsigned LEAF_NET_COLS = LEAF_NET_ROWS;
+-        localparam int unsigned ROOT_NET_ROWS = $sqrt(N_LEAF_FSYNC_NETWORKS);
++        localparam int unsigned ROOT_NET_ROWS = fractal_sync_pkg::isqrt(N_LEAF_FSYNC_NETWORKS);
+         localparam int unsigned ROOT_NET_COLS = ROOT_NET_ROWS;
+-        localparam int unsigned NET_ROWS      = $sqrt(N_1D_H_PORTS);
++        localparam int unsigned NET_ROWS      = fractal_sync_pkg::isqrt(N_1D_H_PORTS);
+         localparam int unsigned NET_COLS      = NET_ROWS;
+ 
+         localparam int unsigned leaf_net_row_idx = j/LEAF_NET_COLS;
+@@ -308,11 +308,11 @@ module fractal_sync_8x8_core
+   for (genvar i = 0; i < N_LEAF_FSYNC_NETWORKS; i++) begin: gen_v_1d_leaf_fsync_net_req_rsp
+     for (genvar j = 0; j < N_1D_V_LEAF_PORTS; j++) begin
+       for (genvar k = 0; k < N_LINKS_IN; k++) begin
+-        localparam int unsigned LEAF_NET_ROWS = $sqrt(N_1D_V_LEAF_PORTS);
++        localparam int unsigned LEAF_NET_ROWS = fractal_sync_pkg::isqrt(N_1D_V_LEAF_PORTS);
+         localparam int unsigned LEAF_NET_COLS = LEAF_NET_ROWS;
+-        localparam int unsigned ROOT_NET_ROWS = $sqrt(N_LEAF_FSYNC_NETWORKS);
++        localparam int unsigned ROOT_NET_ROWS = fractal_sync_pkg::isqrt(N_LEAF_FSYNC_NETWORKS);
+         localparam int unsigned ROOT_NET_COLS = ROOT_NET_ROWS;
+-        localparam int unsigned NET_ROWS      = $sqrt(N_1D_V_PORTS);
++        localparam int unsigned NET_ROWS      = fractal_sync_pkg::isqrt(N_1D_V_PORTS);
+         localparam int unsigned NET_COLS      = NET_ROWS;
+ 
+         localparam int unsigned leaf_net_row_idx = j/LEAF_NET_COLS;
+@@ -507,8 +507,8 @@ module fractal_sync_8x8
+ /**        Parameters and Definitions Beginning       **/
+ /*******************************************************/
+ 
+-  localparam int unsigned N_H_NBR_NODES  = $sqrt(N_NBR_H_PORTS);
+-  localparam int unsigned N_V_NBR_NODES  = $sqrt(N_NBR_V_PORTS);
++  localparam int unsigned N_H_NBR_NODES  = fractal_sync_pkg::isqrt(N_NBR_H_PORTS);
++  localparam int unsigned N_V_NBR_NODES  = fractal_sync_pkg::isqrt(N_NBR_V_PORTS);
+   localparam int unsigned LAST_H_NBR_IDX = N_H_NBR_NODES-1;
+   localparam int unsigned LAST_V_NBR_IDX = N_V_NBR_NODES-1;
+   localparam int unsigned N_NBR_PORTS    = 2;
