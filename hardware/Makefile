@@ -799,18 +799,46 @@ verilate: $(VERILATOR_EXE) $(buildpath) Makefile
 #############
 SPYGLASS_WORK_DIR ?= spyglass
 
-.PHONY: lint $(SPYGLASS_WORK_DIR)/tmp/files
+.PHONY: lint lint-hier FORCE
 
 SNPS_SG ?= spyglass-2022.06
 SG_SCRIPT_PATH ?= scripts
 SG_SCRIPT_SUF ?=
-lint: update-floogen $(SPYGLASS_WORK_DIR)/tmp/files $(SPYGLASS_WORK_DIR)/sdc/func.sdc $(SPYGLASS_WORK_DIR)/scripts/run_lint.tcl
-	cd $(SPYGLASS_WORK_DIR); config=$(config) $(SNPS_SG) sg_shell -tcl $(SG_SCRIPT_PATH)/run_lint$(SG_SCRIPT_SUF).tcl
+# What `lint` checks:
+#   cluster    - the whole cluster, flattened
+#   group      - mempool_group_floonoc_wrapper, the backend's PnR block
+#   cluster_bb - the cluster with every group black-boxed
+# A flat 16-group cluster needs far more than 62 GB; `lint-hier` runs group
+# and cluster_bb instead, which together cover the same RTL.
+lint_scope ?= cluster
+# File list and project name, relative to $(SPYGLASS_WORK_DIR)
+SG_FILES ?= tmp/files_$(config)
+SG_NAME  ?= $(config)_$(lint_scope)
+sg_log   := $(SPYGLASS_WORK_DIR)/tmp/lint_$(SG_NAME).log
+# Simulation-only instrumentation stays out of the linted RTL
+sg_defs  := $(filter-out -DSNITCH_TRACE=% -DSPATZ_LD_TRACE=% -DSPM_PROFILING=% \
+              -DNOC_PROFILING=% -DSPATZ_PROFILING=%,$(vlog_defs))
 
-# Build file list, use subst to remove the "32'd" which spyglass can't handle
-$(SPYGLASS_WORK_DIR)/tmp/files%: $(BOOTROM_IMAGE_PKG) $(bender)
+lint: update-floogen $(SPYGLASS_WORK_DIR)/$(SG_FILES) $(SPYGLASS_WORK_DIR)/sdc/func.sdc $(SPYGLASS_WORK_DIR)/scripts/run_lint.tcl
+	mkdir -p $(dir $(sg_log))
+	set -o pipefail; cd $(SPYGLASS_WORK_DIR); \
+	  config=$(config) terapool=$(terapool) lint_scope=$(lint_scope) \
+	  SG_FILES=$(SG_FILES) SG_NAME=$(SG_NAME) \
+	  $(SNPS_SG) sg_shell -tcl $(SG_SCRIPT_PATH)/run_lint$(SG_SCRIPT_SUF).tcl 2>&1 | tee $(abspath $(sg_log))
+	@# sg_shell exits 0 even when it aborts on a fatal error
+	@! grep -q '^FATAL' $(sg_log) || { echo "ERROR: SpyGlass aborted, see $(sg_log)"; exit 1; }
+
+lint-hier:
+	$(MAKE) lint lint_scope=group
+	$(MAKE) lint lint_scope=cluster_bb
+
+# Build file list, use subst to remove the "32'd" which spyglass can't handle.
+# Always rebuilt, since it depends on the configuration.
+$(SPYGLASS_WORK_DIR)/tmp/files_%: $(BOOTROM_IMAGE_PKG) $(bender) FORCE
 	mkdir -p $(SPYGLASS_WORK_DIR)/tmp
-	$(bender) script verilator $(subst 32\'d,,$(vlog_defs)) -t rtl -t mempool_verilator $(bender_defs) > $@
+	$(bender) script verilator $(subst 32\'d,,$(sg_defs)) -t rtl -t mempool_verilator $(bender_defs) > $@
+
+FORCE:
 
 ################
 # Tracing      #

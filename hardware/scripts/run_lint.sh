@@ -11,10 +11,10 @@
 #   - Disk usage (DISK_THRESHOLD)
 #   - CPU usage (CPU_THRESHOLD)
 #
-# For each configuration, it also copies the TCL script from spyglass/scripts/run_lint.tcl
-# to spyglass/tmp/, renames it to run_lint<SG_SCRIPT_SUF>.tcl (where SG_SCRIPT_SUF is the
-# combination of configuration options, compressed with abbreviated keys), and passes
-# SG_SCRIPT_PATH and SG_SCRIPT_SUF to the make lint command.
+# For each configuration, it builds a file list under spyglass/tmp/flist/ and passes
+# SG_FILES (that list) and SG_NAME (SG_SCRIPT_SUF, the combination of configuration
+# options compressed with abbreviated keys, without the leading underscore) to the
+# make lint command, which names the sg_projects folder after SG_NAME.
 #
 # After the lint run finishes, it copies the generated report from the matching
 # sg_projects folder to spyglass/reports/ (renaming it accordingly) and removes the
@@ -163,7 +163,6 @@ noc_router_remap_group_size=("2" "4" "8" "16")
 # Create necessary directories.
 mkdir -p ${SPYGLASS_WORK_DIR}/tmp/jobs
 mkdir -p ${SPYGLASS_WORK_DIR}/tmp/flist
-mkdir -p ${SPYGLASS_WORK_DIR}/tmp/tcl
 mkdir -p ${SPYGLASS_WORK_DIR}/reports
 
 # Iterate over all configuration combinations.
@@ -215,31 +214,14 @@ for config in "${configs[@]}"; do
                           #   noc_router_remap_group_size=> rs
                           SG_SCRIPT_SUF="_c${config}_t${tile_id_remap}_s${spm_bank_id_remap}_wo${narrow_wo_channel}_ro${narrow_ro_channel}_rw${narrow_rw_channel}_rd${narrow_rw_resp_channel}_top${topology}_ra${routing_algo}_rm${req_remap}_rsm${resp_remap}_vc${virt_chan}_in${input_fifo}_out${output_fifo}_rs${remap_size}"
 
-                          # Copy the run_lint.tcl file into the tmp directory with a new name.
-                          tcl_src="${SPYGLASS_WORK_DIR}/scripts/run_lint.tcl"
-                          tcl_dest="${SPYGLASS_WORK_DIR}/tmp/tcl/run_lint${SG_SCRIPT_SUF}.tcl"
-                          cp -p "$tcl_src" "$tcl_dest"
-
-                          # In the newly copied file, replace "set PROJECT_FOLDER_NAME   mempool"
-                          # with "set PROJECT_FOLDER_NAME   <SG_SCRIPT_SUF without the leading underscore>"
-                          sed -i 's/set PROJECT_FOLDER_NAME\s\+mempool/set PROJECT_FOLDER_NAME   '"${SG_SCRIPT_SUF#_}"'/g' "$tcl_dest"
-                          sed -i 's/set PROJECT_FOLDER_NAME\s\+terapool/set PROJECT_FOLDER_NAME   '"${SG_SCRIPT_SUF#_}"'/g' "$tcl_dest"
-                          # Also modify the read_file command.
-                          sed -i 's/read_file -type sourcelist tmp\/files/read_file -type sourcelist tmp\/flist\/files_'"${SG_SCRIPT_SUF#_}"'/g' "$tcl_dest"
-
-                          # Remove the specific three lines explicitly
-                          sed -i '/^# Create a link to the results$/d' "$tcl_dest"
-                          sed -i '/^exec rm -rf sg_projects\/\${PROJECT}$/d' "$tcl_dest"
-                          sed -i '/^exec ln -sf \${PROJECT_FOLDER_NAME}_\${TIMESTAMP} sg_projects\/\${PROJECT}$/d' "$tcl_dest"
-
                           # Generate the file list.
                           rm ${SPYGLASS_WORK_DIR}/tmp/files_${SG_SCRIPT_SUF#_}
-                          cmd_flist="SG_SCRIPT_PATH=tmp/tcl SG_SCRIPT_SUF=${SG_SCRIPT_SUF} config=${config} tile_id_remap=${tile_id_remap} spm_bank_id_remap=${spm_bank_id_remap} noc_req_narrow_wo_channel_num=${narrow_wo_channel} noc_req_narrow_ro_channel_num=${narrow_ro_channel} noc_req_narrow_rw_channel_num=${narrow_rw_channel} noc_resp_narrow_rw_channel_num=${narrow_rw_resp_channel} topology=${topology} routing_algorithm=${routing_algo} req_remapping=${req_remap} resp_remapping=${resp_remap} num_virtual_channel=${virt_chan} noc_router_input_fifo_dep=${input_fifo} noc_router_output_fifo_dep=${output_fifo} noc_router_remap_group_size=${remap_size} make ${SPYGLASS_WORK_DIR}/tmp/files_${SG_SCRIPT_SUF#_} SPYGLASS_WORK_DIR=${SPYGLASS_WORK_DIR}"
+                          cmd_flist="config=${config} tile_id_remap=${tile_id_remap} spm_bank_id_remap=${spm_bank_id_remap} noc_req_narrow_wo_channel_num=${narrow_wo_channel} noc_req_narrow_ro_channel_num=${narrow_ro_channel} noc_req_narrow_rw_channel_num=${narrow_rw_channel} noc_resp_narrow_rw_channel_num=${narrow_rw_resp_channel} topology=${topology} routing_algorithm=${routing_algo} req_remapping=${req_remap} resp_remapping=${resp_remap} num_virtual_channel=${virt_chan} noc_router_input_fifo_dep=${input_fifo} noc_router_output_fifo_dep=${output_fifo} noc_router_remap_group_size=${remap_size} make ${SPYGLASS_WORK_DIR}/tmp/files_${SG_SCRIPT_SUF#_} SPYGLASS_WORK_DIR=${SPYGLASS_WORK_DIR}"
                           eval "$cmd_flist"
                           mv ${SPYGLASS_WORK_DIR}/tmp/files_${SG_SCRIPT_SUF#_} ${SPYGLASS_WORK_DIR}/tmp/flist/files_${SG_SCRIPT_SUF#_}
 
                           # Build the command.
-                          cmd="SG_SCRIPT_PATH=tmp/tcl SG_SCRIPT_SUF=${SG_SCRIPT_SUF} config=${config} tile_id_remap=${tile_id_remap} spm_bank_id_remap=${spm_bank_id_remap} noc_req_narrow_wo_channel_num=${narrow_wo_channel} noc_req_narrow_ro_channel_num=${narrow_ro_channel} noc_req_narrow_rw_channel_num=${narrow_rw_channel} noc_resp_narrow_rw_channel_num=${narrow_rw_resp_channel} topology=${topology} routing_algorithm=${routing_algo} req_remapping=${req_remap} resp_remapping=${resp_remap} num_virtual_channel=${virt_chan} noc_router_input_fifo_dep=${input_fifo} noc_router_output_fifo_dep=${output_fifo} noc_router_remap_group_size=${remap_size} make lint SPYGLASS_WORK_DIR=${SPYGLASS_WORK_DIR}"
+                          cmd="SG_FILES=tmp/flist/files_${SG_SCRIPT_SUF#_} SG_NAME=${SG_SCRIPT_SUF#_} config=${config} tile_id_remap=${tile_id_remap} spm_bank_id_remap=${spm_bank_id_remap} noc_req_narrow_wo_channel_num=${narrow_wo_channel} noc_req_narrow_ro_channel_num=${narrow_ro_channel} noc_req_narrow_rw_channel_num=${narrow_rw_channel} noc_resp_narrow_rw_channel_num=${narrow_rw_resp_channel} topology=${topology} routing_algorithm=${routing_algo} req_remapping=${req_remap} resp_remapping=${resp_remap} num_virtual_channel=${virt_chan} noc_router_input_fifo_dep=${input_fifo} noc_router_output_fifo_dep=${output_fifo} noc_router_remap_group_size=${remap_size} make lint SPYGLASS_WORK_DIR=${SPYGLASS_WORK_DIR}"
 
                           echo "Waiting for resources before launching command:"
                           echo "$cmd"
