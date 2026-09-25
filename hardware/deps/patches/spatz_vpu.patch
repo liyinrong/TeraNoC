@@ -1,3 +1,42 @@
+diff --git a/hardware/deps/spatz_vpu/hw/src/spatz_controller.sv b/hardware/deps/spatz_vpu/hw/src/spatz_controller.sv
+index 12d55f4..39f5309 100644
+--- a/hardware/deps/spatz_vpu/hw/src/spatz_controller.sv
++++ b/hardware/deps/spatz_vpu/hw/src/spatz_controller.sv
+@@ -629,8 +629,10 @@ module spatz_controller
+         scoreboard_d[spatz_req.id].deps[write_table_d[spatz_req.vd].id] |= write_table_d[spatz_req.vd].valid;
+         read_table_d[spatz_req.vd] = {spatz_req.id, 1'b1};
+       end
+-      // tackling v0 RAW hazard
+-      if (!spatz_req.op_arith.vm) begin
++      // tackling v0 RAW hazard. Loads and stores decode their mask bit into
++      // op_mem.vm only (op_arith.vm stays at its '0 default), so reading
++      // op_arith.vm made every unmasked memory op a v0 reader.
++      if ((spatz_req.ex_unit == LSU) ? !spatz_req.op_mem.vm : !spatz_req.op_arith.vm) begin
+         scoreboard_d[spatz_req.id].deps[write_table_d[0].id] |= write_table_d[0].valid;
+         read_table_d[0] = {spatz_req.id, 1'b1};
+       end
+diff --git a/hardware/deps/spatz_vpu/hw/src/spatz_decoder.sv b/hardware/deps/spatz_vpu/hw/src/spatz_decoder.sv
+index 7310b02..eb9a217 100644
+--- a/hardware/deps/spatz_vpu/hw/src/spatz_decoder.sv
++++ b/hardware/deps/spatz_vpu/hw/src/spatz_decoder.sv
+@@ -938,6 +938,8 @@ module spatz_decoder
+         riscv_instr::VMV_X_S: begin
+           automatic vreg_t arith_s2 = decoder_req_i.instr[24:20];
+           automatic vreg_t arith_d  = decoder_req_i.instr[11:7];
++          // Never masked; keep it out of the v0 hazard tracking
++          spatz_req.op_arith.vm = 1'b1;
+ 
+           `ifndef MEMPOOL_SPATZ
+ 
+@@ -1533,6 +1535,8 @@ module spatz_decoder
+           if (spatz_pkg::FPU) begin
+             automatic vreg_t arith_s2 = decoder_req_i.instr[24:20];
+             automatic vreg_t arith_d  = decoder_req_i.instr[11:7];
++            // Never masked; keep it out of the v0 hazard tracking
++            spatz_req.op_arith.vm = 1'b1;
+ 
+             `ifndef MEMPOOL_SPATZ
+ 
 diff --git a/hardware/deps/spatz_vpu/hw/src/spatz_vfu.sv b/hardware/deps/spatz_vpu/hw/src/spatz_vfu.sv
 index 714bd96..9a91657 100644
 --- a/hardware/deps/spatz_vpu/hw/src/spatz_vfu.sv
