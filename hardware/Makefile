@@ -801,7 +801,7 @@ SPYGLASS_WORK_DIR ?= spyglass
 
 .PHONY: lint lint-hier FORCE
 
-SNPS_SG ?= spyglass-2022.06
+SNPS_SG ?= spyglass-2026.03-dz
 SG_SCRIPT_PATH ?= scripts
 SG_SCRIPT_SUF ?=
 # What `lint` checks:
