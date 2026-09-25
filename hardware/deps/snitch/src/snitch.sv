@@ -161,6 +161,8 @@ module snitch
   // Register connections
   logic [RegNrReadPorts-1:0][RegWidth-1:0]  gpr_raddr;
   logic [RegNrReadPorts-1:0][31:0]          gpr_rdata;
+  // Third read port data; '0 when the regfile only has two read ports.
+  logic [31:0]                              gpr_rdata_rd;
   logic [RegNrWritePorts-1:0][RegWidth-1:0] gpr_waddr;
   logic [RegNrWritePorts-1:0][31:0]         gpr_wdata;
   logic [RegNrWritePorts-1:0]               gpr_we;
@@ -243,7 +245,11 @@ module snitch
   logic is_branch;
 
   logic [31:0] csr_rvalue;
-  logic csr_en;
+  // csr_insn: decoded CSR access (selects the read value); csr_en: it retires
+  // (gates the CSR side effects). Keeping the read path off valid_instr avoids
+  // a combinational loop through the operand, exception and stall logic.
+  logic csr_insn, csr_en;
+  assign csr_en = csr_insn & valid_instr;
 
   typedef struct packed {
     fpnew_pkg::fmt_mode_t  fmode;   // (Spatz) FP format mode (vector FPU); unused by the scalar core
@@ -280,7 +286,7 @@ module snitch
   // value (e.g. the effective address of an offloaded FP load/store) in argb.
   assign acc_qdata_argb_o = (RVV && (opb_select inside {IImmediate, SImmediate, SFImmediate})) ?
     {{32{alu_result[31]}}, alu_result} : {{32{gpr_rdata[1][31]}}, gpr_rdata[1]};
-  assign acc_qdata_argc_o = {{32{gpr_rdata[2][31]}}, gpr_rdata[2]};
+  assign acc_qdata_argc_o = {{32{gpr_rdata_rd[31]}}, gpr_rdata_rd};
 
   // instruction fetch interface
   assign inst_addr_o = pc_q;
@@ -439,7 +445,7 @@ module snitch
     acc_qaddr_o = snitch_pkg::XPULP_IPU;
     acc_register_rd = 1'b0;
 
-    csr_en = 1'b0;
+    csr_insn = 1'b0;
     fence_stall = 1'b0;
     // Wake up if a wake-up is incoming or pending
     wfi_d = ((wake_up_q > 0) || wake_up_sync_i) ? 1'b0 : wfi_q;
@@ -678,14 +684,14 @@ module snitch
         opb_select = None;
         rd_select = RdBypass;
         rd_bypass = csr_rvalue;
-        csr_en = valid_instr;
+        csr_insn = 1'b1;
       end
       riscv_instr::CSRRWI: begin
         opa_select = CSRImmediate;
         opb_select = None;
         rd_select = RdBypass;
         rd_bypass = csr_rvalue;
-        csr_en = valid_instr;
+        csr_insn = 1'b1;
       end
       riscv_instr::CSRRS: begin  // Atomic Read and Set Bits in CSR
           alu_op = LOr;
@@ -693,7 +699,7 @@ module snitch
           opb_select = CSR;
           rd_select = RdBypass;
           rd_bypass = csr_rvalue;
-          csr_en = valid_instr;
+          csr_insn = 1'b1;
       end
       riscv_instr::CSRRSI: begin
         // offload CSR enable to FP SS
@@ -703,7 +709,7 @@ module snitch
           opb_select = CSR;
           rd_select = RdBypass;
           rd_bypass = csr_rvalue;
-          csr_en = valid_instr;
+          csr_insn = 1'b1;
         end else begin
           write_rd = 1'b0;
           acc_qvalid_o = valid_instr;
@@ -715,7 +721,7 @@ module snitch
         opb_select = CSR;
         rd_select = RdBypass;
         rd_bypass = csr_rvalue;
-        csr_en = valid_instr;
+        csr_insn = 1'b1;
       end
       riscv_instr::CSRRCI: begin
         if (inst_data_i[31:20] != snitch_pkg::CSR_SSR) begin
@@ -724,7 +730,7 @@ module snitch
           opb_select = CSR;
           rd_select = RdBypass;
           rd_bypass = csr_rvalue;
-          csr_en = valid_instr;
+          csr_insn = 1'b1;
         end else begin
           write_rd = 1'b0;
           acc_qvalid_o = valid_instr;
@@ -2948,7 +2954,7 @@ module snitch
           riscv_instr::CSR_VXRM,
           riscv_instr::CSR_VCSR: begin
             illegal_inst    = 1'b0;
-            csr_en          = 1'b0;
+            csr_insn        = 1'b0;
             write_rd        = 1'b0;
             // Spatz: the W variants mark rd only if rd!=0; the S/C variants always read + mark rd.
             uses_rd         = (inst_data_i inside {riscv_instr::CSRRW, riscv_instr::CSRRWI}) ? (rd != 0) : 1'b1;
@@ -3011,18 +3017,19 @@ module snitch
 
     // TODO(zarubaf): Needs some more input handling, like illegal instruction exceptions.
     // Right now we skip this due to simplicity.
-    if (csr_en) begin
+    // Reads decode on csr_insn; every write is gated by csr_en.
+    if (csr_insn) begin
       unique case (csr_source_dest)
         riscv_instr::CSR_MHARTID: begin
           csr_rvalue = hart_id_i;
         end
         riscv_instr::CSR_TRACE: begin
           csr_rvalue = csr_trace_q;
-          csr_trace_en = 1'b1;
+          csr_trace_en = csr_en;
         end
         riscv_instr::CSR_STACKLIMIT: begin
           csr_rvalue = csr_stack_limit_q;
-          csr_stack_limit_en = 1'b1;
+          csr_stack_limit_en = csr_en;
         end
         `ifdef SNITCH_ENABLE_PERF
         riscv_instr::CSR_MCYCLE: begin
@@ -3057,11 +3064,11 @@ module snitch
             if (FP_EN) begin
               csr_rvalue = {27'b0, fcsr_d.fflags};
               read_fcsr  = 1'b1;
-              if (!exception && !acc_stall) fcsr_d.fflags = fpnew_pkg::status_t'(alu_result[4:0]);
+              if (csr_en && !exception && !acc_stall) fcsr_d.fflags = fpnew_pkg::status_t'(alu_result[4:0]);
             end
           end else if (Zfinx) begin
             csr_rvalue = {27'b0, fcsr_q.fflags};
-            fcsr_d.fflags = fpnew_pkg::status_t'(alu_result[4:0]);
+            if (csr_en) fcsr_d.fflags = fpnew_pkg::status_t'(alu_result[4:0]);
           end
         end
         riscv_instr::CSR_FRM: begin
@@ -3069,11 +3076,11 @@ module snitch
             if (FP_EN) begin
               csr_rvalue = {29'b0, fcsr_d.frm};
               read_fcsr  = 1'b1;
-              if (!exception && !acc_stall) fcsr_d.frm = fpnew_pkg::roundmode_e'(alu_result[2:0]);
+              if (csr_en && !exception && !acc_stall) fcsr_d.frm = fpnew_pkg::roundmode_e'(alu_result[2:0]);
             end
           end else if (Zfinx) begin
             csr_rvalue = {29'b0, fcsr_q.frm};
-            fcsr_d.frm = fpnew_pkg::roundmode_e'(alu_result[2:0]);
+            if (csr_en) fcsr_d.frm = fpnew_pkg::roundmode_e'(alu_result[2:0]);
           end
         end
         riscv_instr::CSR_FMODE: begin
@@ -3082,7 +3089,7 @@ module snitch
             if (FP_EN) begin
               csr_rvalue = {30'b0, fcsr_q.fmode};
               read_fcsr  = 1'b1;
-              if (!exception && !acc_stall) fcsr_d.fmode = fpnew_pkg::fmt_mode_t'(alu_result[1:0]);
+              if (csr_en && !exception && !acc_stall) fcsr_d.fmode = fpnew_pkg::fmt_mode_t'(alu_result[1:0]);
             end
           end else begin
             // (scalar) 0x800 has no scalar CSR -> preserve the default unknown-CSR [DUMP] trace
@@ -3094,11 +3101,11 @@ module snitch
             if (FP_EN) begin
               csr_rvalue = {22'b0, fcsr_d};
               read_fcsr  = 1'b1;
-              if (!exception && !acc_stall) fcsr_d = fcsr_t'(alu_result[9:0]);
+              if (csr_en && !exception && !acc_stall) fcsr_d = fcsr_t'(alu_result[9:0]);
             end
           end else if (Zfinx) begin
             csr_rvalue = {24'b0, fcsr_q};
-            fcsr_d = fcsr_t'(alu_result[7:0]);
+            if (csr_en) fcsr_d = fcsr_t'(alu_result[7:0]);
           end
         end
         default: begin
@@ -3164,7 +3171,7 @@ module snitch
       PC: opb = pc_q;
       CSR: opb = csr_rvalue;
       PBImmediate: opb = pbimm;
-      RegRd: opb = gpr_rdata[2];
+      RegRd: opb = gpr_rdata_rd;
       default: opb = '0;
     endcase
   end
@@ -3186,6 +3193,9 @@ module snitch
       // so port 2 is only used by Xpulp (rs3 == rd-field) -> rd is always correct.
       assign gpr_raddr[2] = rd;
     end
+    assign gpr_rdata_rd = gpr_rdata[2];
+  end else begin : gen_no_gpr_rdata_2
+    assign gpr_rdata_rd = '0;
   end
 
   // --------------------
