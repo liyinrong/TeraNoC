@@ -24,3 +24,29 @@ index f4110b4..6ce330b 100644
      );
  
      assign ar_no_atop_buf_full = !ar_no_atop_buf_not_full;
+diff --git a/hardware/deps/floo_noc/hw/floo_nw_router.sv b/hardware/deps/floo_noc/hw/floo_nw_router.sv
+index a6e63b5..ecf1189 100644
+--- a/hardware/deps/floo_noc/hw/floo_nw_router.sv
++++ b/hardware/deps/floo_noc/hw/floo_nw_router.sv
+@@ -167,6 +167,8 @@ module floo_nw_router
+       assign floo_wide_o[i].credit = wide_credit_out[i];
+       assign wide_credit_in[i] = floo_wide_i[i].credit;
+     end
++  end else begin : gen_no_credit_connections
++    assign wide_credit_in = '0;
+   end
+ 
+   floo_router #(
+diff --git a/hardware/deps/floo_noc/hw/floo_router.sv b/hardware/deps/floo_noc/hw/floo_router.sv
+index fd0a11f..52655fe 100644
+--- a/hardware/deps/floo_noc/hw/floo_router.sv
++++ b/hardware/deps/floo_noc/hw/floo_router.sv
+@@ -365,6 +365,8 @@ module floo_router
+       end
+       if (!EnMultiCast) begin : gen_unicast
+         assign cross_ready[in][v] = |(masked_ready_transposed[in][v] & route_mask[in][v]);
++        // No handshake history without multicast; tie off the register input
++        assign past_handshakes_d[in][v] = '0;
+       end else begin : gen_multicast
+         // In the case of multicast transactions, each destination can assert the ready signal
+         // independently and potentially at different clock cycles. This logic ensures that
