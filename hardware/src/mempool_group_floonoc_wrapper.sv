@@ -29,7 +29,6 @@ module mempool_group_floonoc_wrapper
   // Group ID
   input  logic              [idx_width(NumGroups)-1:0]  group_id_i,
   input  id_t                                           floo_id_i,
-  input  route_t            [NumEndpoints-1:0]          route_table_i,
 
   // TCDM Router interface
   output floo_tcdm_req_if_t [West:North]                floo_tcdm_req_o,
@@ -1664,6 +1663,13 @@ floo_req_t  [Eject:North] floo_axi_req_out, floo_axi_req_in;
 floo_rsp_t  [Eject:North] floo_axi_rsp_out, floo_axi_rsp_in;
 floo_wide_t [Eject:North] floo_axi_wide_out, floo_axi_wide_in;
 
+// This group's source-routing table: row floo_id_i of the FlooGen table
+// (floo_id_i is the group's endpoint index). Selected here from the ID rather
+// than passed in on NumEndpoints*$bits(route_t) input pins, so every group
+// is still the same block.
+route_t [NumEndpoints-1:0] route_table;
+assign route_table = RoutingTables[floo_id_i];
+
 floo_nw_chimney #(
   .AxiCfgN             (AxiCfgN                                 ),
   .AxiCfgW             (AxiCfgW                                 ),
@@ -1703,7 +1709,7 @@ floo_nw_chimney #(
   .axi_wide_out_req_o   (                                       ),
   .axi_wide_out_rsp_i   ('0                                     ),
   .id_i                 (floo_id_i                              ),
-  .route_table_i,
+  .route_table_i        (route_table                            ),
   .floo_req_o           (floo_axi_req_in[Eject]                 ),
   .floo_rsp_o           (floo_axi_rsp_in[Eject]                 ),
   .floo_wide_o          (floo_axi_wide_in[Eject]                ),
