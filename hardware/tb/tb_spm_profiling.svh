@@ -108,12 +108,10 @@
                 end
 `ifdef USE_WIDE_TCDM_PLANE
                 if (wcls >= 2) begin
-                  // Recover the requester the per-bank fork drops (ini_addr='0).
+                  // The bank payload carries the wide requester's origin group/tile
+                  // and meta_id (mempool_tcdm_wide_superbank gen_bank_req).
                   wloc  = (wp < NumWideBankLocalPorts) ? 1 : 0;
-                  wsg   = `SPM_TILE(g,t).i_tcdm_bank_interco.slv_wide_req_i[wp].src_group_id;
-                  wit   = `SPM_TILE(g,t).i_tcdm_bank_interco.slv_wide_req_i[wp].ini_addr;
                   wcore = NumCoresPerTile * NumDataPortsPerCore;  // wide engine slot
-                  wmid  = `SPM_TILE(g,t).i_tcdm_bank_interco.slv_wide_req_i[wp].wdata.meta_id;
                 end
 `endif
                 $fwrite(f_bank[g][t], "P %0d %0d %0d %0h %0d %0d %0d %0d %0d %0d %0d %0d\n",
