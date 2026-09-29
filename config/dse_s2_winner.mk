@@ -45,6 +45,14 @@ noc_wide_router_remapping := 3
 noc_router_input_fifo_dep  := 2
 noc_router_output_fifo_dep := 2
 
+# --- Spatz ---------------------------------------------------------------
+# VLEN matches the 1024-bit wide plane; unit-stride vector loads issue as
+# bursts (one wide word = 32 words: remote as one wide access, own-tile as
+# narrow words on the vector ports), with a 32-entry VLSU reorder buffer.
+vlen            := 1024
+spatz_burst     := 1
+spatz_rob_depth := 32
+
 # =========================================================================
 # MODEL/RTL GAPS AT THIS CONFIG -- ALL CLOSED
 #
