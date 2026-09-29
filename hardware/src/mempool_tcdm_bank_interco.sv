@@ -216,10 +216,12 @@ module mempool_tcdm_bank_interco
     .WideDataWidth  (DmaWideDataWidth),
     .SpmBankIdRemap (SpmBankIdRemap  ),
     .RotFifoDepth   (RotFifoDepth    ),
-    // No ingress cut: the DMA keeps only 2 beats in flight (axi_to_reqrsp and
-    // reqrsp_demux depth 2), so one more cycle of round trip costs it ~30 % of
-    // its L1 bandwidth (dma_l2_l1_bw).
-    .IngressSpill   (1'b0            ),
+    // Cut like the wide plane. The extra round-trip cycle is covered by 4 DMA
+    // beats in flight (mempool_group.sv axi_to_reqrsp / reqrsp_demux depth 4);
+    // with only 2 it cost ~30 % of the L1 DMA bandwidth.
+    .IngressSpill   (1'b1            ),
+    // axi_to_reqrsp matches DMA responses to requests in order.
+    .InOrderResp    (1'b1            ),
     .wide_req_t     (dma_wide_req_t  ),
     .wide_resp_t    (dma_wide_resp_t ),
     .narrow_req_t   (narrow_req_t    ),

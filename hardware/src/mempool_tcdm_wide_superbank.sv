@@ -38,6 +38,10 @@ module mempool_tcdm_wide_superbank
   // Register each part at the ingress (the wide-path cut). Off for an ingress
   // whose throughput is bound by its round trip (the DMA: 2 outstanding beats).
   parameter bit          IngressSpill    = 1'b1,
+  // Return responses in request order. Groups otherwise answer out of order,
+  // which the meta_id-matched wide plane tolerates but the DMA (reqrsp,
+  // in-order) does not.
+  parameter bit          InOrderResp     = 1'b0,
   parameter type wide_req_t    = logic,
   parameter type wide_resp_t   = logic,
   parameter type narrow_req_t  = logic,
@@ -125,19 +129,23 @@ module mempool_tcdm_wide_superbank
   // Split into parts, one spill register per part.
   // ============================================================
   logic [NumParts-1:0] part_in_valid, part_in_ready;
+  // Request handshake, gated by room in the response-order FIFO (if any).
+  logic in_valid, in_ready, ord_ready;
+  assign in_valid             = slv_wide_req_valid_i & ord_ready;
+  assign slv_wide_req_ready_o = in_ready & ord_ready;
 
   if (NumParts > 1) begin : gen_split
     stream_fork #(.N_OUP(NumParts)) i_part_fork (
-      .clk_i  (clk_i               ),
-      .rst_ni (rst_ni              ),
-      .valid_i(slv_wide_req_valid_i),
-      .ready_o(slv_wide_req_ready_o),
-      .valid_o(part_in_valid       ),
-      .ready_i(part_in_ready       )
+      .clk_i  (clk_i        ),
+      .rst_ni (rst_ni       ),
+      .valid_i(in_valid     ),
+      .ready_o(in_ready     ),
+      .valid_o(part_in_valid),
+      .ready_i(part_in_ready)
     );
   end else begin : gen_no_split
-    assign part_in_valid        = slv_wide_req_valid_i;
-    assign slv_wide_req_ready_o = part_in_ready;
+    assign part_in_valid = in_valid;
+    assign in_ready      = part_in_ready;
   end
 
   part_req_t [NumParts-1:0] part_q;
@@ -370,7 +378,34 @@ module mempool_tcdm_wide_superbank
     end
   end
 
-  if (NumGroups > 1) begin : gen_resp_mux
+  if (NumGroups > 1 && InOrderResp) begin : gen_resp_in_order
+    // Group of every accepted request, in request order; the response mux only
+    // takes the head group. Deep enough for every request that can be in flight
+    // (parts in the spill registers plus RotFifoDepth per superbank), so it
+    // never throttles; a full FIFO would only hold off new requests.
+    typedef logic [GroupSelBits-1:0] grp_idx_t;
+    grp_idx_t ord_head;
+    logic     ord_valid;
+    stream_fifo #(
+      .FALL_THROUGH(1'b0                        ),
+      .DEPTH       (NumGroups*RotFifoDepth + 2  ),
+      .T           (grp_idx_t                   )
+    ) i_order_fifo (
+      .clk_i (clk_i), .rst_ni(rst_ni), .flush_i(1'b0), .testmode_i(1'b0), .usage_o(),
+      .data_i (slv_wide_req_i.tgt_addr[BankIdLoBits + PartBits +: GroupSelBits]),
+      .valid_i(slv_wide_req_valid_i & slv_wide_req_ready_o),
+      .ready_o(ord_ready                                   ),
+      .data_o (ord_head                                    ),
+      .valid_o(ord_valid                                   ),
+      .ready_i(slv_wide_resp_valid_o & slv_wide_resp_ready_i)
+    );
+    assign mux_out               = grp_out[ord_head];
+    assign slv_wide_resp_valid_o = ord_valid & grp_valid[ord_head];
+    for (genvar g = 0; g < NumGroups; g++) begin : gen_ord_ready
+      assign grp_ready[g] = ord_valid & (ord_head == g) & slv_wide_resp_ready_i;
+    end
+  end else if (NumGroups > 1) begin : gen_resp_mux
+    assign ord_ready = 1'b1;
     stream_xbar #(
       .NumInp   (NumGroups),
       .NumOut   (1        ),
@@ -387,6 +422,7 @@ module mempool_tcdm_wide_superbank
       .idx_o  (/* unused */         )
     );
   end else begin : gen_resp_bypass
+    assign ord_ready             = 1'b1;
     assign mux_out               = grp_out[0];
     assign slv_wide_resp_valid_o = grp_valid[0];
     assign grp_ready[0]          = slv_wide_resp_ready_i;

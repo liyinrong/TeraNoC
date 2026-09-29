@@ -947,7 +947,9 @@ module mempool_group
       .AddrWidth   (AddrWidth      ),
       .DataWidth   (AxiDataWidth   ),
       .IdWidth     (AxiTileIdWidth ),
-      .BufDepth    (2              ),
+      // 4 beats in flight (1 + BufDepth): the tile's superbank ingress adds a
+      // register cycle to the DMA round trip.
+      .BufDepth    (4              ),
       .reqrsp_req_t(reqrsp_req_t   ),
       .reqrsp_rsp_t(reqrsp_rsp_t   )
     ) i_axi_to_reqrsp (
@@ -991,7 +993,7 @@ module mempool_group
         .NrPorts  (NumTilesPerDma        ),
         .req_t    (reqrsp_req_t          ),
         .rsp_t    (reqrsp_rsp_t          ),
-        .RespDepth(2                     )
+        .RespDepth(4                     )
       ) i_reqrsp_demux (
           .clk_i       (clk_i            ),
           .rst_ni      (rst_ni           ),
