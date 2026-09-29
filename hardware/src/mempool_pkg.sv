@@ -290,6 +290,11 @@ package mempool_pkg;
   localparam integer unsigned RMOutstandingTransactions = ROB_DEPTH;
   localparam integer unsigned RMDataWidth               = 16 * ARRAY_HEIGHT * (PIPE_REGS + 1);
   localparam integer unsigned RMMasterPorts             = RMDataWidth / DataWidth;
+  // Narrow slots RedMulE takes on the tile's local-port axis: its RMMasterPorts
+  // 32-bit ports without the wide plane, none with it (it then uses one wide
+  // port, so narrow slots would only widen the bank crossbars with dead inputs).
+  localparam integer unsigned RMNarrowPorts             =
+      `ifdef USE_WIDE_TCDM_PLANE 0 `else RMMasterPorts `endif;
   localparam integer unsigned RMRegSize                 = 256;
 
   // Wide TCDM plane (WP2). WideTcdmDataWidth is the configured payload width of
@@ -303,11 +308,11 @@ package mempool_pkg;
   // ------------------------------------------------------------------
   //  Wide-plane requesters on a tile
   // ------------------------------------------------------------------
-  // Each wide client gets its OWN scrambler + tcdm_shim and its OWN local port
-  // into the bank interconnect, so two clients hitting different superbanks of
-  // the same tile proceed in the same cycle, and one may go own-tile while the
-  // other goes remote. Only the tile's single physical wide master link is
-  // shared; the existing stream_xbar (NumInp = NumWideLocalPorts) muxes it.
+  // Each wide client gets its OWN slot, so two clients can hold wide accesses at
+  // once; RedMulE's slot also has its own port into the bank interconnect (see
+  // NumWideBankLocalPorts), while a Spatz slot is remote-only. Only the tile's
+  // single physical wide master link is shared; the existing stream_xbar
+  // (NumInp = NumWideLocalPorts) muxes it.
   //
   // The count is build-uniform, not per-tile: a tile without RedMulE ties its
   // slot off rather than changing the port dimensions of the group.
@@ -329,15 +334,22 @@ package mempool_pkg;
   localparam integer unsigned WideRmPortIdx    = 0;
   // Base slot of the Spatz block; core c owns WideSpatzPortIdx + c.
   localparam integer unsigned WideSpatzPortIdx = NumWideRmPorts;
+  // Slots with an own-tile wide ingress into the bank interconnect: RedMulE's.
+  // A Spatz burst to its own tile is issued on the core's narrow vector ports
+  // (spatz_local_burst_expander): the VLSU takes at most one word per vector
+  // port per cycle, so a wide own-tile access buys it nothing. Its wide slot is
+  // therefore remote-only. At least one ingress, as for NumWideLocalPorts.
+  localparam integer unsigned NumWideBankLocalPorts =
+      (NumWideRmPorts > 0) ? NumWideRmPorts : 1;
 
   localparam integer unsigned RMBaseAddr = 32'h4002_0000;
   localparam integer unsigned RMMask     = ~((1 << idx_width(RMRegSize)) - 1);
 
   // Per-tile local TCDM master ports: the (Spatz-scaled) core data ports plus
-  // the RedMulE master ports when present. Degrades to NumCoresPerTile for the
+  // the RedMulE narrow slots when present. Degrades to NumCoresPerTile for the
   // scalar case (NumDataPortsPerCore = 1, NumRMTiles = 0).
   localparam integer unsigned MaxLocalPortsPerTile =
-      NumRMTiles > 0 ? RMMasterPorts + NumCoresPerTile * NumDataPortsPerCore
+      NumRMTiles > 0 ? RMNarrowPorts + NumCoresPerTile * NumDataPortsPerCore
                      : NumCoresPerTile * NumDataPortsPerCore;
 
   // Shared core<->L1 meta_id. Every engine on a tile master port carries its

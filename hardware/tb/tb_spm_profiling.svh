@@ -71,9 +71,10 @@
         // local/remote boundary = this tile's NumLocalPorts (mempool_tile.sv:20):
         // every core contributes NumDataPortsPerCore ports (1 scalar + the Spatz
         // vector ports), and only the first NumRMTilesPerGroup tiles host a
-        // RedMulE, which widens the local side by RMMasterPorts.
+        // RedMulE, which widens the local side by RMNarrowPorts (0 with the
+        // wide plane, where RedMulE uses its wide port instead).
         localparam int unsigned NLP = NumCoresPerTile * NumDataPortsPerCore +
-            ((t < NumRMTilesPerGroup) ? RMMasterPorts : 0);
+            ((t < NumRMTilesPerGroup) ? RMNarrowPorts : 0);
         always_ff @(posedge clk or negedge rst_n) begin
           if (!rst_n) begin
             bank_st[g][t] <= '{default: '0}; bank_s[g][t] <= '{default: '0};
@@ -108,7 +109,7 @@
 `ifdef USE_WIDE_TCDM_PLANE
                 if (wcls >= 2) begin
                   // Recover the requester the per-bank fork drops (ini_addr='0).
-                  wloc  = (wp < `SPM_TILE(g,t).NumWideLocalPorts) ? 1 : 0;
+                  wloc  = (wp < NumWideBankLocalPorts) ? 1 : 0;
                   wsg   = `SPM_TILE(g,t).i_tcdm_bank_interco.slv_wide_req_i[wp].src_group_id;
                   wit   = `SPM_TILE(g,t).i_tcdm_bank_interco.slv_wide_req_i[wp].ini_addr;
                   wcore = NumCoresPerTile * NumDataPortsPerCore;  // wide engine slot

@@ -15,11 +15,12 @@ module mempool_tile
   parameter addr_t       TCDMBaseAddr = 32'b0,
   // Boot address
   parameter logic [31:0] BootAddr     = 32'h0000_1000,
-  // Enable a RedMulE tensor core: widens the local interconnect by RMMasterPorts.
+  // Enable a RedMulE tensor core: widens the local interconnect by RMNarrowPorts
+  // (its narrow ports without the wide plane; none with it).
   parameter logic        RedMulE      = 1'b0,
-  parameter int unsigned NumLocalPorts = RedMulE ? RMMasterPorts + NumCoresPerTile * NumDataPortsPerCore : NumCoresPerTile * NumDataPortsPerCore,
-  // Wide engines have their own local-port axis: one slot per wide client, each
-  // with its own shim and its own bank-interconnect port. Derived in mempool_pkg
+  parameter int unsigned NumLocalPorts = RedMulE ? RMNarrowPorts + NumCoresPerTile * NumDataPortsPerCore : NumCoresPerTile * NumDataPortsPerCore,
+  // Wide engines have their own local-port axis: one slot per wide client (only
+  // RedMulE's has an own-tile bank-interconnect port). Derived in mempool_pkg
   // from which clients the build instantiates (RedMulE, Spatz burst adapter).
   parameter int unsigned NumWideLocalPorts = mempool_pkg::NumWideLocalPorts,
   // Dependent parameters. DO NOT CHANGE.
@@ -176,6 +177,14 @@ module mempool_tile
   // adapter. Everything else passes straight through, so with the burst path off
   // these are wires.
   logic [NumCorePorts-1:0][spatz_pkg::BurstLenWidth-1:0] cc_data_qburst_len;
+  // The core's request fields. The divert layer passes them to snitch_data_q*,
+  // except on the lanes an own-tile burst is being expanded on.
+  addr_t    [NumCorePorts-1:0] cc_data_qaddr;
+  logic     [NumCorePorts-1:0] cc_data_qwrite;
+  amo_t     [NumCorePorts-1:0] cc_data_qamo;
+  data_t    [NumCorePorts-1:0] cc_data_qdata;
+  strb_t    [NumCorePorts-1:0] cc_data_qstrb;
+  meta_id_t [NumCorePorts-1:0] cc_data_qid;
   // Per-core, per-lane ROB base ids for the in-flight burst (mempool_cc.burst_base_id_o).
   logic     [NumCorePorts-1:0] cc_data_qvalid;
   logic     [NumCorePorts-1:0] cc_data_qready;
@@ -294,12 +303,12 @@ module mempool_tile
         .sh_acc_resp_valid_i  (sh_acc_resp_valid[c]                              ),
         .sh_acc_resp_ready_o  (sh_acc_resp_ready[c]                              ),
         // Data Ports -- slice [NumDataPortsPerCore*c +: NumDataPortsPerCore]
-        .data_qaddr_o  (snitch_data_qaddr [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qwrite_o (snitch_data_qwrite[NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qamo_o   (snitch_data_qamo  [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qdata_o  (snitch_data_qdata [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qstrb_o  (snitch_data_qstrb [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qid_o    (snitch_data_qid   [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
+        .data_qaddr_o  (cc_data_qaddr     [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
+        .data_qwrite_o (cc_data_qwrite    [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
+        .data_qamo_o   (cc_data_qamo      [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
+        .data_qdata_o  (cc_data_qdata     [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
+        .data_qstrb_o  (cc_data_qstrb     [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
+        .data_qid_o    (cc_data_qid       [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
         .data_qburst_len_o(cc_data_qburst_len[NumDataPortsPerCore*c +: NumDataPortsPerCore]),
         .data_qvalid_o (cc_data_qvalid    [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
         .data_qready_i (cc_data_qready    [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
@@ -344,12 +353,12 @@ module mempool_tile
       assign sh_acc_resp_valid[c]                                      = '0;
       assign sh_acc_resp_ready[c]                                      = '0;
       // Silence memory interfaces
-      assign snitch_data_qaddr[c]                                      = '0;
-      assign snitch_data_qwrite[c]                                     = '0;
-      assign snitch_data_qamo[c]                                       = '0;
-      assign snitch_data_qdata[c]                                      = '0;
-      assign snitch_data_qstrb[c]                                      = '0;
-      assign snitch_data_qid[c]                                        = '0;
+      assign cc_data_qaddr[c]                                          = '0;
+      assign cc_data_qwrite[c]                                         = '0;
+      assign cc_data_qamo[c]                                           = '0;
+      assign cc_data_qdata[c]                                          = '0;
+      assign cc_data_qstrb[c]                                          = '0;
+      assign cc_data_qid[c]                                            = '0;
       assign snitch_data_qvalid[c]                                     = '0;
       assign snitch_data_pready[c]                                     = '0;
       assign snitch_inst_addr[c/NumCoresPerCache][c%NumCoresPerCache]  = '0;
@@ -801,9 +810,9 @@ module mempool_tile
   // ------------------------------------------------------------------
   //  Shared wide remote link
   // ------------------------------------------------------------------
-  // Every wide client has its own shim and its own bank-interconnect port, but the
-  // tile has ONE physical wide master link, so these two crossbars -- and only these
-  // -- are shared. They live at module scope rather than inside a client's generate
+  // Every wide client has its own slot (RedMulE also its own-tile bank ingress), but
+  // the tile has ONE physical wide master link, so these two crossbars -- and only
+  // these -- are shared. They live at module scope rather than inside a client's generate
   // so a second client can be added without moving them again.
   wide_local_ports_index_t [NumWideRemoteRespPortsPerTile-1:0] remote_wide_resp_sel;
   for (genvar r = 0; r < NumWideRemoteRespPortsPerTile; r++) begin : gen_wide_resp_sel
@@ -945,6 +954,15 @@ module mempool_tile
   logic            [NumWideLocalPorts-1:0] local_wide_resp_interco_ready;
   tcdm_wide_resp_t [NumWideLocalPorts-1:0] local_wide_resp_interco_payload;
   addr_t           [NumWideLocalPorts-1:0] local_wide_req_interco_addr_int;
+
+  // Only the first NumWideBankLocalPorts slots (RedMulE) have an own-tile wide
+  // ingress. The Spatz slots above are remote-only (an own-tile burst is issued
+  // on the core's narrow vector ports), so they have no bank side: tie it off.
+  for (genvar s = NumWideBankLocalPorts; s < NumWideLocalPorts; s++) begin : gen_wide_remote_only_slot
+    assign local_wide_req_interco_ready[s]    = 1'b0;
+    assign local_wide_resp_interco_valid[s]   = 1'b0;
+    assign local_wide_resp_interco_payload[s] = '0;
+  end : gen_wide_remote_only_slot
   `endif
 
   // ------------------------------------------------------------------------
@@ -957,7 +975,7 @@ module mempool_tile
   // this tile's own-tile clients at the low indices, the group's slave ports
   // above. Keeping own-tile, same-group and inter-group traffic on separate
   // ingresses keeps them independent through superbank selection.
-  localparam int unsigned NumWideEngIngress = NumWideLocalPorts + NumWideRemoteReqPortsPerTile;
+  localparam int unsigned NumWideEngIngress = NumWideBankLocalPorts + NumWideRemoteReqPortsPerTile;
 
   // Group slave ports retyped to the bank-interconnect ingress: the wide
   // intra-group xbar leaves the within-group tile field in tgt_addr (unlike the
@@ -1049,13 +1067,14 @@ module mempool_tile
     `ifdef USE_WIDE_TCDM_PLANE
     // Wide req inputs: this tile's own-tile wide clients at low indices, the
     // group's wide slave ports above -- same ordering as the narrow ports.
-    .slv_wide_req_i         ({postreg_tcdm_wide_slave_req_bank,  local_wide_req_interco_payload}),
-    .slv_wide_req_valid_i   ({postreg_tcdm_wide_slave_req_valid, local_wide_req_interco_valid  }),
-    .slv_wide_req_ready_o   ({postreg_tcdm_wide_slave_req_ready, local_wide_req_interco_ready  }),
+    // Only the bank-local slots (RedMulE) have an own-tile ingress.
+    .slv_wide_req_i         ({postreg_tcdm_wide_slave_req_bank,  local_wide_req_interco_payload [NumWideBankLocalPorts-1:0]}),
+    .slv_wide_req_valid_i   ({postreg_tcdm_wide_slave_req_valid, local_wide_req_interco_valid   [NumWideBankLocalPorts-1:0]}),
+    .slv_wide_req_ready_o   ({postreg_tcdm_wide_slave_req_ready, local_wide_req_interco_ready   [NumWideBankLocalPorts-1:0]}),
     // Wide resp outputs: own-tile clients at low indices, slave resp above.
-    .slv_wide_resp_o        ({prereg_tcdm_wide_slave_resp,       local_wide_resp_interco_payload}),
-    .slv_wide_resp_valid_o  ({prereg_tcdm_wide_slave_resp_valid, local_wide_resp_interco_valid  }),
-    .slv_wide_resp_ready_i  ({prereg_tcdm_wide_slave_resp_ready, local_wide_resp_interco_ready  }),
+    .slv_wide_resp_o        ({prereg_tcdm_wide_slave_resp,       local_wide_resp_interco_payload[NumWideBankLocalPorts-1:0]}),
+    .slv_wide_resp_valid_o  ({prereg_tcdm_wide_slave_resp_valid, local_wide_resp_interco_valid  [NumWideBankLocalPorts-1:0]}),
+    .slv_wide_resp_ready_i  ({prereg_tcdm_wide_slave_resp_ready, local_wide_resp_interco_ready  [NumWideBankLocalPorts-1:0]}),
     `endif
     .mst_req_o              (bank_req_payload    ),
     .mst_req_valid_o        (bank_req_valid      ),
@@ -1188,6 +1207,13 @@ module mempool_tile
   logic     [NumCorePorts-1:0] adp_pvalid;
   data_t    [NumCorePorts-1:0] adp_pdata;
   meta_id_t [NumCorePorts-1:0] adp_pid;
+  // Own-tile burst expansion (spatz_local_burst_expander): while exp_own[i], the
+  // expander drives port i's narrow request and the core sees exp_qready[i].
+  logic     [NumCorePorts-1:0] exp_own;
+  logic     [NumCorePorts-1:0] exp_qvalid;
+  addr_t    [NumCorePorts-1:0] exp_qaddr;
+  meta_id_t [NumCorePorts-1:0] exp_qid;
+  logic     [NumCorePorts-1:0] exp_qready;
 
 `ifdef USE_WIDE_TCDM_PLANE
   if (SpatzWideBurst) begin : gen_spatz_wide_burst
@@ -1197,9 +1223,9 @@ module mempool_tile
     // Vector port 0 of a core: the only port a burst is ever issued on.
     localparam int unsigned BurstPortOff = 1;
 
-    // One adapter + one shim per core, each on its own wide slot. No arbitration
-    // here: the cores contend only at the tile's single wide remote link, which the
-    // mux after the shims resolves, together with RedMulE.
+    // One expander + one adapter per core, each adapter on its own wide slot. No
+    // arbitration here: the cores contend only at the tile's single wide remote
+    // link, which the mux after the slots resolves, together with RedMulE.
     for (genvar c = 0; c < NumCoresPerTile; c++) begin : gen_spatz_wide_core
       localparam int unsigned P0   = NumDataPortsPerCore*c + BurstPortOff;
       localparam int unsigned WIdx = WideSpatzPortIdx + c;
@@ -1224,6 +1250,84 @@ module mempool_tile
         assign drain_stall[l] = snitch_data_pvalid[P0 + l];
       end : gen_drain_stall
 
+      // ---- own-tile or remote burst ----
+      // The burst base, scrambled like every narrow and wide address; its own
+      // scrambler because snitch_data_qaddr[P0] carries expanded words while an
+      // own-tile burst is being issued. A burst is aligned to its span, so it
+      // lies in one tile and the base alone decides.
+      addr_t burst_addr_scrambled;
+      addr_t own_tile_mask, own_tile_value;
+      logic  burst_req, burst_local;
+
+      mempool_addr_scrambler #(
+        .AddrWidth               (AddrWidth        ),
+        .ByteOffset              (ByteOffset       ),
+        .NumTiles                (NumTiles         ),
+        .NumTilesPerDma          (NumTilesPerDma   ),
+        .NumBanksPerTile         (NumBanksPerTile  ),
+        .Bypass                  (0                ),
+        .SeqMemSizePerTile       (SeqMemSizePerTile),
+        .TCDMBaseAddr            (TCDMBaseAddr     ),
+        .TCDMMask                (TCDMMask         ),
+        .EnableSeqInterleaveSwap (1'b1             ),
+        .EnableTileIdRemap       (TileIdRemap      )
+      ) i_burst_addr_scrambler (
+        .address_i (cc_data_qaddr[P0]    ),
+        .address_o (burst_addr_scrambled )
+      );
+
+      // Same own-tile rule as RedMulE's wide demux (TCDM_WIDE_LOCAL entry).
+      assign own_tile_mask  = TCDMMask | ({idx_width(NumTiles){1'b1}} << (ByteOffset + $clog2(NumBanksPerTile)));
+      assign own_tile_value = TCDMBaseAddr | (tile_id_i << (ByteOffset + $clog2(NumBanksPerTile)));
+      assign burst_req      = cc_data_qvalid[P0] &&
+                              (cc_data_qburst_len[P0] > spatz_pkg::BurstLenWidth'(1));
+      assign burst_local    = ((burst_addr_scrambled & own_tile_mask) == own_tile_value);
+
+      // ---- own-tile burst: narrow words on the vector ports ----
+      logic                     exp_busy, exp_burst_ready;
+      logic     [RecvPorts-1:0] exp_lane_valid;
+      addr_t    [RecvPorts-1:0] exp_lane_addr;
+      meta_id_t [RecvPorts-1:0] exp_lane_id;
+
+      spatz_local_burst_expander #(
+        .RecvPorts    (RecvPorts                 ),
+        .MaxBurstWords(spatz_pkg::MaxBurstWords  ),
+        .BurstLenWidth(spatz_pkg::BurstLenWidth  ),
+        .RobIdWidth   (spatz_pkg::MemRspIdWidth  ),
+        .WordBytes    (DataWidth/8               ),
+        .addr_t       (addr_t                    ),
+        .meta_id_t    (meta_id_t                 )
+      ) i_local_burst_expander (
+        .clk_i        (clk_i                            ),
+        .rst_ni       (rst_ni                           ),
+        .burst_valid_i(burst_req && burst_local         ),
+        .burst_addr_i (cc_data_qaddr[P0]                ),
+        .burst_id_i   (cc_data_qid[P0]                  ),
+        .burst_len_i  (cc_data_qburst_len[P0]           ),
+        .burst_ready_o(exp_burst_ready                  ),
+        .busy_o       (exp_busy                         ),
+        .lane_valid_o (exp_lane_valid                   ),
+        .lane_addr_o  (exp_lane_addr                    ),
+        .lane_id_o    (exp_lane_id                      ),
+        .lane_ready_i (snitch_data_qready[P0 +: RecvPorts])
+      );
+
+      // The expander owns all of this core's lanes while busy: the VLSU's own
+      // requests on them wait. On vector port 0 the core sees the burst
+      // handshake; a remote burst still goes to the adapter (core_divert wins).
+      for (genvar l = 0; l < RecvPorts; l++) begin : gen_exp_lane
+        assign exp_own[P0 + l]    = exp_busy;
+        assign exp_qvalid[P0 + l] = exp_lane_valid[l];
+        assign exp_qaddr[P0 + l]  = exp_lane_addr[l];
+        assign exp_qid[P0 + l]    = exp_lane_id[l];
+        if (l == 0) begin : gen_burst_port
+          assign exp_qready[P0 + l] = burst_req && burst_local && exp_burst_ready;
+        end else begin : gen_other_lane
+          assign exp_qready[P0 + l] = 1'b0;
+        end
+      end : gen_exp_lane
+
+      // ---- remote burst: one wide access ----
       spatz_wide_burst_adapter #(
         .RecvPorts  (RecvPorts               ),
         .RobIdWidth (spatz_pkg::MemRspIdWidth),
@@ -1241,12 +1345,11 @@ module mempool_tile
       ) i_spatz_wide_burst_adapter (
         .clk_i                (clk_i                    ),
         .rst_ni               (rst_ni                   ),
-        // The scrambled address: the wide and narrow scramblers are configured
-        // identically, so reuse the narrow port's rather than adding a second.
-        .spatz_req_addr_i     (snitch_data_qaddr_scrambled[P0]),
-        .spatz_req_id_i       (snitch_data_qid[P0]      ),
+        // Only remote bursts reach the adapter (its wide slot is remote-only).
+        .spatz_req_addr_i     (burst_addr_scrambled     ),
+        .spatz_req_id_i       (cc_data_qid[P0]          ),
         .spatz_req_burst_len_i(cc_data_qburst_len[P0]   ),
-        .spatz_req_valid_i    (cc_data_qvalid[P0]       ),
+        .spatz_req_valid_i    (cc_data_qvalid[P0] && !burst_local),
         .spatz_req_ready_o    (req_ready                ),
         .spatz_resp_valid_o   (rsp_valid                ),
         .spatz_resp_data_o    (rsp_data                 ),
@@ -1260,10 +1363,24 @@ module mempool_tile
         .wide_resp_ready_o    (wresp_ready              )
       );
 
-      // Divert this core's vector port 0 off the narrow shim while it is bursting,
+      // Divert this core's vector port 0 off the narrow shim for a remote burst,
       // and merge the adapter's beats back onto its receive lanes.
-      assign core_divert[P0] = cc_data_qvalid[P0] &&
-                               (cc_data_qburst_len[P0] > spatz_pkg::BurstLenWidth'(1));
+      assign core_divert[P0] = burst_req && !burst_local;
+
+`ifndef SYNTHESIS
+      // pragma translate_off
+      // +spatz_burst_stats: report the remote bursts sent over the wide plane.
+      longint unsigned stat_remote_bursts;
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)                        stat_remote_bursts <= 0;
+        else if (core_divert[P0] && req_ready) stat_remote_bursts <= stat_remote_bursts + 1;
+      end
+      final begin
+        if ($test$plusargs("spatz_burst_stats") && (stat_remote_bursts != 0))
+          $display("[BURST] %m remote_bursts=%0d", stat_remote_bursts);
+      end
+      // pragma translate_on
+`endif
       assign adp_qready[P0]  = req_ready;
       for (genvar l = 0; l < RecvPorts; l++) begin : gen_lane
         assign adp_pvalid[P0 + l] = rsp_valid[l];
@@ -1271,71 +1388,41 @@ module mempool_tile
         assign adp_pid[P0 + l]    = rsp_id[l];
       end : gen_lane
 
-      // ---- this core's own shim: own-tile vs remote ----
-      address_map_t [NumWideShimPorts-1:0] mask_map;
-      assign mask_map = '{
-        '{slave_idx: TCDM_WIDE_EXTERNAL,
-          mask : TCDMMask,
-          value: TCDMBaseAddr},
-        '{slave_idx: TCDM_WIDE_LOCAL,
-          mask : TCDMMask | ({idx_width(NumTiles){1'b1}} << (ByteOffset + $clog2(NumBanksPerTile))),
-          value: TCDMBaseAddr | (tile_id_i << (ByteOffset + $clog2(NumBanksPerTile)))}
-      };
-
-      assign local_wide_req_interco_payload[WIdx].tgt_addr = tile_addr_t'({
-          local_wide_req_interco_addr_int[WIdx][ByteOffset +
-              idx_width(NumBanksPerTile) + $clog2(NumTiles) +: TCDMAddrMemWidth],
-          local_wide_req_interco_addr_int[WIdx][
-              ByteOffset +: idx_width(NumBanksPerTile)]});
-      assign remote_wide_req_interco[WIdx].tgt_addr = remote_wide_req_tgt_addr[WIdx];
-
-      tcdm_shim #(
-        .AddrWidth           (AddrWidth                         ),
-        .DataWidth           (WideTcdmDataWidth                 ),
-        .MaxOutStandingTrans (snitch_pkg::NumIntOutstandingLoads),
-        .NrTCDM              (NumWideShimPorts                  ),
-        .NrSoC               (1                                 ),
-        .EnableSoC           (1'b0                              ),
-        .NumRules            (NumWideShimPorts                  ),
-        .req_t               (tcdm_wide_rm_req_t                ),
-        .resp_t              (tcdm_wide_rm_resp_t               )
-      ) i_spatz_tcdm_wide_shim (
-        .clk_i              (clk_i ),
-        .rst_ni             (rst_ni),
-        .tcdm_req_valid_o   ({local_wide_req_interco_valid[WIdx],                  remote_wide_req_interco_valid[WIdx]}         ),
-        .tcdm_req_tgt_addr_o({local_wide_req_interco_addr_int[WIdx],               remote_wide_req_interco_addr_int[WIdx]}      ),
-        .tcdm_req_wen_o     ({local_wide_req_interco_payload[WIdx].wen,            remote_wide_req_interco[WIdx].wen}           ),
-        .tcdm_req_wdata_o   ({local_wide_req_interco_payload[WIdx].wdata.data,     remote_wide_req_interco[WIdx].wdata.data}    ),
-        .tcdm_req_amo_o     ({local_wide_req_interco_payload[WIdx].wdata.amo,      remote_wide_req_interco[WIdx].wdata.amo}     ),
-        .tcdm_req_id_o      ({local_wide_req_interco_payload[WIdx].wdata.meta_id,  remote_wide_req_interco[WIdx].wdata.meta_id} ),
-        .tcdm_req_be_o      ({local_wide_req_interco_payload[WIdx].be,             remote_wide_req_interco[WIdx].be}            ),
-        .tcdm_req_ready_i   ({local_wide_req_interco_ready[WIdx],                  remote_wide_req_interco_ready[WIdx]}         ),
-        .tcdm_resp_valid_i  ({local_wide_resp_interco_valid[WIdx],                 remote_wide_resp_interco_valid[WIdx]}        ),
-        .tcdm_resp_ready_o  ({local_wide_resp_interco_ready[WIdx],                 remote_wide_resp_interco_ready[WIdx]}        ),
-        .tcdm_resp_rdata_i  ({local_wide_resp_interco_payload[WIdx].rdata.data,    remote_wide_resp_interco[WIdx].rdata.data}   ),
-        .tcdm_resp_id_i     ({local_wide_resp_interco_payload[WIdx].rdata.meta_id, remote_wide_resp_interco[WIdx].rdata.meta_id}),
-        .soc_qaddr_o (/* unused */), .soc_qwrite_o(/* unused */), .soc_qamo_o (/* unused */),
-        .soc_qdata_o (/* unused */), .soc_qstrb_o (/* unused */), .soc_qvalid_o(/* unused */),
-        .soc_qready_i('0), .soc_pdata_i('0), .soc_pwrite_i('0), .soc_perror_i('0),
-        .soc_pvalid_i('0), .soc_pready_o(/* unused */),
-        .data_qaddr_i (wreq.addr  ), .data_qwrite_i(wreq.write ), .data_qamo_i  (wreq.amo  ),
-        .data_qdata_i (wreq.data  ), .data_qstrb_i (wreq.strb  ), .data_qid_i   (wreq.id   ),
-        .data_qvalid_i(wreq_valid ), .data_qready_o(wreq_ready ),
-        .data_pdata_o (wresp.data ), .data_perror_o(wresp.error), .data_pid_o   (wresp.id  ),
-        .data_pvalid_o(wresp_valid), .data_pready_i(wresp_ready),
-        .address_map_i(mask_map   )
-      );
-      assign wresp.write = 1'b0;
-
-      // Self-routing fields. core_id is the wide slot index -- what the shared
-      // response crossbar selects on to get the beat back to this core's shim.
-      assign local_wide_req_interco_payload[WIdx].wdata.core_id = tile_core_id_t'(WIdx);
-      assign local_wide_req_interco_payload[WIdx].ini_addr      = tcdm_wide_tile_id;
-      assign local_wide_req_interco_payload[WIdx].src_group_id  = group_id;
-      assign remote_wide_req_interco[WIdx].wdata.core_id = tile_core_id_t'(WIdx);
+      // ---- remote wide link ----
+      // Only remote bursts reach the adapter (own-tile ones are expanded above),
+      // so its wide access goes straight to the tile's remote wide port; the
+      // remote request router derives tgt_addr / tgt_group_id / tgt_sel from
+      // the address, as for every other wide client.
+      assign remote_wide_req_interco_valid[WIdx]         = wreq_valid;
+      assign wreq_ready                                  = remote_wide_req_interco_ready[WIdx];
+      assign remote_wide_req_interco_addr_int[WIdx]      = wreq.addr;
+      assign remote_wide_req_interco[WIdx].tgt_addr      = remote_wide_req_tgt_addr[WIdx];
       assign remote_wide_req_interco[WIdx].tgt_group_id  = remote_wide_req_tgt_group_id[WIdx];
       assign remote_wide_req_interco[WIdx].src_tile_id   = tcdm_wide_tile_id;
+      assign remote_wide_req_interco[WIdx].wen           = wreq.write;
+      assign remote_wide_req_interco[WIdx].be            = wreq.strb;
+      assign remote_wide_req_interco[WIdx].wdata.data    = wreq.data;
+      assign remote_wide_req_interco[WIdx].wdata.amo     = wreq.amo;
+      assign remote_wide_req_interco[WIdx].wdata.meta_id = wreq.id;
+      // core_id is the wide slot index: what the shared response crossbar
+      // selects on to bring the response back to this core's adapter.
+      assign remote_wide_req_interco[WIdx].wdata.core_id = tile_core_id_t'(WIdx);
       assign remote_wide_req_interco_tgt_sel[WIdx]       = remote_wide_req_tgt_sel[WIdx];
+
+      assign wresp = '{
+        data:  remote_wide_resp_interco[WIdx].rdata.data,
+        id:    remote_wide_resp_interco[WIdx].rdata.meta_id,
+        write: 1'b0,
+        error: 1'b0
+      };
+      assign wresp_valid                          = remote_wide_resp_interco_valid[WIdx];
+      assign remote_wide_resp_interco_ready[WIdx] = wresp_ready;
+
+      // No own-tile side on this slot.
+      assign local_wide_req_interco_valid[WIdx]    = 1'b0;
+      assign local_wide_req_interco_addr_int[WIdx] = '0;
+      assign local_wide_req_interco_payload[WIdx]  = '0;
+      assign local_wide_resp_interco_ready[WIdx]   = 1'b1;
     end : gen_spatz_wide_core
 
     // Ports that are not a core's vector port 0 are never diverted.
@@ -1349,6 +1436,11 @@ module mempool_tile
         assign adp_pvalid[i] = 1'b0;
         assign adp_pdata[i]  = '0;
         assign adp_pid[i]    = '0;
+        assign exp_own[i]    = 1'b0;
+        assign exp_qvalid[i] = 1'b0;
+        assign exp_qaddr[i]  = '0;
+        assign exp_qid[i]    = '0;
+        assign exp_qready[i] = 1'b0;
       end
     end : gen_plain_ports
 
@@ -1358,6 +1450,11 @@ module mempool_tile
     assign adp_pvalid  = '0;
     assign adp_pdata   = '0;
     assign adp_pid     = '0;
+    assign exp_own     = '0;
+    assign exp_qvalid  = '0;
+    assign exp_qaddr   = '0;
+    assign exp_qid     = '0;
+    assign exp_qready  = '0;
   end
 `else
   assign core_divert = '0;
@@ -1365,13 +1462,27 @@ module mempool_tile
   assign adp_pvalid  = '0;
   assign adp_pdata   = '0;
   assign adp_pid     = '0;
+  assign exp_own     = '0;
+  assign exp_qvalid  = '0;
+  assign exp_qaddr   = '0;
+  assign exp_qid     = '0;
+  assign exp_qready  = '0;
 `endif
 
   // The divert layer proper: mask the narrow request, merge the two response
-  // sources. A diverted port's ready is driven in gen_adp_gnt above.
+  // sources. A diverted port's ready is driven in gen_adp_gnt above. While the
+  // own-tile burst expander owns a port, it drives the narrow request (a load
+  // word: no write, no AMO, full strobe) and the core sees exp_qready.
   for (genvar i = 0; i < NumCorePorts; i++) begin : gen_divert_layer
-    assign snitch_data_qvalid[i] = cc_data_qvalid[i] && !core_divert[i];
-    assign cc_data_qready[i]     = core_divert[i] ? adp_qready[i] : snitch_data_qready[i];
+    assign snitch_data_qvalid[i] = exp_own[i] ? exp_qvalid[i] : (cc_data_qvalid[i] && !core_divert[i]);
+    assign snitch_data_qaddr[i]  = exp_own[i] ? exp_qaddr[i]  : cc_data_qaddr[i];
+    assign snitch_data_qwrite[i] = exp_own[i] ? 1'b0          : cc_data_qwrite[i];
+    assign snitch_data_qamo[i]   = exp_own[i] ? '0            : cc_data_qamo[i];
+    assign snitch_data_qdata[i]  = exp_own[i] ? '0            : cc_data_qdata[i];
+    assign snitch_data_qstrb[i]  = exp_own[i] ? '1            : cc_data_qstrb[i];
+    assign snitch_data_qid[i]    = exp_own[i] ? exp_qid[i]    : cc_data_qid[i];
+    assign cc_data_qready[i]     = core_divert[i] ? adp_qready[i] :
+                                   exp_own[i]     ? exp_qready[i] : snitch_data_qready[i];
     assign cc_data_pvalid[i]     = snitch_data_pvalid[i] || adp_pvalid[i];
     assign cc_data_pdata[i]      = adp_pvalid[i] ? adp_pdata[i] : snitch_data_pdata[i];
     assign cc_data_pid[i]        = adp_pvalid[i] ? adp_pid[i]   : snitch_data_pid[i];
@@ -1863,22 +1974,7 @@ module mempool_tile
     assign remote_wide_req_interco_tgt_sel[WidePortIdx] =
         remote_wide_req_tgt_sel[WidePortIdx];
 
-    // The RedMulE narrow interco slots are unused in the wide plane: tie them off
-    // (leaving them undriven bleeds X into the remote router / response xbar).
-    for (genvar p = 0; p < RMMasterPorts; p++) begin : gen_rm_narrow_tieoff
-      localparam int unsigned c = p + NumSoCPorts;
-      assign local_req_interco_valid[c]     = 1'b0;
-      assign local_req_interco_addr_int[c]  = '0;
-      assign local_req_interco_payload[c]   = '0;
-      assign local_resp_interco_ready[c]    = 1'b1;
-      assign remote_req_interco_valid[c]    = 1'b0;
-      assign remote_req_interco[c]          = '0;
-      assign remote_req_interco_addr_int[c] = '0;
-      assign remote_req_interco_wen[c]      = 1'b0;
-      assign remote_req_interco_amoen[c]    = 1'b0;
-      assign remote_req_interco_tgt_sel[c]  = '0;
-      assign remote_resp_interco_ready[c]   = 1'b1;
-    end : gen_rm_narrow_tieoff
+    // No narrow interco slots for RedMulE in the wide plane (RMNarrowPorts = 0).
 
 `ifndef SYNTHESIS
     // WP2 assumes WIDE_W-aligned RedMulE accesses: one access lands in one
