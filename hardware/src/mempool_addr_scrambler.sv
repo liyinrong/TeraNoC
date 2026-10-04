@@ -8,7 +8,8 @@
 //     {tile_id, scramble} fields so HW sees an interleaved-bank layout.
 //   Stage 2 (EnableVirtualCluster, virtual-cluster windows): the level rule —
 //     re-place a window-relative offset inside the requester's 2^k x 2^k
-//     group rectangle.
+//     group rectangle; and the tile window right above them, which re-places
+//     it inside the requester's own tile.
 //   Stage 3 (EnableTileIdRemap, non-sequential TCDM): spread accesses
 //     across the NumTilesPerDma tiles of a DMA group.
 //
@@ -68,18 +69,24 @@ module mempool_addr_scrambler
   parameter logic [AddrWidth-1:0] VcRegionEndChk           = '0,
   // Derived; do not override.
   parameter int unsigned          GroupIdWidth             =
-      (NumX*NumY) > 1 ? $clog2(NumX*NumY) : 1
+      (NumX*NumY) > 1 ? $clog2(NumX*NumY) : 1,
+  parameter int unsigned          TileIdWidth              =
+      NumTilesPerGroup > 1 ? $clog2(NumTilesPerGroup) : 1
 ) (
   input  logic [AddrWidth-1:0]    address_i,
   // Requesting group's flat mesh id, {gx, gy} with gy in the LOW half
   // (hardware/src/mempool_cluster_floonoc_wrapper.sv). Unused unless
   // EnableVirtualCluster.
   input  logic [GroupIdWidth-1:0] group_id_i,
+  // Requesting tile's index inside its group. Unused unless
+  // EnableVirtualCluster; only the tile window reads it.
+  input  logic [TileIdWidth-1:0]  tile_id_i,
   // Asserted when this request was remapped by the VC branch, with the level
-  // it matched. Carried to the request routers so the confinement assertion
-  // can tell VC traffic from ordinary global traffic
-  // AND know which rectangle to check against. Constant 0 when the VC branch
-  // is disabled. Verification-only; nothing in the datapath reads them.
+  // it matched (0 for the tile window, which never leaves the group). Carried
+  // to the request routers so the confinement assertion can tell VC traffic
+  // from ordinary global traffic AND know which rectangle to check against.
+  // Constant 0 when the VC branch is disabled. Verification-only; nothing in
+  // the datapath reads them.
   output logic                    vc_hit_o,
   output logic [2:0]              vc_level_o,
   output logic [AddrWidth-1:0]    address_o
@@ -164,9 +171,29 @@ module mempool_addr_scrambler
                | (row     << VcWordPos);
   endfunction
 
+  // Tile window: one tile's L1, packed right after the level-0 window (i.e.
+  // at VcRegionEnd). byte|bank pass through, the tile and group fields are
+  // the requester's own, and the rest of the offset is the bank row.
+  localparam longint unsigned VcTileWinSize =
+      NumTilesPerGroup > 0 ? VcGroupBytes / NumTilesPerGroup : 0;
+
+  function automatic logic [AddrWidth-1:0] vc_tile_permute (
+      input logic [AddrWidth-1:0]    offset,
+      input logic [GroupIdWidth-1:0] group_id,
+      input logic [TileIdWidth-1:0]  tile_id
+  );
+    automatic logic [AddrWidth-1:0] tile = tile_id & ((1 << VcTileBits) - 1);
+    vc_tile_permute = TCDMBaseAddr
+                    | (offset & ((1 << VcTilePos) - 1))
+                    | (tile     << VcTilePos)
+                    | (AddrWidth'(group_id) << VcGyPos)
+                    | ((offset >> VcTilePos) << VcWordPos);
+  endfunction
+
   // ---- Region decode ----------------------------------------------------
-  // K+1 constant range compares, OR'd. This replaces the single power-of-two
-  // TCDMMask test: global + per-level windows is 1.33x L1, which is never a
+  // K+2 constant range compares (global, K levels, tile window), OR'd. This
+  // replaces the single power-of-two TCDMMask test: global + per-level
+  // windows is 1.33x L1, which is never a
   // power of two, so one mask would round the region up to 2x L1 — at 32x32
   // exactly onto L2 (Track A finding S11).
   // The global region alone IS a power of two, so the existing mask expresses
@@ -178,13 +205,15 @@ module mempool_addr_scrambler
 
   localparam int unsigned VcHitMsb = VcLevels > 0 ? VcLevels-1 : 0;
   logic [VcHitMsb:0]              vc_hit;
+  logic                           vc_tile_hit;
   logic                           vc_any;
   logic [AddrWidth-1:0]           vc_addr;
 
   if (VcLevels == 0) begin : gen_no_vc
-    assign vc_hit  = '0;
-    assign vc_any  = 1'b0;
-    assign vc_addr = address_i;
+    assign vc_hit      = '0;
+    assign vc_tile_hit = 1'b0;
+    assign vc_any      = 1'b0;
+    assign vc_addr     = address_i;
   end else begin : gen_vc
     logic [AddrWidth-1:0] vc_addr_lvl [VcLevels];
     for (genvar k = 0; k < VcLevels; k++) begin : gen_vc_level
@@ -193,12 +222,18 @@ module mempool_addr_scrambler
       assign vc_hit[k] = (address_i >= Base) && (address_i < Base + Size);
       assign vc_addr_lvl[k] = vc_permute(k, address_i - Base, group_id_i);
     end
-    assign vc_any = |vc_hit;
+    localparam logic [AddrWidth-1:0] TileBase = vc_window_base(0) + vc_window_size(0);
+    localparam logic [AddrWidth-1:0] TileSize = VcTileWinSize;
+    logic [AddrWidth-1:0] vc_addr_tile;
+    assign vc_tile_hit  = (address_i >= TileBase) && (address_i < TileBase + TileSize);
+    assign vc_addr_tile = vc_tile_permute(address_i - TileBase, group_id_i, tile_id_i);
+    assign vc_any = |vc_hit || vc_tile_hit;
     always_comb begin
       vc_addr = address_i;
       for (int unsigned k = 0; k < VcLevels; k++) begin
         if (vc_hit[k]) vc_addr = vc_addr_lvl[k];
       end
+      if (vc_tile_hit) vc_addr = vc_addr_tile;
     end
   end
 
@@ -299,6 +334,11 @@ module mempool_addr_scrambler
     if (VcGroupBytes << (2*VcMeshLog2) != TCDMSize)
       $fatal(1, "Per-group L1 x 4^log2(mesh) (%0d) != TCDMSize (%0d).",
              VcGroupBytes << (2*VcMeshLog2), TCDMSize);
+    // The tile window's row field starts at VcWordPos, which assumes the tile
+    // field is exactly VcTileBits wide.
+    if (NumTilesPerGroup != (1 << VcTileBits))
+      $fatal(1, "The tile window needs a power-of-two NumTilesPerGroup (%0d).",
+             NumTilesPerGroup);
     // config/config.mk vs this module: one number pins the whole map, because
     // the region end is the sum of the global region and every window.
     if (VcRegionEndChk != 0 &&

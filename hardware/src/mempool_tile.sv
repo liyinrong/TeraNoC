@@ -180,6 +180,10 @@ module mempool_tile
     assign group_id = '0;
   end: gen_group_id
 
+  // Tile index inside the group, for the scramblers' tile-level VC window.
+  tile_group_id_t tile_in_group_id;
+  assign tile_in_group_id = tile_group_id_t'(tile_id_i);
+
   /***********
    *  Cores  *
    ***********/
@@ -1457,7 +1461,8 @@ module mempool_tile
       // The burst base, scrambled like every narrow and wide address; its own
       // scrambler because snitch_data_qaddr[P0] carries expanded words while an
       // own-tile burst is being issued. A burst is aligned to its span, so it
-      // lies in one tile and the base alone decides.
+      // lies in one tile and the base alone decides. It sees the VC map too: a
+      // remote burst leaves with this address, and a tile-window burst is local.
       addr_t burst_addr_scrambled;
       addr_t own_tile_mask, own_tile_value;
       logic  burst_req, burst_local;
@@ -1473,10 +1478,20 @@ module mempool_tile
         .TCDMBaseAddr            (TCDMBaseAddr     ),
         .TCDMMask                (TCDMMask         ),
         .EnableSeqInterleaveSwap (1'b1             ),
-        .EnableTileIdRemap       (TileIdRemap      )
+        .EnableTileIdRemap       (TileIdRemap      ),
+        .TCDMSize                (TCDMSize         ),
+        .NumTilesPerGroup        (NumTilesPerGroup ),
+        .NumX                    (NumX             ),
+        .NumY                    (NumY             ),
+        .EnableVirtualCluster           (VirtualClusterCore      ),
+        .VcRegionEndChk          (VcRegionEnd      )
       ) i_burst_addr_scrambler (
-        .address_i (cc_data_qaddr[P0]    ),
-        .address_o (burst_addr_scrambled )
+        .address_i  (cc_data_qaddr[P0]    ),
+        .group_id_i (group_id             ),
+        .tile_id_i  (tile_in_group_id     ),
+        .vc_hit_o   (/* unused */         ),
+        .vc_level_o (/* unused */         ),
+        .address_o  (burst_addr_scrambled )
       );
 
       // Same own-tile rule as RedMulE's wide demux (TCDM_WIDE_LOCAL entry).
@@ -1746,6 +1761,7 @@ module mempool_tile
     ) i_addr_scrambler (
       .address_i  (snitch_data_qaddr[i]          ),
       .group_id_i (group_id                      ),
+      .tile_id_i  (tile_in_group_id              ),
       .vc_hit_o   (vc_hit_port[i]                ),
       .vc_level_o (vc_level_port[i]              ),
       .address_o  (snitch_data_qaddr_scrambled[i])
@@ -2374,6 +2390,7 @@ module mempool_tile
     ) i_rm_wide_scrambler (
       .address_i  (tcdm.add             ),
       .group_id_i (group_id             ),
+      .tile_id_i  (tile_in_group_id     ),
       .vc_hit_o   (vc_hit_wide_port     ),
       .vc_level_o (vc_level_wide_port   ),
       .address_o  (tcdm_wide_rm_req.addr)
@@ -2658,6 +2675,7 @@ module mempool_tile
       ) i_addr_scrambler (
         .address_i  (redmule_tcdm_req[p].addr  ),
         .group_id_i (group_id                  ),
+        .tile_id_i  (tile_in_group_id          ),
         .vc_hit_o   (vc_hit_port[c]            ),
         .vc_level_o (vc_level_port[c]          ),
         .address_o  (redmule_addr_scrambled[p] )

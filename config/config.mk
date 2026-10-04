@@ -339,3 +339,8 @@ $(foreach k,$(vc_level_list),\
 # End of the whole VC region. The RTL derives the same map independently and
 # fails elaboration if the two disagree, so this one number pins the agreement.
 vc_region_end     := $(shell awk 'BEGIN{acc=$(l1_total_bytes); for (j=0; j<$(vc_levels); j++) acc += $(vc_group_bytes) * (4 ^ j); printf "%d", acc}')
+
+# Tile window, right after the level-0 window: one tile's L1, which the
+# scrambler re-places into the requester's own tile. Only with vc_levels > 0.
+vc_tile_window_base := $(vc_region_end)
+vc_tile_window_size := $(shell echo $$(( $(vc_group_bytes) * $(num_groups) * $(num_cores_per_tile) / $(num_cores) )))

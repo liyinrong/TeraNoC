@@ -216,6 +216,27 @@ void vc_arena_reset(uint32_t level);
 // local capacity invariant is that this never exceeds VC_WORDS_PER_BANK.
 uint32_t vc_rows_committed(void);
 
+// --- tile window -----------------------------------------------------------
+//
+// One tile's L1 at VC_TILE_WINDOW_BASE, right after the level-0 window. The
+// scramblers re-place an offset into the requester's OWN tile, so every tile
+// sees a private window over the same offsets. An offset is [bank | row]: the
+// tile's slice of a global row plane, so row r is global row r and the rows
+// below vc_floor_rows() belong to the linker here too. Like every VC window it
+// is compute-only; the DMA takes the global alias.
+
+#define VC_TILE_ROW_BYTES (VC_ROW_BYTES / NUM_TILES_PER_GROUP)
+
+static inline void *vc_tile_ptr(uint32_t offset) {
+  return (void *)(VC_TILE_WINDOW_BASE + offset);
+}
+
+// The global alias of a tile-window offset as seen by `tile` (a flat tile id).
+static inline uint32_t vc_tile_global_addr(uint32_t tile, uint32_t offset) {
+  return (offset / VC_TILE_ROW_BYTES) * VC_GLOBAL_ROW_BYTES +
+         tile * VC_TILE_ROW_BYTES + offset % VC_TILE_ROW_BYTES;
+}
+
 // ---------------------------------------------------------------------------
 // Window table. Built from the config defines so there is exactly one source.
 // ---------------------------------------------------------------------------

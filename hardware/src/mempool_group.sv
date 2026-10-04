@@ -781,6 +781,7 @@ module mempool_group
     ) i_dma_addr_scrambler (
       .address_i  (dma_reqrsp_req.q.addr ),
       .group_id_i ('0                    ), // unused, VC remap is off
+      .tile_id_i  ('0                    ), // unused, VC remap is off
       .vc_hit_o   (/* always 0 here */   ),
       .vc_level_o (/* always 0 here */   ),
       .address_o  (dma_scrambled_addr    )

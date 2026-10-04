@@ -14,6 +14,8 @@
 //      content-verified after every level has been written.
 //   D  allocator - the local capacity check, the stack floor, and per-level
 //      independence of the bump pointers.
+//   F  tile window - every tile's private window over the same offsets, read
+//      back through the global alias.
 //
 // Gate item 1 (bijection) is the standalone replay in
 // hardware/tb/tb_vc_scrambler.sv; items 4 and 5 are elaboration asserts in
@@ -260,6 +262,37 @@ int main() {
               "heterogeneous sharing", *(volatile uint32_t *)vc_ptr(1, voff),
               shared_pattern(1, voff));
       }
+    mempool_barrier(num_cores);
+  }
+
+  // ---- F: tile window ---------------------------------------------------
+  //
+  // Every core writes one word of the tile window at the SAME offsets as the
+  // matching core of every other tile. The window is private per tile, so each
+  // tile must read back its own words, through the window and through the
+  // global alias, and the pattern carries the tile id to make a cross-tile
+  // collision visible. Rows start at the linker floor, which the tile window
+  // shares with the global map.
+  {
+    const uint32_t tile = mempool_get_tile_id();
+    const uint32_t lane = core_id % NUM_CORES_PER_TILE;
+    const uint32_t row0 = vc_floor_rows();
+    // A different row and bank per core, so the tile's cores do not overlap.
+    const uint32_t toff = (row0 + lane) * VC_TILE_ROW_BYTES +
+                          ((lane * 5u) % (VC_TILE_ROW_BYTES / 4)) * 4;
+    *(volatile uint32_t *)vc_tile_ptr(toff) = 0x7E000000u ^ (tile << 8) ^ lane;
+    mempool_barrier(num_cores);
+
+    for (uint32_t l = 0; l < NUM_CORES_PER_TILE; l++) {
+      const uint32_t off = (row0 + l) * VC_TILE_ROW_BYTES +
+                           ((l * 5u) % (VC_TILE_ROW_BYTES / 4)) * 4;
+      const uint32_t want = 0x7E000000u ^ (tile << 8) ^ l;
+      const uint32_t got = *(volatile uint32_t *)vc_tile_ptr(off);
+      check(got == want, "tile window", got, want);
+      const uint32_t alias =
+          *(volatile uint32_t *)vc_tile_global_addr(tile, off);
+      check(alias == want, "tile window alias", alias, want);
+    }
     mempool_barrier(num_cores);
   }
 

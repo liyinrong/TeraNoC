@@ -46,6 +46,11 @@ and mapped to the physical address `[ row | base_gid | vc_group | tile | bank |
 byte ]`, where `base_gid = gid & ~(4^k - 1)` (`MortonRule.permute`). The top
 level has no window: its permuter is the identity.
 
+The tile window sits right after the level-0 window (`VC_TILE_WINDOW_BASE`,
+one tile's L1). Its offset `[ row | bank | byte ]` maps to `[ row | gid |
+tile | bank | byte ]` with the requester's own group and tile. It has no golden
+vectors; `tb_vc_scrambler.sv` sweeps it directly.
+
 The checks, per geometry and level:
 
 - the permuter equals the software arithmetic of `vc_global_addr`
