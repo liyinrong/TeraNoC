@@ -25,7 +25,6 @@ noc_resp_narrow_rw_channel_num := 2
 wide_tcdm_data_width ?= 512
 
 num_intra_group_ports_per_tile := 1
-num_inter_group_ports_per_tile := 1
 
 num_redmule_tiles ?= 64
 redmule_height    ?= 8

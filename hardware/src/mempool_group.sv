@@ -42,23 +42,22 @@ module mempool_group
   output `STRUCT_VECT(tcdm_slave_resp_t,  [NumTilesPerGroup-1:0][NumNarrowRemoteRespPortsPerTile-1:1]) tcdm_slave_resp_o,
   output logic                            [NumTilesPerGroup-1:0][NumNarrowRemoteRespPortsPerTile-1:1]  tcdm_slave_resp_valid_o,
   input  logic                            [NumTilesPerGroup-1:0][NumNarrowRemoteRespPortsPerTile-1:1]  tcdm_slave_resp_ready_i,
-  // Wide TCDM plane: inter-group tile ports are concentrated onto the shared
-  // physical group channels. Intra-group ports stay on dedicated interconnects.
-  // As on the narrow interface, channel classes occupy index ranges of common
-  // request and response arrays.
+  // Wide TCDM plane: the inter-group tile ports, numbered as on the tile (the
+  // intra-group ports below them stay on dedicated interconnects), as for the
+  // narrow interfaces above.
   `ifdef USE_WIDE_TCDM_PLANE
-  output `STRUCT_VECT(tcdm_wide_master_req_t, [NumWideRemoteReqChannelsPerGroup-1:0]) tcdm_wide_master_req_o,
-  output logic                            [NumWideRemoteReqChannelsPerGroup-1:0]  tcdm_wide_master_req_valid_o,
-  input  logic                            [NumWideRemoteReqChannelsPerGroup-1:0]  tcdm_wide_master_req_ready_i,
-  input  `STRUCT_VECT(tcdm_wide_slave_req_t, [NumWideRemoteReqChannelsPerGroup-1:0]) tcdm_wide_slave_req_i,
-  input  logic                            [NumWideRemoteReqChannelsPerGroup-1:0]  tcdm_wide_slave_req_valid_i,
-  output logic                            [NumWideRemoteReqChannelsPerGroup-1:0]  tcdm_wide_slave_req_ready_o,
-  input  `STRUCT_VECT(tcdm_wide_master_resp_t, [NumWideRemoteRespChannelsPerGroup-1:0]) tcdm_wide_master_resp_i,
-  input  logic                            [NumWideRemoteRespChannelsPerGroup-1:0] tcdm_wide_master_resp_valid_i,
-  output logic                            [NumWideRemoteRespChannelsPerGroup-1:0] tcdm_wide_master_resp_ready_o,
-  output `STRUCT_VECT(tcdm_wide_slave_resp_t, [NumWideRemoteRespChannelsPerGroup-1:0]) tcdm_wide_slave_resp_o,
-  output logic                            [NumWideRemoteRespChannelsPerGroup-1:0] tcdm_wide_slave_resp_valid_o,
-  input  logic                            [NumWideRemoteRespChannelsPerGroup-1:0] tcdm_wide_slave_resp_ready_i,
+  output `STRUCT_VECT(tcdm_wide_master_req_t,  [NumTilesPerGroup-1:0][NumWideRemoteReqPortsPerTile-1:NumWideIntraGroupPortsPerTile])  tcdm_wide_master_req_o,
+  output logic                            [NumTilesPerGroup-1:0][NumWideRemoteReqPortsPerTile-1:NumWideIntraGroupPortsPerTile]   tcdm_wide_master_req_valid_o,
+  input  logic                            [NumTilesPerGroup-1:0][NumWideRemoteReqPortsPerTile-1:NumWideIntraGroupPortsPerTile]   tcdm_wide_master_req_ready_i,
+  input  `STRUCT_VECT(tcdm_wide_slave_req_t,   [NumTilesPerGroup-1:0][NumWideRemoteReqPortsPerTile-1:NumWideIntraGroupPortsPerTile])  tcdm_wide_slave_req_i,
+  input  logic                            [NumTilesPerGroup-1:0][NumWideRemoteReqPortsPerTile-1:NumWideIntraGroupPortsPerTile]   tcdm_wide_slave_req_valid_i,
+  output logic                            [NumTilesPerGroup-1:0][NumWideRemoteReqPortsPerTile-1:NumWideIntraGroupPortsPerTile]   tcdm_wide_slave_req_ready_o,
+  input  `STRUCT_VECT(tcdm_wide_master_resp_t, [NumTilesPerGroup-1:0][NumWideRemoteRespPortsPerTile-1:NumWideIntraGroupPortsPerTile]) tcdm_wide_master_resp_i,
+  input  logic                            [NumTilesPerGroup-1:0][NumWideRemoteRespPortsPerTile-1:NumWideIntraGroupPortsPerTile]  tcdm_wide_master_resp_valid_i,
+  output logic                            [NumTilesPerGroup-1:0][NumWideRemoteRespPortsPerTile-1:NumWideIntraGroupPortsPerTile]  tcdm_wide_master_resp_ready_o,
+  output `STRUCT_VECT(tcdm_wide_slave_resp_t,  [NumTilesPerGroup-1:0][NumWideRemoteRespPortsPerTile-1:NumWideIntraGroupPortsPerTile]) tcdm_wide_slave_resp_o,
+  output logic                            [NumTilesPerGroup-1:0][NumWideRemoteRespPortsPerTile-1:NumWideIntraGroupPortsPerTile]  tcdm_wide_slave_resp_valid_o,
+  input  logic                            [NumTilesPerGroup-1:0][NumWideRemoteRespPortsPerTile-1:NumWideIntraGroupPortsPerTile]  tcdm_wide_slave_resp_ready_i,
   `endif
 
   // Wake up interface
@@ -102,7 +101,7 @@ module mempool_group
   logic              [NumNarrowRemoteReqPortsPerTile-1:0] [NumTilesPerGroup-1:0] tcdm_slave_req_ready;
 
   // Wide TCDM plane: the first ports are dedicated same-group paths and the
-  // remaining ports are logical inter-group channels.
+  // remaining ports are the inter-group ports.
   `ifdef USE_WIDE_TCDM_PLANE
   tcdm_wide_master_req_t
       [NumWideRemoteReqPortsPerTile-1:0][NumTilesPerGroup-1:0] tcdm_wide_master_req;
@@ -204,7 +203,7 @@ module mempool_group
       .tcdm_slave_resp_valid_o (tran_tcdm_slave_resp_valid                     ),
       .tcdm_slave_resp_ready_i (tran_tcdm_slave_resp_ready                     ),
       // Wide TCDM plane: intra-group ports stay inside the group; the remaining
-      // ports feed the logical-to-physical inter-group mapper below.
+      // ports leave it, as the narrow remote ports do.
       `ifdef USE_WIDE_TCDM_PLANE
       .tcdm_wide_master_req_o          (tran_tcdm_wide_master_req        ),
       .tcdm_wide_master_req_valid_o    (tran_tcdm_wide_master_req_valid  ),
@@ -279,14 +278,10 @@ module mempool_group
    *************************/
 
   // ==========================================================================
-  // Wide TCDM plane: dedicated same-group port plus inter-group mapper.
+  // Wide TCDM plane: dedicated same-group ports; the inter-group ports leave.
   // ==========================================================================
   `ifdef USE_WIDE_TCDM_PLANE
   localparam int unsigned WideTileSelW = idx_width(NumTilesPerGroup);
-  localparam int unsigned NumWideReqPortsPerGroup =
-      NumTilesPerGroup * NumWideInterGroupPortsPerTile;
-  localparam int unsigned NumWideRespPortsPerGroup =
-      NumTilesPerGroup * NumWideInterGroupPortsPerTile;
 
   // The first tile ports are dedicated same-group, other-tile links. Each owns
   // an independent xbar and bank-interconnect ingress and never enters FlooNoC.
@@ -366,243 +361,30 @@ module mempool_group
     );
   end
 
-  // Flatten the remaining ports from every tile into the inter-group mapper.
-  tcdm_wide_master_req_t [NumWideReqPortsPerGroup-1:0]
-      tcdm_wide_master_req_before_mapper;
-  logic [NumWideReqPortsPerGroup-1:0] tcdm_wide_master_req_before_mapper_valid;
-  logic [NumWideReqPortsPerGroup-1:0] tcdm_wide_master_req_before_mapper_ready;
-  logic [NumWideReqPortsPerGroup-1:0] tcdm_wide_master_req_before_mapper_class1;
-
-  for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_wide_req_mapper_t
-    for (genvar r = 0; r < NumWideInterGroupPortsPerTile; r++) begin :
-        gen_wide_req_mapper_r
-      localparam int unsigned ReqIdx = t * NumWideInterGroupPortsPerTile + r;
-      assign tcdm_wide_master_req_before_mapper[ReqIdx] =
-          tcdm_wide_master_req[r+NumWideIntraGroupPortsPerTile][t];
-      assign tcdm_wide_master_req_before_mapper_valid[ReqIdx] =
-          tcdm_wide_master_req_valid[r+NumWideIntraGroupPortsPerTile][t];
-      assign tcdm_wide_master_req_ready[r+NumWideIntraGroupPortsPerTile][t] =
-          tcdm_wide_master_req_before_mapper_ready[ReqIdx];
-      assign tcdm_wide_master_req_before_mapper_class1[ReqIdx] =
-          tcdm_wide_master_req[r+NumWideIntraGroupPortsPerTile][t].wen;
+  // The inter-group ports leave the group unchanged: each owns a router in
+  // mempool_group_floonoc_wrapper, as the narrow remote ports do.
+  for (genvar r = NumWideIntraGroupPortsPerTile; r < NumWideRemoteReqPortsPerTile; r++) begin :
+      gen_wide_remote_req
+    for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_wide_remote_req_t
+      assign tcdm_wide_master_req_o[t][r]       = tcdm_wide_master_req[r][t];
+      assign tcdm_wide_master_req_valid_o[t][r] = tcdm_wide_master_req_valid[r][t];
+      assign tcdm_wide_master_req_ready[r][t]   = tcdm_wide_master_req_ready_i[t][r];
+      assign tcdm_wide_slave_req[r][t]          = tcdm_wide_slave_req_i[t][r];
+      assign tcdm_wide_slave_req_valid[r][t]    = tcdm_wide_slave_req_valid_i[t][r];
+      assign tcdm_wide_slave_req_ready_o[t][r]  = tcdm_wide_slave_req_ready[r][t];
     end
   end
 
-  mempool_group_channel_mapper #(
-    .NumInp     (NumWideReqPortsPerGroup         ),
-    .NumClass0  (NumWideRoReqChannelsPerGroup    ),
-    .NumClass1  (NumWideRwReqChannelsPerGroup    ),
-    .payload_t  (tcdm_wide_master_req_t           )
-  ) i_wide_req_channel_mapper (
-    .clk_i        (clk_i                                    ),
-    .rst_ni       (rst_ni                                   ),
-    .inp_data_i   (tcdm_wide_master_req_before_mapper       ),
-    .inp_valid_i  (tcdm_wide_master_req_before_mapper_valid ),
-    .inp_ready_o  (tcdm_wide_master_req_before_mapper_ready ),
-    .inp_class1_i (tcdm_wide_master_req_before_mapper_class1),
-    .oup_data_o   (tcdm_wide_master_req_o                   ),
-    .oup_valid_o  (tcdm_wide_master_req_valid_o             ),
-    .oup_ready_i  (tcdm_wide_master_req_ready_i             )
-  );
-
-  // Dispatch injected requests to a compatible inter-group port of the target
-  // tile. Dedicated same-group ports are never selected here.
-  tcdm_wide_slave_req_t [NumWideReqPortsPerGroup-1:0]
-      tcdm_wide_slave_req_after_xbar;
-  logic [NumWideReqPortsPerGroup-1:0] tcdm_wide_slave_req_after_xbar_valid;
-  logic [NumWideReqPortsPerGroup-1:0] tcdm_wide_slave_req_after_xbar_ready;
-  logic [NumWideRemoteReqChannelsPerGroup-1:0]
-      [idx_width(NumWideReqPortsPerGroup)-1:0] tcdm_wide_slave_req_sel;
-
-  for (genvar c = 0; c < NumWideRemoteReqChannelsPerGroup; c++) begin :
-      gen_wide_slave_req_sel
-    logic [WideTileSelW-1:0] target_tile;
-    logic [idx_width(NumWideInterGroupPortsPerTile)-1:0] logical_port;
-    assign target_tile = (NumTilesPerGroup > 1) ?
-        tcdm_wide_slave_req_i[c].tgt_addr[WideTileSelW-1:0] : '0;
-    assign logical_port =
-        idx_width(NumWideInterGroupPortsPerTile)'(
-            (c < NumWideRoReqChannelsPerGroup) ?
-                c % NumWideInterGroupPortsPerTile :
-                (c - NumWideRoReqChannelsPerGroup) %
-                    NumWideInterGroupPortsPerTile);
-    assign tcdm_wide_slave_req_sel[c] =
-        idx_width(NumWideReqPortsPerGroup)'(
-            target_tile * NumWideInterGroupPortsPerTile + logical_port);
-  end
-
-  stream_xbar #(
-    .NumInp   (NumWideRemoteReqChannelsPerGroup),
-    .NumOut   (NumWideReqPortsPerGroup         ),
-    .payload_t(tcdm_wide_slave_req_t            ),
-    .AxiVldRdy(1'b1                             ),
-    .LockIn   (1'b1                             )
-  ) i_wide_slave_req_xbar (
-    .clk_i  (clk_i                           ),
-    .rst_ni (rst_ni                          ),
-    .flush_i(1'b0                            ),
-    .rr_i   ('0                              ),
-    .data_i (tcdm_wide_slave_req_i           ),
-    .valid_i(tcdm_wide_slave_req_valid_i     ),
-    .ready_o(tcdm_wide_slave_req_ready_o     ),
-    .sel_i  (tcdm_wide_slave_req_sel         ),
-    .data_o (tcdm_wide_slave_req_after_xbar  ),
-    .valid_o(tcdm_wide_slave_req_after_xbar_valid),
-    .ready_i(tcdm_wide_slave_req_after_xbar_ready),
-    .idx_o  (/* unused */                    )
-  );
-
-  for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_wide_slave_req_t
-    for (genvar r = 0; r < NumWideInterGroupPortsPerTile; r++) begin :
-        gen_wide_slave_req_r
-      localparam int unsigned ReqIdx = t * NumWideInterGroupPortsPerTile + r;
-      assign tcdm_wide_slave_req[r+NumWideIntraGroupPortsPerTile][t] =
-          tcdm_wide_slave_req_after_xbar[ReqIdx];
-      assign tcdm_wide_slave_req_valid[r+NumWideIntraGroupPortsPerTile][t] =
-          tcdm_wide_slave_req_after_xbar_valid[ReqIdx];
-      assign tcdm_wide_slave_req_after_xbar_ready[ReqIdx] =
-          tcdm_wide_slave_req_ready[r+NumWideIntraGroupPortsPerTile][t];
+  for (genvar r = NumWideIntraGroupPortsPerTile; r < NumWideRemoteRespPortsPerTile; r++) begin :
+      gen_wide_remote_resp
+    for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_wide_remote_resp_t
+      assign tcdm_wide_master_resp[r][t]         = tcdm_wide_master_resp_i[t][r];
+      assign tcdm_wide_master_resp_valid[r][t]   = tcdm_wide_master_resp_valid_i[t][r];
+      assign tcdm_wide_master_resp_ready_o[t][r] = tcdm_wide_master_resp_ready[r][t];
+      assign tcdm_wide_slave_resp_o[t][r]        = tcdm_wide_slave_resp[r][t];
+      assign tcdm_wide_slave_resp_valid_o[t][r]  = tcdm_wide_slave_resp_valid[r][t];
+      assign tcdm_wide_slave_resp_ready[r][t]    = tcdm_wide_slave_resp_ready_i[t][r];
     end
-  end
-
-  // Flatten the remaining tile response ports into the inter-group mapper.
-  tcdm_wide_slave_resp_t [NumWideRespPortsPerGroup-1:0]
-      tcdm_wide_slave_resp_before_mapper;
-  logic [NumWideRespPortsPerGroup-1:0] tcdm_wide_slave_resp_before_mapper_valid;
-  logic [NumWideRespPortsPerGroup-1:0] tcdm_wide_slave_resp_before_mapper_ready;
-  logic [NumWideRespPortsPerGroup-1:0] tcdm_wide_slave_resp_before_mapper_class1;
-
-  for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_wide_resp_mapper_t
-    for (genvar r = 0; r < NumWideInterGroupPortsPerTile; r++) begin :
-        gen_wide_resp_mapper_r
-      localparam int unsigned RespIdx = t * NumWideInterGroupPortsPerTile + r;
-      assign tcdm_wide_slave_resp_before_mapper[RespIdx] =
-          tcdm_wide_slave_resp[r+NumWideIntraGroupPortsPerTile][t];
-      assign tcdm_wide_slave_resp_before_mapper_valid[RespIdx] =
-          tcdm_wide_slave_resp_valid[r+NumWideIntraGroupPortsPerTile][t];
-      assign tcdm_wide_slave_resp_ready[r+NumWideIntraGroupPortsPerTile][t] =
-          tcdm_wide_slave_resp_before_mapper_ready[RespIdx];
-      assign tcdm_wide_slave_resp_before_mapper_class1[RespIdx] =
-          tcdm_wide_slave_resp[r+NumWideIntraGroupPortsPerTile][t].is_write;
-    end
-  end
-
-  mempool_group_channel_mapper #(
-    .NumInp     (NumWideRespPortsPerGroup        ),
-    .NumClass0  (NumWideRwRespChannelsPerGroup   ),
-    .NumClass1  (NumWideWoRespChannelsPerGroup   ),
-    .payload_t  (tcdm_wide_slave_resp_t           )
-  ) i_wide_resp_channel_mapper (
-    .clk_i        (clk_i                                     ),
-    .rst_ni       (rst_ni                                    ),
-    .inp_data_i   (tcdm_wide_slave_resp_before_mapper        ),
-    .inp_valid_i  (tcdm_wide_slave_resp_before_mapper_valid  ),
-    .inp_ready_o  (tcdm_wide_slave_resp_before_mapper_ready  ),
-    .inp_class1_i (tcdm_wide_slave_resp_before_mapper_class1 ),
-    .oup_data_o   (tcdm_wide_slave_resp_o                    ),
-    .oup_valid_o  (tcdm_wide_slave_resp_valid_o              ),
-    .oup_ready_i  (tcdm_wide_slave_resp_ready_i              )
-  );
-
-  // Return injected responses to a compatible inter-group response port of
-  // the requester tile.
-  tcdm_wide_master_resp_t [NumWideRespPortsPerGroup-1:0]
-      tcdm_wide_master_resp_after_xbar;
-  logic [NumWideRespPortsPerGroup-1:0] tcdm_wide_master_resp_after_xbar_valid;
-  logic [NumWideRespPortsPerGroup-1:0] tcdm_wide_master_resp_after_xbar_ready;
-  logic [NumWideRemoteRespChannelsPerGroup-1:0]
-      [idx_width(NumWideRespPortsPerGroup)-1:0] tcdm_wide_master_resp_sel;
-
-  for (genvar c = 0; c < NumWideRemoteRespChannelsPerGroup; c++) begin :
-      gen_wide_master_resp_sel
-    logic [idx_width(NumWideInterGroupPortsPerTile)-1:0] logical_port;
-    assign logical_port =
-        idx_width(NumWideInterGroupPortsPerTile)'(
-            (c < NumWideRwRespChannelsPerGroup) ?
-                c % NumWideInterGroupPortsPerTile :
-                (c - NumWideRwRespChannelsPerGroup) %
-                    NumWideInterGroupPortsPerTile);
-    assign tcdm_wide_master_resp_sel[c] =
-        idx_width(NumWideRespPortsPerGroup)'(
-            tcdm_wide_master_resp_i[c].tile_id *
-            NumWideInterGroupPortsPerTile + logical_port);
-  end
-
-  stream_xbar #(
-    .NumInp   (NumWideRemoteRespChannelsPerGroup),
-    .NumOut   (NumWideRespPortsPerGroup         ),
-    .payload_t(tcdm_wide_master_resp_t          ),
-    .AxiVldRdy(1'b1                             ),
-    .LockIn   (1'b1                             )
-  ) i_wide_master_resp_xbar (
-    .clk_i  (clk_i                            ),
-    .rst_ni (rst_ni                           ),
-    .flush_i(1'b0                             ),
-    .rr_i   ('0                               ),
-    .data_i (tcdm_wide_master_resp_i          ),
-    .valid_i(tcdm_wide_master_resp_valid_i    ),
-    .ready_o(tcdm_wide_master_resp_ready_o    ),
-    .sel_i  (tcdm_wide_master_resp_sel        ),
-    .data_o (tcdm_wide_master_resp_after_xbar ),
-    .valid_o(tcdm_wide_master_resp_after_xbar_valid),
-    .ready_i(tcdm_wide_master_resp_after_xbar_ready),
-    .idx_o  (/* unused */                     )
-  );
-
-  for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_wide_master_resp_t
-    for (genvar r = 0; r < NumWideInterGroupPortsPerTile; r++) begin :
-        gen_wide_master_resp_r
-      localparam int unsigned RespIdx = t * NumWideInterGroupPortsPerTile + r;
-      assign tcdm_wide_master_resp[r+NumWideIntraGroupPortsPerTile][t] =
-          tcdm_wide_master_resp_after_xbar[RespIdx];
-      assign tcdm_wide_master_resp_valid[r+NumWideIntraGroupPortsPerTile][t] =
-          tcdm_wide_master_resp_after_xbar_valid[RespIdx];
-      assign tcdm_wide_master_resp_after_xbar_ready[RespIdx] =
-          tcdm_wide_master_resp_ready[r+NumWideIntraGroupPortsPerTile][t];
-    end
-  end
-
-  initial begin : p_wide_group_channel_count
-    // A class may be WIDER than the aggregate tile port count, but only when its
-    // remapper rotates the channel binding: the mapper picks with `i % class`
-    // over i < ports, so without rotation the channels at and above `ports` are
-    // never selected and are dead silicon. Only the RO request and RW response
-    // classes have a remapper, so the other two stay hard-capped.
-    if (!WideRouterRemapping[0])
-      assert (NumWideRoReqChannelsPerGroup <= NumWideReqPortsPerGroup)
-        else $fatal(1, "[mempool_group] Wide RO request channels (%0d) exceed the %0d tile ports with no remapper: channels %0d and above are unreachable. Set noc_wide_router_remapping bit 0.",
-            NumWideRoReqChannelsPerGroup, NumWideReqPortsPerGroup,
-            NumWideReqPortsPerGroup);
-    assert (NumWideRwReqChannelsPerGroup <= NumWideReqPortsPerGroup)
-      else $fatal(1, "[mempool_group] Wide RW request channels exceed tile ports.");
-    if (!WideRouterRemapping[1])
-      assert (NumWideRwRespChannelsPerGroup <= NumWideRespPortsPerGroup)
-        else $fatal(1, "[mempool_group] Wide RW response channels (%0d) exceed the %0d tile ports with no remapper: channels %0d and above are unreachable. Set noc_wide_router_remapping bit 1.",
-            NumWideRwRespChannelsPerGroup, NumWideRespPortsPerGroup,
-            NumWideRespPortsPerGroup);
-    assert (NumWideWoRespChannelsPerGroup <= NumWideRespPortsPerGroup)
-      else $fatal(1, "[mempool_group] Wide WO response channels exceed tile ports.");
-    // The inter-group ports are batched by port id: port r of every tile shares
-    // one batch of channels, and a request issued on port r must be carried and
-    // answered inside batch r alone. The mapper picks a channel with
-    // `i % NumClass` over the flattened input i = t*ports + r (gen_wide_*_mapper
-    // above), while the endpoint crossbars recover the port with
-    // `channel % ports`. The two agree only if the class count is a multiple of
-    // the port count; otherwise the batches overlap and a response returns on a
-    // port whose requester never issued it -- a silent mis-route, no X and no
-    // hang. Zero is fine: it disables the class.
-    assert (NumWideRoReqChannelsPerGroup % NumWideInterGroupPortsPerTile == 0)
-      else $fatal(1, "[mempool_group] Wide RO request channels must be a multiple of the %0d inter-group ports per tile, so the per-port channel batches partition; got %0d.",
-          NumWideInterGroupPortsPerTile, NumWideRoReqChannelsPerGroup);
-    assert (NumWideRwReqChannelsPerGroup % NumWideInterGroupPortsPerTile == 0)
-      else $fatal(1, "[mempool_group] Wide RW request channels must be a multiple of the %0d inter-group ports per tile, so the per-port channel batches partition; got %0d.",
-          NumWideInterGroupPortsPerTile, NumWideRwReqChannelsPerGroup);
-    assert (NumWideRwRespChannelsPerGroup % NumWideInterGroupPortsPerTile == 0)
-      else $fatal(1, "[mempool_group] Wide RW response channels must be a multiple of the %0d inter-group ports per tile, so the per-port channel batches partition; got %0d.",
-          NumWideInterGroupPortsPerTile, NumWideRwRespChannelsPerGroup);
-    assert (NumWideWoRespChannelsPerGroup % NumWideInterGroupPortsPerTile == 0)
-      else $fatal(1, "[mempool_group] Wide WO response channels must be a multiple of the %0d inter-group ports per tile, so the per-port channel batches partition; got %0d.",
-          NumWideInterGroupPortsPerTile, NumWideWoRespChannelsPerGroup);
   end
   `endif
 

@@ -19,16 +19,13 @@ config_build_path ?= tensorpool256_spatz4_wide
 # One wide payload is one 512-bit RedMulE TCDM beat in this flavor.
 wide_tcdm_data_width := 512
 
-# 1 RW req + 1 RW resp channel per group and mesh direction; the meta-only RO
-# request and WO response classes stay off.
-noc_req_wide_ro_channel_num   := 0
-noc_req_wide_rw_channel_num   := 1
-noc_resp_wide_rw_channel_num  := 1
-noc_resp_wide_wo_channel_num  := 0
+# The minimal wide plane: one port of each class per tile.
+noc_req_wide_ro_port_num  := 1
+noc_req_wide_wo_port_num  := 1
+noc_resp_wide_rw_port_num := 1
+noc_resp_wide_wo_port_num := 1
 
-# One logical wide port per tile for intra-group traffic and one for the
-# inter-group path (symmetric: it sizes both the request and response side).
+# One dedicated wide link per tile for intra-group traffic.
 num_intra_group_ports_per_tile := 1
-num_inter_group_ports_per_tile := 1
 
 include $(MEMPOOL_DIR)/config/tensorpool256_spatz4.mk

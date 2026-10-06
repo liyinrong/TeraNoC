@@ -73,7 +73,7 @@ $(info [DEBUG:][noc_req_narrow_wo_channel_num]----$(noc_req_narrow_wo_channel_nu
 $(info [DEBUG:][noc_resp_narrow_rw_channel_num]------$(noc_resp_narrow_rw_channel_num))
 
 # Wide TCDM plane (WP2) payload width: one 512-bit RedMulE TCDM beat. The plane
-# itself stays off unless noc_req_wide_rw_channel_num >= 1 (config/config.mk).
+# itself stays off unless noc_req_wide_ro_port_num >= 1 (config/config.mk).
 wide_tcdm_data_width ?= 512
 
 # Router buffer configuration

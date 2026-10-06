@@ -294,46 +294,30 @@ $(error Narrow TCDM plane requires at least one RD response channel)
 endif
 # Wide TCDM plane (WP2): a separate single-beat FlooNoC net. Default 0 => absent
 # and bit-identical to a build without it; USE_WIDE_TCDM_PLANE gates the RTL.
-# Four independently sized, per-group channel classes (stage-1 DSE plan §6.6).
-# The RW request and RW response classes are mandatory when the plane is on; the
-# meta-only RO request and WO response classes are optional and each gated by
-# its own define, because a zero-width member of a packed struct is illegal (the
-# same reason USE_RO_NARROW_REQ_CHANNEL gates the 32-bit net's meta-only read
-# class).
+# Per-tile port counts, built like the narrow plane (config/config.mk): RO and
+# WO request ports, RW and WO response ports, all four mandatory when the plane
+# is on, and the WO channels merged across noc_wide_wo_merge tiles.
 vlog_defs += -DWIDE_TCDM_DATA_WIDTH=$(wide_tcdm_data_width)
-vlog_defs += -DNOC_REQ_WIDE_RO_CHANNEL_NUM=$(noc_req_wide_ro_channel_num)
-vlog_defs += -DNOC_REQ_WIDE_RW_CHANNEL_NUM=$(noc_req_wide_rw_channel_num)
-vlog_defs += -DNOC_RESP_WIDE_RW_CHANNEL_NUM=$(noc_resp_wide_rw_channel_num)
-vlog_defs += -DNOC_RESP_WIDE_WO_CHANNEL_NUM=$(noc_resp_wide_wo_channel_num)
+vlog_defs += -DNOC_REQ_WIDE_RO_PORT_NUM=$(noc_req_wide_ro_port_num)
+vlog_defs += -DNOC_REQ_WIDE_WO_PORT_NUM=$(noc_req_wide_wo_port_num)
+vlog_defs += -DNOC_RESP_WIDE_RW_PORT_NUM=$(noc_resp_wide_rw_port_num)
+vlog_defs += -DNOC_RESP_WIDE_WO_PORT_NUM=$(noc_resp_wide_wo_port_num)
+vlog_defs += -DNOC_WIDE_WO_MERGE=$(noc_wide_wo_merge)
 vlog_defs += -DNUM_INTRA_GROUP_PORTS_PER_TILE=$(num_intra_group_ports_per_tile)
-vlog_defs += -DNUM_INTER_GROUP_PORTS_PER_TILE=$(num_inter_group_ports_per_tile)
 vlog_defs += -DNOC_WIDE_ROUTER_REMAPPING=$(noc_wide_router_remapping)
 vlog_defs += -DNOC_WIDE_RO_REQ_REMAP_GROUP_SIZE=$(noc_wide_ro_req_remap_group_size)
 vlog_defs += -DNOC_WIDE_RW_RESP_REMAP_GROUP_SIZE=$(noc_wide_rw_resp_remap_group_size)
-ifneq (0, $(noc_req_wide_ro_channel_num))
-	vlog_defs += -DUSE_RO_WIDE_REQ_CHANNEL
-endif
-ifneq (0, $(noc_resp_wide_wo_channel_num))
-	vlog_defs += -DUSE_WO_WIDE_RESP_CHANNEL
-endif
-ifeq (0, $(noc_req_wide_rw_channel_num))
-ifneq (0, $(noc_req_wide_ro_channel_num))
-$(error noc_req_wide_ro_channel_num is set but the wide plane is off: set noc_req_wide_rw_channel_num >= 1)
-endif
-ifneq (0, $(noc_resp_wide_rw_channel_num))
-$(error noc_resp_wide_rw_channel_num is set but the wide plane is off: set noc_req_wide_rw_channel_num >= 1)
-endif
-ifneq (0, $(noc_resp_wide_wo_channel_num))
-$(error noc_resp_wide_wo_channel_num is set but the wide plane is off: set noc_req_wide_rw_channel_num >= 1)
-endif
-ifneq (0, $(strip $(noc_wide_router_remapping)))
-$(error noc_wide_router_remapping is set but the wide plane is off: set noc_req_wide_rw_channel_num >= 1)
+ifeq (0, $(strip $(noc_req_wide_ro_port_num)))
+wide_tcdm_other_ports := $(shell printf '%s' $$(( $(noc_req_wide_wo_port_num) + \
+	$(noc_resp_wide_rw_port_num) + $(noc_resp_wide_wo_port_num) + $(noc_wide_router_remapping) )))
+ifneq (0, $(strip $(wide_tcdm_other_ports)))
+$(error Wide TCDM ports or remapping are set but the wide plane is off: set noc_req_wide_ro_port_num >= 1)
 endif
 # A Spatz burst is serviced ONLY by the wide-plane adapter. With the plane off the VLSU
 # still emits burst_len>1 requests; they take the narrow path and each returns a SINGLE
 # beat where the VLSU is waiting for burst_len of them, so the core wedges silently.
 ifeq (1, $(strip $(spatz_burst)))
-$(error spatz_burst=1 needs the wide TCDM plane: set noc_req_wide_rw_channel_num >= 1 and noc_resp_wide_rw_channel_num >= 1)
+$(error spatz_burst=1 needs the wide TCDM plane: set noc_req_wide_ro_port_num >= 1)
 endif
 else
 	vlog_defs += -DUSE_WIDE_TCDM_PLANE
@@ -363,101 +347,46 @@ wide_tcdm_word_remainder := $(shell printf '%s' $$(( $(wide_tcdm_data_width) % 3
 ifneq (0,$(strip $(wide_tcdm_word_remainder)))
 $(error wide_tcdm_data_width=$(wide_tcdm_data_width) must be a multiple of the 32-bit TCDM word width)
 endif
-ifeq (0, $(noc_resp_wide_rw_channel_num))
-$(error Wide TCDM plane is on but noc_resp_wide_rw_channel_num=0: read data has no channel to return on)
-endif
-ifeq (0, $(num_inter_group_ports_per_tile))
-$(error Wide TCDM plane requires at least one inter-group port per tile)
-endif
 wide_tcdm_num_tiles_per_group := $(shell printf '%s' \
 	$$(( $(num_cores) / $(num_cores_per_tile) / $(num_groups) )))
-# The tile's inter-group ports are symmetric: one count sizes both the request
-# and the response side, so no request/response equality check is needed.
-wide_tcdm_ports_per_group := $(shell printf '%s' \
-	$$(( $(wide_tcdm_num_tiles_per_group) * \
-	     $(strip $(num_inter_group_ports_per_tile)) )))
-# RO/RW/WO classes are mutually exclusive for each logical port. Each physical
-# class may use up to the aggregate generic tile-port count; their sum may be
-# larger (for example, four RO plus two RW channels fed by four tile ports).
-#
-# A class may go BEYOND that count, but only if its remapper is on. The group
-# concentrator selects with `i % class_count` over i < ports, so an unrotated
-# class never selects the channels at or above `ports`: the model measured an
-# 8-RO mix bit-identical to a 4-RO one with remapping off. Rotating the binding
-# makes them reachable (never more than `ports` busy at once -- the extra
-# channels buy independent meshes, not injection bandwidth). RW request and WO
-# response have no remapper, so they stay hard-capped.
-wide_tcdm_ro_req_channels_over_limit := $(shell printf '%s' \
-	$$(( $(noc_req_wide_ro_channel_num) > $(wide_tcdm_ports_per_group) && \
-	     ($(noc_wide_router_remapping) & 1) == 0 )))
-wide_tcdm_rw_req_channels_over_limit := $(shell printf '%s' \
-	$$(( $(noc_req_wide_rw_channel_num) > $(wide_tcdm_ports_per_group) )))
-wide_tcdm_rw_resp_channels_over_limit := $(shell printf '%s' \
-	$$(( $(noc_resp_wide_rw_channel_num) > $(wide_tcdm_ports_per_group) && \
-	     ($(noc_wide_router_remapping) & 2) == 0 )))
-wide_tcdm_wo_resp_channels_over_limit := $(shell printf '%s' \
-	$$(( $(noc_resp_wide_wo_channel_num) > $(wide_tcdm_ports_per_group) )))
-ifeq (1,$(strip $(wide_tcdm_ro_req_channels_over_limit)))
-$(error noc_req_wide_ro_channel_num=$(noc_req_wide_ro_channel_num) exceeds the $(wide_tcdm_ports_per_group) aggregate inter-group request ports with no remapper: channels $(wide_tcdm_ports_per_group) and above are unreachable. Set bit 0 of noc_wide_router_remapping, or lower the count)
+# Every port class is needed: reads on RO, writes on WO, read data on RW, write
+# acks on WO. RO and WO requests are picked by a modulo, so both are powers of
+# two; RO port k answers on RW port k % RW, so RW must divide RO; WO request k
+# answers on WO response k, so the two counts match. A merged write channel
+# serves tiles t and t + tiles/merge, so merge divides the tiles.
+wide_tcdm_ports_bad := $(shell printf '%s' \
+	$$(( $(noc_req_wide_wo_port_num) < 1 || $(noc_resp_wide_rw_port_num) < 1 || \
+	     $(noc_resp_wide_wo_port_num) < 1 || \
+	     ($(noc_req_wide_ro_port_num) & ($(noc_req_wide_ro_port_num) - 1)) != 0 || \
+	     ($(noc_req_wide_wo_port_num) & ($(noc_req_wide_wo_port_num) - 1)) != 0 || \
+	     $(noc_req_wide_ro_port_num) % $(noc_resp_wide_rw_port_num) != 0 || \
+	     $(noc_resp_wide_wo_port_num) != $(noc_req_wide_wo_port_num) || \
+	     $(noc_wide_wo_merge) < 1 || ($(noc_wide_wo_merge) & ($(noc_wide_wo_merge) - 1)) != 0 || \
+	     $(wide_tcdm_num_tiles_per_group) % $(noc_wide_wo_merge) != 0 )))
+ifeq (1,$(strip $(wide_tcdm_ports_bad)))
+$(error Wide TCDM ports (RO $(noc_req_wide_ro_port_num), WO $(noc_req_wide_wo_port_num), RW resp $(noc_resp_wide_rw_port_num), WO resp $(noc_resp_wide_wo_port_num), merge $(noc_wide_wo_merge)) are invalid: every class needs a port, RO and WO request counts are powers of two, the RW response count divides the RO count, the WO response count equals the WO request count, and the merge is a power of two dividing the $(wide_tcdm_num_tiles_per_group) tiles per group)
 endif
-ifeq (1,$(strip $(wide_tcdm_rw_req_channels_over_limit)))
-$(error Wide TCDM RW request channels exceed aggregate inter-group request ports)
-endif
-ifeq (1,$(strip $(wide_tcdm_rw_resp_channels_over_limit)))
-$(error noc_resp_wide_rw_channel_num=$(noc_resp_wide_rw_channel_num) exceeds the $(wide_tcdm_ports_per_group) aggregate inter-group response ports with no remapper: channels $(wide_tcdm_ports_per_group) and above are unreachable. Set bit 1 of noc_wide_router_remapping, or lower the count)
-endif
-ifeq (1,$(strip $(wide_tcdm_wo_resp_channels_over_limit)))
-$(error Wide TCDM WO response channels exceed aggregate inter-group response ports)
-endif
-# --- Wide channel remapping (config/config.mk noc_wide_router_remapping) ---
-# floo_remapper is a perfect-shuffle permutation over GroupSize channels rotated
-# once per cycle. Two constraints on GroupSize, both hard:
-#   * a power of two >= 2. GroupSize=1 makes $clog2(GroupSize)=0 and the select
-#     type `logic [SelWidth-1:0]` degenerates to [-1:0].
-#   * it must divide the class count, which floo_remapper itself asserts.
-# And one constraint the remapper cannot see. With Interleaved=1 the remap group
-# g holds the channels congruent to g modulo NumGroup=class/GroupSize, so a
-# rotation preserves `channel % NumGroup`. The endpoint crossbars in
-# mempool_group.sv recover a tile's logical inter-group port with
-# `channel % ports` (gen_wide_slave_req_sel / gen_wide_master_resp_sel), so the
-# permutation is only port-preserving when ports divides NumGroup. Violate it
-# and a response returns on a port whose requester never issued the request --
-# the same silent mis-route p_wide_group_channel_count guards, with no X, no
-# hang and no assertion.
-wide_ro_req_remapped := $(shell printf '%s' \
-	$$(( ($(noc_wide_router_remapping) & 1) != 0 )))
-wide_rw_resp_remapped := $(shell printf '%s' \
-	$$(( ($(noc_wide_router_remapping) & 2) != 0 )))
-ifeq (1,$(strip $(wide_ro_req_remapped)))
-ifeq (0,$(strip $(noc_req_wide_ro_channel_num)))
-$(error noc_wide_router_remapping=$(noc_wide_router_remapping) remaps the wide RO request class, but noc_req_wide_ro_channel_num=0 disables it)
-endif
+# --- Wide router remapping (config/config.mk noc_wide_router_remapping) ---
+# floo_remapper is a perfect-shuffle permutation over GroupSize inputs rotated
+# once per cycle, Interleaved over the flattened {tile, port} index: a group
+# holds port p of GroupSize tiles, so a rotation never changes the port as long
+# as GroupSize divides the tiles per group. GroupSize is a power of two >= 2:
+# GroupSize=1 makes $clog2(GroupSize)=0 and the select type degenerates.
 wide_ro_req_remap_bad := $(shell printf '%s' \
-	$$(( $(noc_wide_ro_req_remap_group_size) < 2 || \
-	     ($(noc_wide_ro_req_remap_group_size) & \
-	      ($(noc_wide_ro_req_remap_group_size) - 1)) != 0 || \
-	     $(noc_req_wide_ro_channel_num) % \
-	      $(noc_wide_ro_req_remap_group_size) != 0 || \
-	     ($(noc_req_wide_ro_channel_num) / \
-	      $(noc_wide_ro_req_remap_group_size)) % \
-	      $(num_inter_group_ports_per_tile) != 0 )))
+	$$(( ($(noc_wide_router_remapping) & 1) != 0 && \
+	     ($(noc_wide_ro_req_remap_group_size) < 2 || \
+	      ($(noc_wide_ro_req_remap_group_size) & ($(noc_wide_ro_req_remap_group_size) - 1)) != 0 || \
+	      $(wide_tcdm_num_tiles_per_group) % $(noc_wide_ro_req_remap_group_size) != 0) )))
 ifeq (1,$(strip $(wide_ro_req_remap_bad)))
-$(error noc_wide_ro_req_remap_group_size=$(noc_wide_ro_req_remap_group_size) is invalid for noc_req_wide_ro_channel_num=$(noc_req_wide_ro_channel_num) at num_inter_group_ports_per_tile=$(num_inter_group_ports_per_tile): it must be a power of two >= 2 that divides the class count, and the resulting remap-group count must be a multiple of the ports per tile)
+$(error noc_wide_ro_req_remap_group_size=$(noc_wide_ro_req_remap_group_size) must be a power of two >= 2 dividing the $(wide_tcdm_num_tiles_per_group) tiles per group)
 endif
-endif
-ifeq (1,$(strip $(wide_rw_resp_remapped)))
 wide_rw_resp_remap_bad := $(shell printf '%s' \
-	$$(( $(noc_wide_rw_resp_remap_group_size) < 2 || \
-	     ($(noc_wide_rw_resp_remap_group_size) & \
-	      ($(noc_wide_rw_resp_remap_group_size) - 1)) != 0 || \
-	     $(noc_resp_wide_rw_channel_num) % \
-	      $(noc_wide_rw_resp_remap_group_size) != 0 || \
-	     ($(noc_resp_wide_rw_channel_num) / \
-	      $(noc_wide_rw_resp_remap_group_size)) % \
-	      $(num_inter_group_ports_per_tile) != 0 )))
+	$$(( ($(noc_wide_router_remapping) & 2) != 0 && \
+	     ($(noc_wide_rw_resp_remap_group_size) < 2 || \
+	      ($(noc_wide_rw_resp_remap_group_size) & ($(noc_wide_rw_resp_remap_group_size) - 1)) != 0 || \
+	      $(wide_tcdm_num_tiles_per_group) % $(noc_wide_rw_resp_remap_group_size) != 0) )))
 ifeq (1,$(strip $(wide_rw_resp_remap_bad)))
-$(error noc_wide_rw_resp_remap_group_size=$(noc_wide_rw_resp_remap_group_size) is invalid for noc_resp_wide_rw_channel_num=$(noc_resp_wide_rw_channel_num) at num_inter_group_ports_per_tile=$(num_inter_group_ports_per_tile): it must be a power of two >= 2 that divides the class count, and the resulting remap-group count must be a multiple of the ports per tile)
-endif
+$(error noc_wide_rw_resp_remap_group_size=$(noc_wide_rw_resp_remap_group_size) must be a power of two >= 2 dividing the $(wide_tcdm_num_tiles_per_group) tiles per group)
 endif
 endif
 # --------------------------

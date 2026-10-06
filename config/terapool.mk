@@ -76,7 +76,7 @@ noc_router_output_fifo_dep ?= 2
 noc_router_remap_group_size ?= 4
 
 # Wide TCDM plane (WP2): this flavor has no RedMulE wide endpoint, so the current
-# direct one-beat implementation requires noc_req_wide_rw_channel_num=0.
+# direct one-beat implementation requires noc_req_wide_ro_port_num=0.
 
 ###########################
 ## 3. AXI and DMA Config

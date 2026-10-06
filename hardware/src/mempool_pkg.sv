@@ -532,10 +532,7 @@ package mempool_pkg;
   // * The narrow plane is always present. USE_RO_NARROW_REQ_CHANNEL adds its
   //   optional, meta-only RO request array.
   // * USE_WIDE_TCDM_PLANE owns every wide type and packed interface member.
-  //   Its RW request and RW response channel arrays are mandatory.
-  // * USE_RO_WIDE_REQ_CHANNEL and USE_WO_WIDE_RESP_CHANNEL are optional children
-  //   of USE_WIDE_TCDM_PLANE. They add the meta-only RO request and WO response
-  //   channel arrays, respectively.
+  //   All four of its port classes are mandatory.
   //
   // In this package, the optional guards are needed only where a zero channel
   // count would create an illegal packed array. The build derives them from the
@@ -556,60 +553,50 @@ package mempool_pkg;
   localparam integer unsigned NumNarrowPayloadReqPortsPerTile =
       NumNarrowRwReqPortsPerTile + NumNarrowWoReqPortsPerTile;
 
-  // Wide TCDM plane (WP2) group-channel counts. A SEPARATE FlooNoC net with its own
-  // routers/links, so these are NOT folded into NumNarrowRemoteReqPortsPerTile (which
-  // sizes the 32-bit net). Default 0 => the wide plane is absent and the build
-  // is bit-identical to one without it.
+  // Wide TCDM plane (WP2) port counts. A SEPARATE FlooNoC net with its own
+  // routers/links, built like the narrow plane: every inter-group port of every
+  // tile owns its own router, and the counts are PER TILE. Default 0 => the wide
+  // plane is absent and the build is bit-identical to one without it.
   //
-  // The plane carries FOUR channel classes, mirroring the narrow TCDM plane's
-  // RO/RW split and sized independently (roadmap S9 / stage-1 DSE plan §6.6).
-  // Engine traffic is read-dominated and structurally asymmetric -- a request
-  // carries no data, a read response carries a whole line -- so the cheap classes
-  // are the ones worth multiplying:
+  // Engine traffic is read-dominated and a read request carries no data, so the
+  // request side splits by direction, as do the responses:
   //
-  //   class            payload            wires   role
-  //   RO  req          meta only            ~46   read request (no data to send)
-  //   RW  req          meta + WIDE_W + strb ~627  write request (also legal for reads)
-  //   RW  resp         meta + WIDE_W       ~540   read data or a write ack
-  //   WO  resp         meta only            ~28   write ack (NOT a data response)
+  //   class            payload               role
+  //   RO  req          meta only             read request, port picked by address hash
+  //   WO  req          meta + WIDE_W + strb  write request
+  //   RW  resp         meta + WIDE_W         read data, on the RW port paired with
+  //                                          the RO port the read came from
+  //   WO  resp         meta only             write ack (NOT a data response)
   //
-  // RW req and RW resp are mandatory whenever the plane is on. RO req and WO
-  // resp are optional; the guard contract above keeps their zero-count arrays
-  // out of packed interface types.
-  localparam integer unsigned NumWideRoReqChannelsPerGroup =
-      `ifdef NOC_REQ_WIDE_RO_CHANNEL_NUM `NOC_REQ_WIDE_RO_CHANNEL_NUM `else 0 `endif;
-  localparam integer unsigned NumWideRwReqChannelsPerGroup =
-      `ifdef NOC_REQ_WIDE_RW_CHANNEL_NUM `NOC_REQ_WIDE_RW_CHANNEL_NUM `else 0 `endif;
-  localparam integer unsigned NumWideRwRespChannelsPerGroup =
-      `ifdef NOC_RESP_WIDE_RW_CHANNEL_NUM `NOC_RESP_WIDE_RW_CHANNEL_NUM `else 0 `endif;
+  // All four are mandatory whenever the plane is on. Writes are rare, so the
+  // write channels are shared: NumWideWoMerge tiles of a group (t and
+  // t + NumTilesPerGroup / NumWideWoMerge) meet on one WO request and one WO
+  // response channel.
+  localparam integer unsigned NumWideRoReqPortsPerTile =
+      `ifdef NOC_REQ_WIDE_RO_PORT_NUM `NOC_REQ_WIDE_RO_PORT_NUM `else 0 `endif;
+  localparam integer unsigned NumWideWoReqPortsPerTile =
+      `ifdef NOC_REQ_WIDE_WO_PORT_NUM `NOC_REQ_WIDE_WO_PORT_NUM `else 0 `endif;
+  localparam integer unsigned NumWideRwRespPortsPerTile =
+      `ifdef NOC_RESP_WIDE_RW_PORT_NUM `NOC_RESP_WIDE_RW_PORT_NUM `else 0 `endif;
+  localparam integer unsigned NumWideWoRespPortsPerTile =
+      `ifdef NOC_RESP_WIDE_WO_PORT_NUM `NOC_RESP_WIDE_WO_PORT_NUM `else 0 `endif;
+  localparam integer unsigned NumWideWoMerge =
+      `ifdef NOC_WIDE_WO_MERGE `NOC_WIDE_WO_MERGE `else 1 `endif;
+  localparam integer unsigned NumWideWoReqChannelsPerGroup =
+      NumTilesPerGroup * NumWideWoReqPortsPerTile / NumWideWoMerge;
   localparam integer unsigned NumWideWoRespChannelsPerGroup =
-      `ifdef NOC_RESP_WIDE_WO_CHANNEL_NUM `NOC_RESP_WIDE_WO_CHANNEL_NUM `else 0 `endif;
+      NumTilesPerGroup * NumWideWoRespPortsPerTile / NumWideWoMerge;
 
-  // Logical wide ports at each tile. The first ports are dedicated same-group,
-  // other-tile paths. The remaining indices are class-neutral inter-group ports;
-  // the group maps them onto its physical RO/RW/WO channel classes.
-  //
-  // A tile's wide ports are SYMMETRIC: each kind is one count that sizes both
-  // the request and the response side, so the two totals below are equal by
-  // construction and cannot be configured apart.
+  // Wide ports at each tile: the dedicated same-group paths first, then the
+  // inter-group ports, requests {RO, WO} and responses {RW, WO}.
   localparam integer unsigned NumWideIntraGroupPortsPerTile =
       `ifdef NUM_INTRA_GROUP_PORTS_PER_TILE
       `NUM_INTRA_GROUP_PORTS_PER_TILE
       `else 1 `endif;
-  localparam integer unsigned NumWideInterGroupPortsPerTile =
-      `ifdef NUM_INTER_GROUP_PORTS_PER_TILE
-      `NUM_INTER_GROUP_PORTS_PER_TILE
-      `else 1 `endif;
   localparam integer unsigned NumWideRemoteReqPortsPerTile =
-      NumWideIntraGroupPortsPerTile + NumWideInterGroupPortsPerTile;
+      NumWideIntraGroupPortsPerTile + NumWideRoReqPortsPerTile + NumWideWoReqPortsPerTile;
   localparam integer unsigned NumWideRemoteRespPortsPerTile =
-      NumWideIntraGroupPortsPerTile + NumWideInterGroupPortsPerTile;
-
-  // Totals: the physical wide channels carried by each group-to-group mesh direction.
-  localparam integer unsigned NumWideRemoteReqChannelsPerGroup =
-      NumWideRoReqChannelsPerGroup + NumWideRwReqChannelsPerGroup;
-  localparam integer unsigned NumWideRemoteRespChannelsPerGroup =
-      NumWideRwRespChannelsPerGroup + NumWideWoRespChannelsPerGroup;
+      NumWideIntraGroupPortsPerTile + NumWideRwRespPortsPerTile + NumWideWoRespPortsPerTile;
 
   localparam integer unsigned NumNarrowRemoteReqPortsPerTile =
       1 + NumNarrowRoReqPortsPerTile + NumNarrowPayloadReqPortsPerTile;
@@ -663,11 +650,11 @@ package mempool_pkg;
   localparam integer unsigned SpmBankIdRemap = `ifdef SPM_BANK_ID_REMAP `SPM_BANK_ID_REMAP `else 0 `endif;
   localparam integer unsigned TileIdRemap = `ifdef TILE_ID_REMAP `TILE_ID_REMAP `else 0 `endif;
   localparam integer unsigned RouterRemapGroupSize = `ifdef NOC_ROUTER_REMAP_GROUP_SIZE `NOC_ROUTER_REMAP_GROUP_SIZE `else 2 `endif;
-  // Wide-plane channel remapping, independent of the narrow plane's
-  // NocRouterRemapping. Bit 0 rotates the RO request class, bit 1 the RW
-  // response class; the other two classes do not alias and are never remapped.
-  // config/config.mk documents the lever, hardware/Makefile validates the group
-  // sizes against the class counts and the inter-group ports per tile.
+  // Wide-plane router remapping, independent of the narrow plane's
+  // NocRouterRemapping. Bit 0 rotates the RO request ports, bit 1 the RW
+  // response ports, each over port p of a group of tiles (as the narrow
+  // plane); the merged WO channels are never remapped. config/config.mk
+  // documents the lever, hardware/Makefile validates the group sizes.
   localparam integer unsigned WideRouterRemapping =
       `ifdef NOC_WIDE_ROUTER_REMAPPING `NOC_WIDE_ROUTER_REMAPPING `else 0 `endif;
   localparam integer unsigned WideRoReqRemapGroupSize =
@@ -714,7 +701,7 @@ package mempool_pkg;
   } floo_tcdm_narrow_rw_req_t;
 
   // --------------------------------------------------------------------------
-  //  Wide TCDM plane (WP2) request flit + group-channel interface — a separate,
+  //  Wide TCDM plane (WP2) request flits + port interfaces — a separate,
   //  single-beat FlooNoC net (WIDE_W wide). Present only when the plane is
   //  enabled (default off => bit-identical). Single-beat: one flit per engine
   //  request, hdr.last always 1'b1 (INVARIANT #1). It rides the same per-group
@@ -730,8 +717,7 @@ package mempool_pkg;
     wide_tcdm_data_t  data;
   } floo_tcdm_wide_req_payload_t;
 
-  // RW request: the full flit (write data + strobes). Also legal for reads, which
-  // is what makes RO channels a pure optimisation rather than a requirement.
+  // RW request flit: the full flit (write data + strobes), carried by the WO ports.
   // Reuse the 32-bit net's request meta: meta_id already covers RedMulE's ROB id
   // (MetaIdWidth), preserving the user-id end-to-end (INVARIANT #3).
   typedef struct packed {
@@ -744,11 +730,12 @@ package mempool_pkg;
     floo_tcdm_req_meta_t hdr;
   } floo_tcdm_wide_ro_req_t;
 
+  // WO request: carries the RW flit, as the narrow WO ports do.
   typedef struct packed {
     floo_tcdm_wide_rw_req_t req;
     logic                    valid;
     logic                    ready;
-  } floo_tcdm_wide_rw_req_if_entry_t;
+  } floo_tcdm_wide_wo_req_if_entry_t;
 
   typedef struct packed {
     floo_tcdm_wide_ro_req_t req;
@@ -756,11 +743,9 @@ package mempool_pkg;
     logic                    ready;
   } floo_tcdm_wide_ro_req_if_entry_t;
 
+  // The merged write channels belong to the group, not to a tile.
   typedef struct packed {
-    `ifdef USE_RO_WIDE_REQ_CHANNEL
-    floo_tcdm_wide_ro_req_if_entry_t [NumWideRoReqChannelsPerGroup-1:0] wide_ro_req;
-    `endif
-    floo_tcdm_wide_rw_req_if_entry_t [NumWideRwReqChannelsPerGroup-1:0] wide_rw_req;
+    floo_tcdm_wide_wo_req_if_entry_t [NumWideWoReqChannelsPerGroup-1:0] wide_wo_req;
   } floo_tcdm_wide_req_if_group_entry_t;
   `endif
 
@@ -781,6 +766,9 @@ package mempool_pkg;
     floo_tcdm_narrow_ro_req_if_entry_t [NumNarrowRoReqPortsPerTile-1:0] narrow_ro_req;
     `endif
     floo_tcdm_narrow_rw_req_if_entry_t [NumNarrowPayloadReqPortsPerTile-1:0] narrow_rw_req;
+    `ifdef USE_WIDE_TCDM_PLANE
+    floo_tcdm_wide_ro_req_if_entry_t [NumWideRoReqPortsPerTile-1:0] wide_ro_req;
+    `endif
   } floo_tcdm_req_if_per_tile_entry_t;
 
   typedef struct packed {
@@ -811,7 +799,7 @@ package mempool_pkg;
     floo_tcdm_resp_meta_t            hdr;
   } floo_tcdm_narrow_rw_resp_t;
 
-  // Wide TCDM plane (WP2) response flits + group-channel interface (see request note).
+  // Wide TCDM plane (WP2) response flits + port interfaces (see request note).
   `ifdef USE_WIDE_TCDM_PLANE
   typedef struct packed {
     wide_tcdm_data_t data;
@@ -853,10 +841,8 @@ package mempool_pkg;
   typedef struct packed {
     floo_tcdm_narrow_rw_rsp_if_entry_t     [NumTilesPerGroup-1:0][NumNarrowRemoteRespPortsPerTile-1:1]    floo_tcdm_narrow_rw_resp;
     `ifdef USE_WIDE_TCDM_PLANE
-    floo_tcdm_wide_rw_rsp_if_entry_t [NumWideRwRespChannelsPerGroup-1:0] floo_tcdm_wide_rw_resp;
-    `ifdef USE_WO_WIDE_RESP_CHANNEL
+    floo_tcdm_wide_rw_rsp_if_entry_t [NumTilesPerGroup-1:0][NumWideRwRespPortsPerTile-1:0] floo_tcdm_wide_rw_resp;
     floo_tcdm_wide_wo_rsp_if_entry_t [NumWideWoRespChannelsPerGroup-1:0] floo_tcdm_wide_wo_resp;
-    `endif
     `endif
   } floo_tcdm_rsp_if_t;
 

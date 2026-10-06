@@ -78,7 +78,7 @@ noc_router_output_fifo_dep ?= 2
 noc_router_remap_group_size ?= 4
 
 # Wide TCDM plane (WP2): one wide payload is one 1024-bit RedMulE TCDM beat in
-# this flavor. The plane stays disabled unless noc_req_wide_rw_channel_num >= 1.
+# this flavor. The plane stays disabled unless noc_req_wide_ro_port_num >= 1.
 wide_tcdm_data_width ?= 1024
 
 ###########################

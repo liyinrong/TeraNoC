@@ -159,12 +159,15 @@
   logic [1:0]  wts_sreq_st [NumGroups][NumTilesPerGroup][NumWideRemoteReqPortsPerTile];  logic [63:0] wts_sreq_s [NumGroups][NumTilesPerGroup][NumWideRemoteReqPortsPerTile];
   logic [1:0]  wts_mrsp_st [NumGroups][NumTilesPerGroup][NumWideRemoteRespPortsPerTile]; logic [63:0] wts_mrsp_s [NumGroups][NumTilesPerGroup][NumWideRemoteRespPortsPerTile];
   logic [1:0]  wts_srsp_st [NumGroups][NumTilesPerGroup][NumWideRemoteRespPortsPerTile]; logic [63:0] wts_srsp_s [NumGroups][NumTilesPerGroup][NumWideRemoteRespPortsPerTile];
-  // wide routers: the two request classes (RO then RW) share one flat channel
-  // axis per group, likewise the two response classes (RD then WR). The class a
-  // flat index belongs to is emitted as the `cls` column, so one file per group
-  // per net still holds every wide router.
-  localparam int unsigned NumWReqCh  = NumWideRemoteReqChannelsPerGroup;
-  localparam int unsigned NumWRespCh = NumWideRemoteRespChannelsPerGroup;
+  // wide routers: the two request classes share one flat lane axis per group --
+  // the RO port routers (tile * ports + port) first, then the merged WO
+  // channels -- likewise the RW response port routers and the WO response
+  // channels. The class a flat index belongs to is emitted as the `cls` column,
+  // so one file per group per net still holds every wide router.
+  localparam int unsigned NumWROReqLanes  = NumTilesPerGroup * NumWideRoReqPortsPerTile;
+  localparam int unsigned NumWRWRespLanes = NumTilesPerGroup * NumWideRwRespPortsPerTile;
+  localparam int unsigned NumWReqCh  = NumWROReqLanes + NumWideWoReqChannelsPerGroup;
+  localparam int unsigned NumWRespCh = NumWRWRespLanes + NumWideWoRespChannelsPerGroup;
   logic [1:0]  wrq_st [NumGroups][NumWReqCh][5][2];  logic [63:0] wrq_s [NumGroups][NumWReqCh][5][2];
   logic [1:0]  wrs_st [NumGroups][NumWRespCh][5][2]; logic [63:0] wrs_s [NumGroups][NumWRespCh][5][2];
 `endif
@@ -685,9 +688,10 @@
 
   // ------------------------------------------------------------
   // WIDE router capture -> router_g<g>_wide_{req,resp}.log. The wide plane runs
-  // its own routers, one per group CHANNEL of each class, so the demux index is
-  // a flat channel id over the classes of that net (RO then RW on the request
-  // net, RD then WR on the response net) and `cls` names which class it is:
+  // its own routers, one per tile port (RO request, RW response) or merged
+  // channel (WO), so the demux index is a flat lane id over the classes of that
+  // net (RO then WO on the request net, RW then WO on the response net) and
+  // `cls` names which class it is:
   //   <c> S <cls> <dir> <io> <start> <end> <state>
   //   req  <c> P <cls> <dir> <io> <cyc> <wen> <tgt_addr> <dstx> <dsty> <srcx> <srcy> <src_tile> <core> <meta_id>
   //   resp <c> P <cls> <dir> <io> <cyc> <dstx> <dsty> <srcx> <srcy> <req_tile> <req_core> <meta_id>
@@ -696,14 +700,14 @@
   // The three macros exist because the classes differ ONLY in the flit's write
   // flag: an RO request flit is meta-only, so it is a read by construction.
   // ------------------------------------------------------------
-  `define WIDE_REQ_ROUTER_BODY(NM, CLS, BASE, NCH, WEN_I, WEN_O, WEN_T, WEN_F)   \
+  `define WIDE_REQ_ROUTER_BODY(NM, CLS, BASE, NCH, IDX, WEN_I, WEN_O, WEN_T, WEN_F)   \
     for (int k = 0; k < NCH; k++) begin                                       \
       automatic int c = BASE + k;                                                \
       for (int d = 0; d < 4; d++) begin                                          \
-        automatic logic [1:0] si = `NOC_GRP(g).NM``_valid_in_trans[k][d]         \
-          ? (`NOC_GRP(g).NM``_ready_out_trans[k][d] ? (WEN_I ? 2'd3 : 2'd2) : 2'd1) : 2'd0; \
-        automatic logic [1:0] so = `NOC_GRP(g).NM``_valid_out_trans[k][d]        \
-          ? (`NOC_GRP(g).NM``_ready_in_trans[k][d] ? (WEN_O ? 2'd3 : 2'd2) : 2'd1) : 2'd0;  \
+        automatic logic [1:0] si = `NOC_GRP(g).NM``_valid_in_trans IDX [d]         \
+          ? (`NOC_GRP(g).NM``_ready_out_trans IDX [d] ? (WEN_I ? 2'd3 : 2'd2) : 2'd1) : 2'd0; \
+        automatic logic [1:0] so = `NOC_GRP(g).NM``_valid_out_trans IDX [d]        \
+          ? (`NOC_GRP(g).NM``_ready_in_trans IDX [d] ? (WEN_O ? 2'd3 : 2'd2) : 2'd1) : 2'd0;  \
         if (si != wrq_st[g][c][d][0]) begin                                      \
           $fwrite(f_wrreq[g], "%0d S %0d %0d 0 %0d %0d %0d\n", c, CLS, d, wrq_s[g][c][d][0], cycle_q, wrq_st[g][c][d][0]); \
           wrq_st[g][c][d][0] <= si; wrq_s[g][c][d][0] <= cycle_q;                \
@@ -715,31 +719,31 @@
         if (si >= 2)                                                             \
           $fwrite(f_wrreq[g], "%0d P %0d %0d 0 %0d %0d %0h %0d %0d %0d %0d %0d %0d %0d\n", c, CLS, d, cycle_q, \
             WEN_I,                                                               \
-            `NOC_GRP(g).NM``_in_trans[k][d].hdr.tgt_addr,                        \
-            `NOC_GRP(g).NM``_in_trans[k][d].hdr.dst_id.x,                        \
-            `NOC_GRP(g).NM``_in_trans[k][d].hdr.dst_id.y,                        \
-            `NOC_GRP(g).NM``_in_trans[k][d].hdr.src_id.x,                        \
-            `NOC_GRP(g).NM``_in_trans[k][d].hdr.src_id.y,                        \
-            `NOC_GRP(g).NM``_in_trans[k][d].hdr.src_tile_id,                     \
+            `NOC_GRP(g).NM``_in_trans IDX [d].hdr.tgt_addr,                        \
+            `NOC_GRP(g).NM``_in_trans IDX [d].hdr.dst_id.x,                        \
+            `NOC_GRP(g).NM``_in_trans IDX [d].hdr.dst_id.y,                        \
+            `NOC_GRP(g).NM``_in_trans IDX [d].hdr.src_id.x,                        \
+            `NOC_GRP(g).NM``_in_trans IDX [d].hdr.src_id.y,                        \
+            `NOC_GRP(g).NM``_in_trans IDX [d].hdr.src_tile_id,                     \
             WideEngCoreId,                                                       \
-            `NOC_GRP(g).NM``_in_trans[k][d].hdr.meta_id);                        \
+            `NOC_GRP(g).NM``_in_trans IDX [d].hdr.meta_id);                        \
         if (so >= 2)                                                             \
           $fwrite(f_wrreq[g], "%0d P %0d %0d 1 %0d %0d %0h %0d %0d %0d %0d %0d %0d %0d\n", c, CLS, d, cycle_q, \
             WEN_O,                                                               \
-            `NOC_GRP(g).NM``_out_trans[k][d].hdr.tgt_addr,                       \
-            `NOC_GRP(g).NM``_out_trans[k][d].hdr.dst_id.x,                       \
-            `NOC_GRP(g).NM``_out_trans[k][d].hdr.dst_id.y,                       \
-            `NOC_GRP(g).NM``_out_trans[k][d].hdr.src_id.x,                       \
-            `NOC_GRP(g).NM``_out_trans[k][d].hdr.src_id.y,                       \
-            `NOC_GRP(g).NM``_out_trans[k][d].hdr.src_tile_id,                    \
+            `NOC_GRP(g).NM``_out_trans IDX [d].hdr.tgt_addr,                       \
+            `NOC_GRP(g).NM``_out_trans IDX [d].hdr.dst_id.x,                       \
+            `NOC_GRP(g).NM``_out_trans IDX [d].hdr.dst_id.y,                       \
+            `NOC_GRP(g).NM``_out_trans IDX [d].hdr.src_id.x,                       \
+            `NOC_GRP(g).NM``_out_trans IDX [d].hdr.src_id.y,                       \
+            `NOC_GRP(g).NM``_out_trans IDX [d].hdr.src_tile_id,                    \
             WideEngCoreId,                                                       \
-            `NOC_GRP(g).NM``_out_trans[k][d].hdr.meta_id);                       \
+            `NOC_GRP(g).NM``_out_trans IDX [d].hdr.meta_id);                       \
       end                                                                        \
       begin                                                                      \
-        automatic logic [1:0] sli = `NOC_GRP(g).NM``_to_router_valid[k]           \
-          ? (`NOC_GRP(g).NM``_to_router_ready[k] ? (WEN_T ? 2'd3 : 2'd2) : 2'd1) : 2'd0;    \
-        automatic logic [1:0] slo = `NOC_GRP(g).NM``_from_router_valid[k]         \
-          ? (`NOC_GRP(g).NM``_from_router_ready[k] ? (WEN_F ? 2'd3 : 2'd2) : 2'd1) : 2'd0;  \
+        automatic logic [1:0] sli = `NOC_GRP(g).NM``_to_router_valid IDX            \
+          ? (`NOC_GRP(g).NM``_to_router_ready IDX  ? (WEN_T ? 2'd3 : 2'd2) : 2'd1) : 2'd0;    \
+        automatic logic [1:0] slo = `NOC_GRP(g).NM``_from_router_valid IDX          \
+          ? (`NOC_GRP(g).NM``_from_router_ready IDX  ? (WEN_F ? 2'd3 : 2'd2) : 2'd1) : 2'd0;  \
         if (sli != wrq_st[g][c][4][0]) begin                                     \
           $fwrite(f_wrreq[g], "%0d S %0d 4 0 %0d %0d %0d\n", c, CLS, wrq_s[g][c][4][0], cycle_q, wrq_st[g][c][4][0]); \
           wrq_st[g][c][4][0] <= sli; wrq_s[g][c][4][0] <= cycle_q;               \
@@ -751,38 +755,38 @@
         if (sli >= 2)                                                            \
           $fwrite(f_wrreq[g], "%0d P %0d 4 0 %0d %0d %0h %0d %0d %0d %0d %0d %0d %0d\n", c, CLS, cycle_q, \
             WEN_T,                                                               \
-            `NOC_GRP(g).NM``_to_router[k].hdr.tgt_addr,                          \
-            `NOC_GRP(g).NM``_to_router[k].hdr.dst_id.x,                          \
-            `NOC_GRP(g).NM``_to_router[k].hdr.dst_id.y,                          \
-            `NOC_GRP(g).NM``_to_router[k].hdr.src_id.x,                          \
-            `NOC_GRP(g).NM``_to_router[k].hdr.src_id.y,                          \
-            `NOC_GRP(g).NM``_to_router[k].hdr.src_tile_id,                       \
+            `NOC_GRP(g).NM``_to_router IDX .hdr.tgt_addr,                          \
+            `NOC_GRP(g).NM``_to_router IDX .hdr.dst_id.x,                          \
+            `NOC_GRP(g).NM``_to_router IDX .hdr.dst_id.y,                          \
+            `NOC_GRP(g).NM``_to_router IDX .hdr.src_id.x,                          \
+            `NOC_GRP(g).NM``_to_router IDX .hdr.src_id.y,                          \
+            `NOC_GRP(g).NM``_to_router IDX .hdr.src_tile_id,                       \
             WideEngCoreId,                                                       \
-            `NOC_GRP(g).NM``_to_router[k].hdr.meta_id);                          \
+            `NOC_GRP(g).NM``_to_router IDX .hdr.meta_id);                          \
         if (slo >= 2)                                                            \
           $fwrite(f_wrreq[g], "%0d P %0d 4 1 %0d %0d %0h %0d %0d %0d %0d %0d %0d %0d\n", c, CLS, cycle_q, \
             WEN_F,                                                               \
-            `NOC_GRP(g).NM``_from_router[k].hdr.tgt_addr,                        \
-            `NOC_GRP(g).NM``_from_router[k].hdr.dst_id.x,                        \
-            `NOC_GRP(g).NM``_from_router[k].hdr.dst_id.y,                        \
-            `NOC_GRP(g).NM``_from_router[k].hdr.src_id.x,                        \
-            `NOC_GRP(g).NM``_from_router[k].hdr.src_id.y,                        \
-            `NOC_GRP(g).NM``_from_router[k].hdr.src_tile_id,                     \
+            `NOC_GRP(g).NM``_from_router IDX .hdr.tgt_addr,                        \
+            `NOC_GRP(g).NM``_from_router IDX .hdr.dst_id.x,                        \
+            `NOC_GRP(g).NM``_from_router IDX .hdr.dst_id.y,                        \
+            `NOC_GRP(g).NM``_from_router IDX .hdr.src_id.x,                        \
+            `NOC_GRP(g).NM``_from_router IDX .hdr.src_id.y,                        \
+            `NOC_GRP(g).NM``_from_router IDX .hdr.src_tile_id,                     \
             WideEngCoreId,                                                       \
-            `NOC_GRP(g).NM``_from_router[k].hdr.meta_id);                        \
+            `NOC_GRP(g).NM``_from_router IDX .hdr.meta_id);                        \
       end                                                                        \
     end
 
   // A response flit has no address and no write flag: one macro serves the RD
   // (data-bearing) and WR (meta-only ACK) classes alike.
-  `define WIDE_RESP_ROUTER_BODY(NM, CLS, BASE, NCH)                              \
+  `define WIDE_RESP_ROUTER_BODY(NM, CLS, BASE, NCH, IDX)                              \
     for (int k = 0; k < NCH; k++) begin                                       \
       automatic int c = BASE + k;                                                \
       for (int d = 0; d < 4; d++) begin                                          \
-        automatic logic [1:0] si = `NOC_GRP(g).NM``_valid_in_trans[k][d]         \
-          ? (`NOC_GRP(g).NM``_ready_out_trans[k][d] ? 2'd2 : 2'd1) : 2'd0;       \
-        automatic logic [1:0] so = `NOC_GRP(g).NM``_valid_out_trans[k][d]        \
-          ? (`NOC_GRP(g).NM``_ready_in_trans[k][d] ? 2'd2 : 2'd1) : 2'd0;        \
+        automatic logic [1:0] si = `NOC_GRP(g).NM``_valid_in_trans IDX [d]         \
+          ? (`NOC_GRP(g).NM``_ready_out_trans IDX [d] ? 2'd2 : 2'd1) : 2'd0;       \
+        automatic logic [1:0] so = `NOC_GRP(g).NM``_valid_out_trans IDX [d]        \
+          ? (`NOC_GRP(g).NM``_ready_in_trans IDX [d] ? 2'd2 : 2'd1) : 2'd0;        \
         if (si != wrs_st[g][c][d][0]) begin                                      \
           $fwrite(f_wrresp[g], "%0d S %0d %0d 0 %0d %0d %0d\n", c, CLS, d, wrs_s[g][c][d][0], cycle_q, wrs_st[g][c][d][0]); \
           wrs_st[g][c][d][0] <= si; wrs_s[g][c][d][0] <= cycle_q;                \
@@ -793,28 +797,28 @@
         end                                                                      \
         if (si >= 2)                                                             \
           $fwrite(f_wrresp[g], "%0d P %0d %0d 0 %0d %0d %0d %0d %0d %0d %0d %0d\n", c, CLS, d, cycle_q, \
-            `NOC_GRP(g).NM``_in_trans[k][d].hdr.dst_id.x,                        \
-            `NOC_GRP(g).NM``_in_trans[k][d].hdr.dst_id.y,                        \
-            `NOC_GRP(g).NM``_in_trans[k][d].hdr.src_id.x,                        \
-            `NOC_GRP(g).NM``_in_trans[k][d].hdr.src_id.y,                        \
-            `NOC_GRP(g).NM``_in_trans[k][d].hdr.tile_id,                         \
+            `NOC_GRP(g).NM``_in_trans IDX [d].hdr.dst_id.x,                        \
+            `NOC_GRP(g).NM``_in_trans IDX [d].hdr.dst_id.y,                        \
+            `NOC_GRP(g).NM``_in_trans IDX [d].hdr.src_id.x,                        \
+            `NOC_GRP(g).NM``_in_trans IDX [d].hdr.src_id.y,                        \
+            `NOC_GRP(g).NM``_in_trans IDX [d].hdr.tile_id,                         \
             WideEngCoreId,                                                       \
-            `NOC_GRP(g).NM``_in_trans[k][d].hdr.meta_id);                        \
+            `NOC_GRP(g).NM``_in_trans IDX [d].hdr.meta_id);                        \
         if (so >= 2)                                                             \
           $fwrite(f_wrresp[g], "%0d P %0d %0d 1 %0d %0d %0d %0d %0d %0d %0d %0d\n", c, CLS, d, cycle_q, \
-            `NOC_GRP(g).NM``_out_trans[k][d].hdr.dst_id.x,                       \
-            `NOC_GRP(g).NM``_out_trans[k][d].hdr.dst_id.y,                       \
-            `NOC_GRP(g).NM``_out_trans[k][d].hdr.src_id.x,                       \
-            `NOC_GRP(g).NM``_out_trans[k][d].hdr.src_id.y,                       \
-            `NOC_GRP(g).NM``_out_trans[k][d].hdr.tile_id,                        \
+            `NOC_GRP(g).NM``_out_trans IDX [d].hdr.dst_id.x,                       \
+            `NOC_GRP(g).NM``_out_trans IDX [d].hdr.dst_id.y,                       \
+            `NOC_GRP(g).NM``_out_trans IDX [d].hdr.src_id.x,                       \
+            `NOC_GRP(g).NM``_out_trans IDX [d].hdr.src_id.y,                       \
+            `NOC_GRP(g).NM``_out_trans IDX [d].hdr.tile_id,                        \
             WideEngCoreId,                                                       \
-            `NOC_GRP(g).NM``_out_trans[k][d].hdr.meta_id);                       \
+            `NOC_GRP(g).NM``_out_trans IDX [d].hdr.meta_id);                       \
       end                                                                        \
       begin                                                                      \
-        automatic logic [1:0] sli = `NOC_GRP(g).NM``_to_router_valid[k]          \
-          ? (`NOC_GRP(g).NM``_to_router_ready[k] ? 2'd2 : 2'd1) : 2'd0;          \
-        automatic logic [1:0] slo = `NOC_GRP(g).NM``_from_router_valid[k]        \
-          ? (`NOC_GRP(g).NM``_from_router_ready[k] ? 2'd2 : 2'd1) : 2'd0;        \
+        automatic logic [1:0] sli = `NOC_GRP(g).NM``_to_router_valid IDX           \
+          ? (`NOC_GRP(g).NM``_to_router_ready IDX  ? 2'd2 : 2'd1) : 2'd0;          \
+        automatic logic [1:0] slo = `NOC_GRP(g).NM``_from_router_valid IDX         \
+          ? (`NOC_GRP(g).NM``_from_router_ready IDX  ? 2'd2 : 2'd1) : 2'd0;        \
         if (sli != wrs_st[g][c][4][0]) begin                                     \
           $fwrite(f_wrresp[g], "%0d S %0d 4 0 %0d %0d %0d\n", c, CLS, wrs_s[g][c][4][0], cycle_q, wrs_st[g][c][4][0]); \
           wrs_st[g][c][4][0] <= sli; wrs_s[g][c][4][0] <= cycle_q;               \
@@ -825,22 +829,22 @@
         end                                                                      \
         if (sli >= 2)                                                            \
           $fwrite(f_wrresp[g], "%0d P %0d 4 0 %0d %0d %0d %0d %0d %0d %0d %0d\n", c, CLS, cycle_q, \
-            `NOC_GRP(g).NM``_to_router[k].hdr.dst_id.x,                          \
-            `NOC_GRP(g).NM``_to_router[k].hdr.dst_id.y,                          \
-            `NOC_GRP(g).NM``_to_router[k].hdr.src_id.x,                          \
-            `NOC_GRP(g).NM``_to_router[k].hdr.src_id.y,                          \
-            `NOC_GRP(g).NM``_to_router[k].hdr.tile_id,                           \
+            `NOC_GRP(g).NM``_to_router IDX .hdr.dst_id.x,                          \
+            `NOC_GRP(g).NM``_to_router IDX .hdr.dst_id.y,                          \
+            `NOC_GRP(g).NM``_to_router IDX .hdr.src_id.x,                          \
+            `NOC_GRP(g).NM``_to_router IDX .hdr.src_id.y,                          \
+            `NOC_GRP(g).NM``_to_router IDX .hdr.tile_id,                           \
             WideEngCoreId,                                                       \
-            `NOC_GRP(g).NM``_to_router[k].hdr.meta_id);                          \
+            `NOC_GRP(g).NM``_to_router IDX .hdr.meta_id);                          \
         if (slo >= 2)                                                            \
           $fwrite(f_wrresp[g], "%0d P %0d 4 1 %0d %0d %0d %0d %0d %0d %0d %0d\n", c, CLS, cycle_q, \
-            `NOC_GRP(g).NM``_from_router[k].hdr.dst_id.x,                        \
-            `NOC_GRP(g).NM``_from_router[k].hdr.dst_id.y,                        \
-            `NOC_GRP(g).NM``_from_router[k].hdr.src_id.x,                        \
-            `NOC_GRP(g).NM``_from_router[k].hdr.src_id.y,                        \
-            `NOC_GRP(g).NM``_from_router[k].hdr.tile_id,                         \
+            `NOC_GRP(g).NM``_from_router IDX .hdr.dst_id.x,                        \
+            `NOC_GRP(g).NM``_from_router IDX .hdr.dst_id.y,                        \
+            `NOC_GRP(g).NM``_from_router IDX .hdr.src_id.x,                        \
+            `NOC_GRP(g).NM``_from_router IDX .hdr.src_id.y,                        \
+            `NOC_GRP(g).NM``_from_router IDX .hdr.tile_id,                         \
             WideEngCoreId,                                                       \
-            `NOC_GRP(g).NM``_from_router[k].hdr.meta_id);                        \
+            `NOC_GRP(g).NM``_from_router IDX .hdr.meta_id);                        \
       end                                                                        \
     end
 
@@ -851,23 +855,20 @@
           wrq_st[g] <= '{default: '0}; wrq_s[g] <= '{default: '0};
           wrs_st[g] <= '{default: '0}; wrs_s[g] <= '{default: '0};
         end else begin
-`ifdef USE_RO_WIDE_REQ_CHANNEL
           // RO request flits are meta-only: a read by construction.
-          `WIDE_REQ_ROUTER_BODY(floo_tcdm_wide_ro_req, 0, 0,
-                                NumWideRoReqChannelsPerGroup, 1'b0, 1'b0, 1'b0, 1'b0)
-`endif
-          `WIDE_REQ_ROUTER_BODY(floo_tcdm_wide_rw_req, 1, NumWideRoReqChannelsPerGroup,
-                                NumWideRwReqChannelsPerGroup,
-                                `NOC_GRP(g).floo_tcdm_wide_rw_req_in_trans[k][d].payload.wen,
-                                `NOC_GRP(g).floo_tcdm_wide_rw_req_out_trans[k][d].payload.wen,
-                                `NOC_GRP(g).floo_tcdm_wide_rw_req_to_router[k].payload.wen,
-                                `NOC_GRP(g).floo_tcdm_wide_rw_req_from_router[k].payload.wen)
-          `WIDE_RESP_ROUTER_BODY(floo_tcdm_wide_rd_resp, 0, 0,
-                                 NumWideRwRespChannelsPerGroup)
-`ifdef USE_WO_WIDE_RESP_CHANNEL
-          `WIDE_RESP_ROUTER_BODY(floo_tcdm_wide_wr_resp, 1, NumWideRwRespChannelsPerGroup,
-                                 NumWideWoRespChannelsPerGroup)
-`endif
+          `WIDE_REQ_ROUTER_BODY(floo_tcdm_wide_ro_req, 0, 0, NumWROReqLanes,
+                                [k / NumWideRoReqPortsPerTile][k % NumWideRoReqPortsPerTile],
+                                1'b0, 1'b0, 1'b0, 1'b0)
+          `WIDE_REQ_ROUTER_BODY(floo_tcdm_wide_wo_req, 1, NumWROReqLanes,
+                                NumWideWoReqChannelsPerGroup, [k],
+                                `NOC_GRP(g).floo_tcdm_wide_wo_req_in_trans[k][d].payload.wen,
+                                `NOC_GRP(g).floo_tcdm_wide_wo_req_out_trans[k][d].payload.wen,
+                                `NOC_GRP(g).floo_tcdm_wide_wo_req_to_router[k].payload.wen,
+                                `NOC_GRP(g).floo_tcdm_wide_wo_req_from_router[k].payload.wen)
+          `WIDE_RESP_ROUTER_BODY(floo_tcdm_wide_rw_resp, 0, 0, NumWRWRespLanes,
+                                 [k / NumWideRwRespPortsPerTile][k % NumWideRwRespPortsPerTile])
+          `WIDE_RESP_ROUTER_BODY(floo_tcdm_wide_wo_resp, 1, NumWRWRespLanes,
+                                 NumWideWoRespChannelsPerGroup, [k])
         end
       end
     end
@@ -939,14 +940,14 @@
       end
 `ifdef USE_WIDE_TCDM_PLANE
       for (int c = 0; c < NumWReqCh; c++) begin
-        automatic int cls = (c < NumWideRoReqChannelsPerGroup) ? 0 : 1;
+        automatic int cls = (c < NumWROReqLanes) ? 0 : 1;
         for (int d = 0; d < 5; d++) begin
           $fwrite(f_wrreq[g], "%0d S %0d %0d 0 %0d %0d %0d\n", c, cls, d, wrq_s[g][c][d][0], cycle_q, wrq_st[g][c][d][0]);
           $fwrite(f_wrreq[g], "%0d S %0d %0d 1 %0d %0d %0d\n", c, cls, d, wrq_s[g][c][d][1], cycle_q, wrq_st[g][c][d][1]);
         end
       end
       for (int c = 0; c < NumWRespCh; c++) begin
-        automatic int cls = (c < NumWideRwRespChannelsPerGroup) ? 0 : 1;
+        automatic int cls = (c < NumWRWRespLanes) ? 0 : 1;
         for (int d = 0; d < 5; d++) begin
           $fwrite(f_wrresp[g], "%0d S %0d %0d 0 %0d %0d %0d\n", c, cls, d, wrs_s[g][c][d][0], cycle_q, wrs_st[g][c][d][0]);
           $fwrite(f_wrresp[g], "%0d S %0d %0d 1 %0d %0d %0d\n", c, cls, d, wrs_s[g][c][d][1], cycle_q, wrs_st[g][c][d][1]);

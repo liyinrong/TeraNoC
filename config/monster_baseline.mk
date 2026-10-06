@@ -19,19 +19,18 @@ num_x        ?= 4
 noc_topology ?= 0
 
 # Narrow plane: 2 RW request + 2 RW response channels per group and mesh
-# direction. Wide plane on with 1 RW request + 1 RW response.
+# direction. Wide plane on with one port of each class per tile.
 noc_req_narrow_ro_channel_num  := 0
 noc_req_narrow_rw_channel_num  := 2
 noc_req_narrow_wo_channel_num  := 0
 noc_resp_narrow_rw_channel_num := 2
 
-noc_req_wide_ro_channel_num   := 0
-noc_req_wide_rw_channel_num   := 1
-noc_resp_wide_rw_channel_num  := 1
-noc_resp_wide_wo_channel_num  := 0
+noc_req_wide_ro_port_num  := 1
+noc_req_wide_wo_port_num  := 1
+noc_resp_wide_rw_port_num := 1
+noc_resp_wide_wo_port_num := 1
 
 num_intra_group_ports_per_tile := 1
-num_inter_group_ports_per_tile := 1
 
 num_redmule_tiles ?= 64
 redmule_height    ?= 8

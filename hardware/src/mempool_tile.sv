@@ -797,6 +797,7 @@ module mempool_tile
   logic                     [NumWideLocalPorts-1:0] remote_wide_req_interco_valid;
   logic                     [NumWideLocalPorts-1:0] remote_wide_req_interco_ready;
   addr_t                    [NumWideLocalPorts-1:0] remote_wide_req_interco_addr_int;
+  logic                     [NumWideLocalPorts-1:0] remote_wide_req_interco_wen;
   group_id_t                [NumWideLocalPorts-1:0] remote_wide_req_tgt_group_id;
   tcdm_addr_t               [NumWideLocalPorts-1:0] remote_wide_req_tgt_addr;
   wide_remote_ports_index_t [NumWideLocalPorts-1:0] remote_wide_req_tgt_sel;
@@ -819,6 +820,11 @@ module mempool_tile
     assign remote_wide_resp_sel[r] =
         wide_local_ports_index_t'(postreg_tcdm_wide_master_resp[r].rdata.core_id);
   end : gen_wide_resp_sel
+
+  // The remote port select sends reads and writes to different port classes.
+  for (genvar w = 0; w < NumWideLocalPorts; w++) begin : gen_wide_req_wen
+    assign remote_wide_req_interco_wen[w] = remote_wide_req_interco[w].wen;
+  end : gen_wide_req_wen
 
   stream_xbar #(
     .NumInp   (NumWideLocalPorts             ),
@@ -1018,6 +1024,44 @@ module mempool_tile
       src_group_id: postreg_tcdm_wide_slave_req[p].src_group_id
     };
   end
+
+  // The group's slave ports answer on the response ports by class: a same-group
+  // port on its own link, RO port k on RW port k % NumWideRwRespPortsPerTile and
+  // WO port k on WO port k. Ports that share a response port meet in the xbar.
+  tcdm_wide_slave_resp_t [NumWideRemoteReqPortsPerTile-1:0] ingress_tcdm_wide_slave_resp;
+  logic                  [NumWideRemoteReqPortsPerTile-1:0] ingress_tcdm_wide_slave_resp_valid;
+  logic                  [NumWideRemoteReqPortsPerTile-1:0] ingress_tcdm_wide_slave_resp_ready;
+  logic [NumWideRemoteReqPortsPerTile-1:0][idx_width(NumWideRemoteRespPortsPerTile)-1:0]
+      ingress_tcdm_wide_slave_resp_sel;
+
+  for (genvar p = 0; p < NumWideRemoteReqPortsPerTile; p++) begin : gen_wide_resp_port_sel
+    localparam int unsigned RoBase = NumWideIntraGroupPortsPerTile;
+    localparam int unsigned WoBase = RoBase + NumWideRoReqPortsPerTile;
+    assign ingress_tcdm_wide_slave_resp_sel[p] = idx_width(NumWideRemoteRespPortsPerTile)'(
+        (p < RoBase) ? p :
+        (p < WoBase) ? RoBase + (p - RoBase) % NumWideRwRespPortsPerTile :
+                       RoBase + NumWideRwRespPortsPerTile + (p - WoBase) % NumWideWoRespPortsPerTile);
+  end
+
+  stream_xbar #(
+    .NumInp   (NumWideRemoteReqPortsPerTile ),
+    .NumOut   (NumWideRemoteRespPortsPerTile),
+    .payload_t(tcdm_wide_slave_resp_t       ),
+    .AxiVldRdy(1'b1                         )
+  ) i_wide_slave_resp_port_xbar (
+    .clk_i  (clk_i                              ),
+    .rst_ni (rst_ni                             ),
+    .flush_i(1'b0                               ),
+    .rr_i   ('0                                 ),
+    .data_i (ingress_tcdm_wide_slave_resp       ),
+    .valid_i(ingress_tcdm_wide_slave_resp_valid ),
+    .ready_o(ingress_tcdm_wide_slave_resp_ready ),
+    .sel_i  (ingress_tcdm_wide_slave_resp_sel   ),
+    .data_o (prereg_tcdm_wide_slave_resp        ),
+    .valid_o(prereg_tcdm_wide_slave_resp_valid  ),
+    .ready_i(prereg_tcdm_wide_slave_resp_ready  ),
+    .idx_o  (/* unused */                       )
+  );
   `endif
 
   // Bank-side TCDM interconnect: narrow req/resp routing, wide superbank
@@ -1072,9 +1116,9 @@ module mempool_tile
     .slv_wide_req_valid_i   ({postreg_tcdm_wide_slave_req_valid, local_wide_req_interco_valid   [NumWideBankLocalPorts-1:0]}),
     .slv_wide_req_ready_o   ({postreg_tcdm_wide_slave_req_ready, local_wide_req_interco_ready   [NumWideBankLocalPorts-1:0]}),
     // Wide resp outputs: own-tile clients at low indices, slave resp above.
-    .slv_wide_resp_o        ({prereg_tcdm_wide_slave_resp,       local_wide_resp_interco_payload[NumWideBankLocalPorts-1:0]}),
-    .slv_wide_resp_valid_o  ({prereg_tcdm_wide_slave_resp_valid, local_wide_resp_interco_valid  [NumWideBankLocalPorts-1:0]}),
-    .slv_wide_resp_ready_i  ({prereg_tcdm_wide_slave_resp_ready, local_wide_resp_interco_ready  [NumWideBankLocalPorts-1:0]}),
+    .slv_wide_resp_o        ({ingress_tcdm_wide_slave_resp,       local_wide_resp_interco_payload[NumWideBankLocalPorts-1:0]}),
+    .slv_wide_resp_valid_o  ({ingress_tcdm_wide_slave_resp_valid, local_wide_resp_interco_valid  [NumWideBankLocalPorts-1:0]}),
+    .slv_wide_resp_ready_i  ({ingress_tcdm_wide_slave_resp_ready, local_wide_resp_interco_ready  [NumWideBankLocalPorts-1:0]}),
     `endif
     .mst_req_o              (bank_req_payload    ),
     .mst_req_valid_o        (bank_req_valid      ),
@@ -1108,7 +1152,9 @@ module mempool_tile
     `ifdef USE_WIDE_TCDM_PLANE
     ,.NumWideLocalPorts                   (NumWideLocalPorts                   )
     ,.NumWideIntraGroupPortsPerTile       (NumWideIntraGroupPortsPerTile       )
-    ,.NumWideInterGroupPortsPerTile       (NumWideInterGroupPortsPerTile       )
+    ,.NumWideRoReqPortsPerTile            (NumWideRoReqPortsPerTile            )
+    ,.NumWideWoReqPortsPerTile            (NumWideWoReqPortsPerTile            )
+    ,.WideBeatBytes                       (WideTcdmDataWidth/8                 )
     `endif
   ) i_mempool_tile_remote_req_router (
     .group_id_i                           (group_id                            ),
@@ -1119,6 +1165,7 @@ module mempool_tile
     .remote_req_tgt_group_id_o            (remote_req_tgt_group_id             ),
     .remote_req_tgt_sel_o                 (remote_req_tgt_sel                  )
     `ifdef USE_WIDE_TCDM_PLANE
+    ,.remote_wide_req_interco_wen_i       (remote_wide_req_interco_wen         )
     ,.remote_wide_req_interco_addr_int_i  (remote_wide_req_interco_addr_int    )
     ,.remote_wide_req_tgt_addr_o          (remote_wide_req_tgt_addr            )
     ,.remote_wide_req_tgt_group_id_o      (remote_wide_req_tgt_group_id        )

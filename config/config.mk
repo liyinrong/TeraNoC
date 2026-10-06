@@ -124,104 +124,54 @@ noc_router_wide_resp_output_fifo_dep   ?= $(noc_router_output_fifo_dep)
 # disabled; RedMulE-enabled flavors set the width of one engine TCDM beat.
 wide_tcdm_data_width ?= 0
 
-# Wide TCDM plane (WP2): per-group, per-class channel counts for the separate,
-# single-beat wide FlooNoC network carrying RedMulE line traffic. The plane is
-# read-dominated and structurally asymmetric, so the classes are sized apart:
-#   RO   req  - meta only, ~46 wires: cheap, buy several
-#   RW req  - meta + WIDE_W + strb, ~627 wires: expensive, carries write data
-#   RW resp - meta + WIDE_W, ~540 wires: read data or a write ACK
-#   WO resp - meta only, ~28 wires: a write ACK, not a data response
-# RW req and RW resp are MANDATORY when the plane is on (only they can carry
-# write data / read data). RO req and WO resp are optional; 0 disables the class.
-#
-# Counts are physical channels per group and mesh direction, shared by all tile
-# logical wide ports through the group concentrator/dispatcher. The defaults
-# below leave the plane absent, which is bit-identical to a build without it;
-# a flavor turns it on by setting the counts directly before including its base
-# flavor (see config/tensorpool256_wide.mk). noc_req_wide_rw_channel_num >= 1 is
-# what enables the plane. Flavors without a RedMulE wide endpoint must keep it
-# off.
-noc_req_wide_ro_channel_num ?= 0
-noc_req_wide_rw_channel_num ?= 0
-noc_resp_wide_rw_channel_num ?= 0
-noc_resp_wide_wo_channel_num ?= 0
+# Wide TCDM plane (WP2): per-tile port counts for the separate, single-beat wide
+# FlooNoC network carrying RedMulE line and Spatz burst traffic. Built like the
+# narrow plane: every inter-group port of every tile owns its own router, so
+# nothing has to sit at the centre of the group. The traffic is read-dominated
+# and a read request carries no data, so the ports split by direction:
+#   RO req  - meta only, ~46 wires: read requests, port picked by address hash
+#   WO req  - meta + WIDE_W + strb, ~627 wires: write requests
+#   RW resp - meta + WIDE_W, ~540 wires: read data, on the RW port paired with
+#             the RO port the read came from (RO port k -> RW port k % count)
+#   WO resp - meta only, ~28 wires: write acks
+# All four are mandatory when the plane is on; noc_req_wide_ro_port_num >= 1
+# turns it on. The defaults leave the plane absent, which is bit-identical to a
+# build without it. Flavors without a RedMulE or Spatz-burst client keep it off.
+noc_req_wide_ro_port_num  ?= 0
+noc_req_wide_wo_port_num  ?= 0
+noc_resp_wide_rw_port_num ?= 0
+noc_resp_wide_wo_port_num ?= 0
 
-# Logical wide ports at each tile. Intra-group ports are dedicated links and do
-# not enter the group mapper. Inter-group ports are class-neutral at the tile;
-# the group maps reads/writes onto its physical RO/RW/WO channel classes.
-# A tile's wide ports are symmetric, so one count sizes both directions of each
-# kind. Both remain parameters even though the current RedMulE integration is
-# validated only for one intra-group plus one inter-group path.
+# Writes are rare, so the write channels are shared: noc_wide_wo_merge tiles of
+# a group (tile t and t + tiles/merge) meet on one WO request and one WO response
+# channel, through an arbiter on the way out and a crossbar to the target tile on
+# the way in. 1 gives every tile its own write channels.
+noc_wide_wo_merge ?= 1
+
+# The group concentrator these replace counted channels per group. Its knobs
+# would now mean something else, so a flavor still setting them stops here.
+wide_legacy_channels := $(shell echo $$(( 0$(strip $(noc_req_wide_ro_channel_num)) + \
+	0$(strip $(noc_req_wide_rw_channel_num)) + 0$(strip $(noc_resp_wide_rw_channel_num)) + \
+	0$(strip $(noc_resp_wide_wo_channel_num)) + 0$(strip $(num_inter_group_ports_per_tile)) )))
+ifneq (0,$(strip $(wide_legacy_channels)))
+$(error The wide-plane group concentrator is gone: replace noc_*_wide_*_channel_num and num_inter_group_ports_per_tile with the per-tile noc_req_wide_{ro,wo}_port_num, noc_resp_wide_{rw,wo}_port_num and noc_wide_wo_merge)
+endif
+
+# Dedicated same-group wide links per tile. They do not enter the wide NoC.
 num_intra_group_ports_per_tile ?= 1
-num_inter_group_ports_per_tile ?= 1
 
-# INVARIANT: every wide channel class must be a multiple of the inter-group
-# ports per tile. The inter-group ports are batched by port id -- port r of
-# every tile shares one batch of channels, and a request issued on port r must
-# be carried and answered inside batch r alone. Two pieces of logic have to
-# agree on that partition: the group flattens its mapper inputs as
-# i = tile*ports + port and picks a channel with `i % class_count`
-# (mempool_group_channel_mapper.sv, driven from gen_wide_{req,resp}_mapper_t/r),
-# while the endpoint crossbars recover the port with `channel % ports`
-# (gen_wide_slave_req_sel / gen_wide_master_resp_sel). They agree if and only if
-# the class count divides evenly; otherwise the batches overlap and a response
-# comes back on a port whose requester never sent the request -- a silent
-# mis-route with no X, no hang and no assertion, found late and looking like a
-# data-corruption or ROB bug rather than a config one. 0 is fine: it disables
-# the class. mempool_group.sv (p_wide_group_channel_count) asserts the same
-# thing at elaboration and the GVSoC model in pulp/pulp/teranoc_v2/arch.py
-# (TeranocWideConfig.__post_init__) at model build; checking it here fails a bad
-# flavor at build configuration instead. The magnitude limits on the same four
-# counts live next to the wide vlog_defs in hardware/Makefile.
-# This check is placed after the port counts rather than next to the channel
-# counts above because it needs both.
-ifneq (0,$(strip $(num_inter_group_ports_per_tile)))
-wide_ro_req_channel_batch_remainder := $(shell printf '%s' \
-	$$(( $(noc_req_wide_ro_channel_num) % $(num_inter_group_ports_per_tile) )))
-wide_rw_req_channel_batch_remainder := $(shell printf '%s' \
-	$$(( $(noc_req_wide_rw_channel_num) % $(num_inter_group_ports_per_tile) )))
-wide_rw_resp_channel_batch_remainder := $(shell printf '%s' \
-	$$(( $(noc_resp_wide_rw_channel_num) % $(num_inter_group_ports_per_tile) )))
-wide_wo_resp_channel_batch_remainder := $(shell printf '%s' \
-	$$(( $(noc_resp_wide_wo_channel_num) % $(num_inter_group_ports_per_tile) )))
-ifneq (0,$(strip $(wide_ro_req_channel_batch_remainder)))
-$(error noc_req_wide_ro_channel_num=$(noc_req_wide_ro_channel_num) must be a multiple of the num_inter_group_ports_per_tile=$(num_inter_group_ports_per_tile) inter-group ports per tile, so the per-port wide channel batches partition)
-endif
-ifneq (0,$(strip $(wide_rw_req_channel_batch_remainder)))
-$(error noc_req_wide_rw_channel_num=$(noc_req_wide_rw_channel_num) must be a multiple of the num_inter_group_ports_per_tile=$(num_inter_group_ports_per_tile) inter-group ports per tile, so the per-port wide channel batches partition)
-endif
-ifneq (0,$(strip $(wide_rw_resp_channel_batch_remainder)))
-$(error noc_resp_wide_rw_channel_num=$(noc_resp_wide_rw_channel_num) must be a multiple of the num_inter_group_ports_per_tile=$(num_inter_group_ports_per_tile) inter-group ports per tile, so the per-port wide channel batches partition)
-endif
-ifneq (0,$(strip $(wide_wo_resp_channel_batch_remainder)))
-$(error noc_resp_wide_wo_channel_num=$(noc_resp_wide_wo_channel_num) must be a multiple of the num_inter_group_ports_per_tile=$(num_inter_group_ports_per_tile) inter-group ports per tile, so the per-port wide channel batches partition)
-endif
-endif
-
-# Wide TCDM channel remapping (stage-1 DSE). The group concentrator binds a tile
-# to a channel with `i % class_count` over the flattened input index i, so the
-# binding is static: a tile always injects on the same channel, and a class wider
-# than the aggregate tile-port count can never reach its upper channels at all.
-# A floo_remapper on the OUTGOING edge -- between the concentrator and the group
-# boundary -- rotates that permutation once per cycle, which decorrelates the
-# per-tile choice and makes an over-wide class fully reachable. This is the
-# largest single utilization lever the stage-1 DSE measured (+33-41 % per MGE).
-# Only the RO request and RW response classes are remapped: RW request and WO
-# response do not alias the same way and rotating them buys nothing.
-#   0: none, 1: RO request, 2: RW response, 3: both
-# Nothing on the return path depends on which physical channel a request used --
-# responses route on the src_tile_id / src_id carried in the flit header and the
-# responder's group picks its response channel with its own `i % N` -- which is
-# what makes rotating the request channel safe. See the ports-per-tile caveat in
-# hardware/Makefile next to the wide remap validation.
+# Wide router remapping, as the narrow plane's noc_router_remapping: a
+# floo_remapper rotates port p of a group of tiles once per cycle, so a burst
+# that would pin one router spreads over the group.
+#   0: none, 1: RO request ports, 2: RW response ports, 3: both
+# The merged WO channels are never remapped.
 noc_wide_router_remapping ?= 0
 
-# floo_remapper GroupSize for each remapped class: the number of channels one
-# rotation spans. Must be a power of two >= 2 that divides the class count.
-# Defaulting to the class count gives a single batch, i.e. one rotation across
-# the whole class, which is what both stage-1 DSE designs use.
-noc_wide_ro_req_remap_group_size  ?= $(noc_req_wide_ro_channel_num)
-noc_wide_rw_resp_remap_group_size ?= $(noc_resp_wide_rw_channel_num)
+# floo_remapper GroupSize for each remapped class: the number of tiles one
+# rotation spans for a port. Interleaved, so a group of 2 pairs tiles t and
+# t + tiles/2. Must be a power of two that divides the tiles per group.
+noc_wide_ro_req_remap_group_size  ?= 2
+noc_wide_rw_resp_remap_group_size ?= 2
 
 # Number of RedMulE tensor-core tiles in the cluster
 num_redmule_tiles ?= 0

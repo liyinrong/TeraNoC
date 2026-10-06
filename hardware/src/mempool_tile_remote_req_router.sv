@@ -21,15 +21,19 @@ module mempool_tile_remote_req_router
   parameter int unsigned NumGroups                    = 4,
   parameter int unsigned ByteOffset                   = 2,
   // Wide TCDM plane client ports and the tile's wide remote links. As on the
-  // narrow side, the same-group links come first and the inter-group links after.
+  // narrow side, the same-group links come first, then the inter-group RO and
+  // WO request ports.
   parameter int unsigned NumWideLocalPorts             = 1,
   parameter int unsigned NumWideIntraGroupPortsPerTile = 1,
-  parameter int unsigned NumWideInterGroupPortsPerTile = 1,
+  parameter int unsigned NumWideRoReqPortsPerTile      = 1,
+  parameter int unsigned NumWideWoReqPortsPerTile      = 1,
+  // Bytes in one wide beat: the bits below it never select a port.
+  parameter int unsigned WideBeatBytes                 = 64,
   // Payload-bearing request ports: the RW and WO classes share one port range.
   localparam int unsigned NumNarrowPayloadReqPortsPerTile =
       NumNarrowRwReqPortsPerTile + NumNarrowWoReqPortsPerTile,
   localparam int unsigned NumWideRemoteReqPortsPerTile =
-      NumWideIntraGroupPortsPerTile + NumWideInterGroupPortsPerTile
+      NumWideIntraGroupPortsPerTile + NumWideRoReqPortsPerTile + NumWideWoReqPortsPerTile
 ) (
   input  group_id_t                                                           group_id_i,
   input  logic                [NumCoresPerTile-1:0]                           remote_req_interco_wen_i,
@@ -40,6 +44,7 @@ module mempool_tile_remote_req_router
   output logic [NumCoresPerTile-1:0][idx_width(NumNarrowRemoteReqPortsPerTile)-1:0] remote_req_tgt_sel_o
   `ifdef USE_WIDE_TCDM_PLANE
   ,
+  input  logic                [NumWideLocalPorts-1:0]                         remote_wide_req_interco_wen_i,
   input  addr_t               [NumWideLocalPorts-1:0]                         remote_wide_req_interco_addr_int_i,
   output tcdm_addr_t          [NumWideLocalPorts-1:0]                         remote_wide_req_tgt_addr_o,
   output group_id_t           [NumWideLocalPorts-1:0]                         remote_wide_req_tgt_group_id_o,
@@ -96,10 +101,35 @@ module mempool_tile_remote_req_router
    *   Wide De/mux   *
    *******************/
   // Same metadata as the narrow path above, for the wide TCDM plane's client
-  // ports: target address, target group, and the remote-port select. The wide
-  // plane has no RO/RW/WO classes, so the select is purely positional --
-  // same-group traffic spreads over the intra-group links by target tile,
-  // inter-group traffic over the inter-group links by target group.
+  // ports: target address, target group, and the remote-port select. Same-group
+  // traffic spreads over the intra-group links by target tile. Inter-group writes
+  // take a WO port, reads an RO port picked by a hash: the parity of the beat,
+  // tile and three low row bits of the address XOR the client's slot. One engine
+  // then alternates RO ports along its stream, and clients hitting the same
+  // address take different ports, while a client keeps one port per address.
+  localparam int unsigned WideTileBit = ByteOffset + $clog2(NumBanksPerTile);
+  localparam int unsigned WideRowBit  =
+      WideTileBit + $clog2(NumTilesPerGroup) + $clog2(NumGroups);
+  localparam addr_t WideHashMask = addr_t'(
+      (64'(1) << $clog2(WideBeatBytes)) |
+      (((64'(1) << $clog2(NumTilesPerGroup)) - 1) << WideTileBit) |
+      (64'(7) << WideRowBit));
+
+  // Fold the masked address bits into $clog2(nb_ports) lanes, round robin.
+  function automatic logic [31:0] wide_port_hash(input addr_t addr,
+                                                 input int unsigned nb_ports);
+    automatic logic [31:0] hash = '0;
+    automatic int unsigned lanes = $clog2(nb_ports);
+    automatic int unsigned j = 0;
+    for (int unsigned b = 0; b < $bits(addr_t); b++) begin
+      if (WideHashMask[b]) begin
+        if (lanes > 0) hash[j % lanes] = hash[j % lanes] ^ addr[b];
+        j++;
+      end
+    end
+    return hash;
+  endfunction
+
   group_id_t [NumWideLocalPorts-1:0]                                 wide_tgt_group_id;
   logic      [NumWideLocalPorts-1:0]                                 wide_group_id_is_local;
   logic      [NumWideLocalPorts-1:0][idx_width(NumTilesPerGroup)-1:0] wide_tgt_tile;
@@ -136,8 +166,13 @@ module mempool_tile_remote_req_router
         idx_width(NumWideRemoteReqPortsPerTile)'(
             wide_group_id_is_local[w] ?
                 (wide_tgt_tile[w] % NumWideIntraGroupPortsPerTile) :
+            remote_wide_req_interco_wen_i[w] ?
+                (NumWideIntraGroupPortsPerTile + NumWideRoReqPortsPerTile +
+                 ((wide_port_hash(remote_wide_req_interco_addr_int_i[w], NumWideWoReqPortsPerTile)
+                   ^ w) % NumWideWoReqPortsPerTile)) :
                 (NumWideIntraGroupPortsPerTile +
-                 (wide_tgt_group_id[w] % NumWideInterGroupPortsPerTile)));
+                 ((wide_port_hash(remote_wide_req_interco_addr_int_i[w], NumWideRoReqPortsPerTile)
+                   ^ w) % NumWideRoReqPortsPerTile)));
   end
   `endif
 
