@@ -31,7 +31,7 @@ l1_bank_size   := 8192
 # Reads hash over the 2 RO ports and answer on the paired RW port; writes take
 # the WO port, merged 2:1 across tiles t and t+2. In GVSoC (dev model) this is
 # 1.008 x the group concentrator on the S1 suite, worst case 0.983.
-# This is plan B; config/dse_s1_winner_plan_{a,c}.mk are the alternatives.
+# This is plan B; config/dse_s1_winner_plan_{a,c,d}.mk are the alternatives.
 noc_req_wide_ro_port_num  := 2
 noc_req_wide_wo_port_num  := 1
 noc_resp_wide_rw_port_num := 2
