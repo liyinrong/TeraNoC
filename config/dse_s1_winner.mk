@@ -24,7 +24,7 @@ config_build_path := dse_s1_winner
 # 32 banks of 8 KiB per tile instead of the DSE's 64 of 4 KiB: same capacity,
 # half the banks. 8 KiB (2048x32) is the S2 bank size; in GF12 both map onto
 # rf_sp_uhse_rvt_mvt_1024x64m4b1w1, folded (gf12/sourcecode/tc_sram.sv).
-banking_factor := 4
+banking_factor := 2
 l1_bank_size   := 8192
 
 # --- wide TCDM plane (WP2) ports ------------------------------------------

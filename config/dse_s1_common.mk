@@ -3,13 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Stage-1 DSE S1 common geometry: four H8xW32 RedMulE tiles per group on the
-# fixed 4x4 group mesh, two Snitch-Spatz cores and 64 4-KiB L1 banks per tile.
-# Channel-mix wrappers set the four WP2 class counts before including this file.
+# fixed 4x4 group mesh, four Snitch-Spatz cores (4 lanes, VLEN 512) and 64 4-KiB
+# L1 banks per tile.
+# The winner flavors set the wide-plane ports before including this file.
 
-num_cores          ?= 128
+num_cores          ?= 256
 num_groups         ?= 16
-num_cores_per_tile ?= 2
-banking_factor     ?= 8
+num_cores_per_tile ?= 4
+banking_factor     ?= 4
 l1_bank_size       ?= 4096
 
 num_x        ?= 4
