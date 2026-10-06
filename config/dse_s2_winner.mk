@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Stage-1 DSE **S2 winner** -- the overall best cell of the 1224-cell stage-1
-# grid. Its GVSoC counterpart is exactly
+# grid, with the wide plane of S1 plan B. Its GVSoC counterpart is
 #
-#     teranoc_v2:system_config=dse_s2_m4_both_rob16_rq2_rs2
+#     teranoc_v2:system_config=dse_s2_winner_plan_b
 #
 # S2 geometry: H16xW32 RedMulE (PORT_WIDTH = 64 elements = 128 B), 8-KiB banks
 # (32 MiB L1), 1024-bit wide TCDM plane, two superbanks per tile.

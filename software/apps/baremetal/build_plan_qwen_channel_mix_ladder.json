@@ -25,26 +25,6 @@
   },
   "configs": [
     {
-      "name": "dse_s1_m1",
-      "pack_dir": "channel_mix_ladder/qwen_fill_s1_m1",
-      "apps": {
-        "qwen_ffn_prefill_gate_gemm": [{}],
-        "qwen_ffn_prefill_up_gemm": [{}],
-        "qwen_ffn_prefill_down_gemm": [{}],
-        "qwen_attention_prefill_qg_gemm": [{}],
-        "qwen_attention_prefill_k_gemm": [{}],
-        "qwen_attention_prefill_v_gemm": [{}],
-        "qwen_attention_prefill_qk_gemm": [{}],
-        "qwen_attention_prefill_pv_gemm": [{}],
-        "qwen_attention_prefill_o_gemm": [{}],
-        "qwen_gdn_prefill_qkv_gemm": [{}],
-        "qwen_gdn_prefill_z_gemm": [{}],
-        "qwen_gdn_prefill_a_gemm": [{}],
-        "qwen_gdn_prefill_b_gemm": [{}],
-        "qwen_gdn_prefill_o_gemm": [{}]
-      }
-    },
-    {
       "name": "dse_s1_winner",
       "pack_dir": "channel_mix_ladder/qwen_fill_s1_winner",
       "apps": {
