@@ -16,6 +16,9 @@
 // wide adapter would have returned, so the VLSU commits it unchanged. Remote
 // bursts still go to the wide adapter.
 //
+// The VLSU only bursts from a base aligned to MaxBurstWords words, so a word's
+// offset never carries into the base: lane addresses are wired, not added.
+//
 // The burst is accepted in the cycle its first words issue, and the next one in
 // the cycle the current one completes, so neither the first word nor a burst
 // back-to-back with another pays a bubble. While the expander owns the lanes the
@@ -64,6 +67,11 @@ module spatz_local_burst_expander #(
   localparam int unsigned MaxLaneWords = (MaxBurstWords + RecvPorts - 1) / RecvPorts;
   localparam int unsigned CntWidth     = $clog2(MaxLaneWords + 1);
   typedef logic [CntWidth-1:0] cnt_t;
+  // Byte offset of a word within the aligned burst span.
+  localparam int unsigned OffsetBits   = $clog2(MaxBurstWords * WordBytes);
+  localparam int unsigned LaneShift    = $clog2(WordBytes);
+  localparam int unsigned CntShift     = $clog2(RecvPorts * WordBytes);
+  typedef logic [OffsetBits-1:0] offset_t;
 
   // The burst being issued: latched once accepted, else taken from the input.
   logic                     busy_d, busy_q;
@@ -104,8 +112,9 @@ module spatz_local_burst_expander #(
                     ? cnt_t'((cur_len - BurstLenWidth'(l) - 1) / RecvPorts + 1)
                     : '0;
     assign lane_valid_o[l] = active && (cur_cnt[l] < share[l]);
-    // Word k = RecvPorts*cnt + l of the burst.
-    assign lane_addr_o[l]  = cur_addr + addr_t'(WordBytes * (RecvPorts * cur_cnt[l] + l));
+    // Word k = RecvPorts*cnt + l of the burst, placed in the base's zero bits.
+    assign lane_addr_o[l]  = {cur_addr[$bits(addr_t)-1:OffsetBits],
+                              (offset_t'(cur_cnt[l]) << CntShift) | (offset_t'(l) << LaneShift)};
     // Truncate to the ROB field before widening so the carry cannot reach the
     // store-ack flag above it (as in spatz_wide_burst_adapter).
     assign lane_id_o[l]    = meta_id_t'(RobIdWidth'(cur_rob + RobIdWidth'(cur_cnt[l])));
@@ -151,6 +160,11 @@ module spatz_local_burst_expander #(
   `FF(len_q,  len_d,  '0)
   `FF(cnt_q,  cnt_d,  '0)
 
+  // The wired lane addresses need power-of-two fields that tile the burst span.
+  if ((RecvPorts & (RecvPorts - 1)) != 0 || (WordBytes & (WordBytes - 1)) != 0 ||
+      (MaxBurstWords & (MaxBurstWords - 1)) != 0 || MaxBurstWords < RecvPorts)
+    $fatal(1, "[spatz_local_burst_expander] power-of-two fields, MaxBurstWords >= RecvPorts");
+
 `ifndef SYNTHESIS
   // pragma translate_off
   initial begin
@@ -161,6 +175,9 @@ module spatz_local_burst_expander #(
     if (rst_ni && burst_valid_i && (burst_len_i > BurstLenWidth'(MaxBurstWords)))
       $error("[spatz_local_burst_expander] burst_len %0d exceeds MaxBurstWords %0d.",
              burst_len_i, MaxBurstWords);
+    if (rst_ni && burst_valid_i && (burst_addr_i[OffsetBits-1:0] != '0))
+      $error("[spatz_local_burst_expander] burst base %08x not aligned to %0d bytes.",
+             burst_addr_i, MaxBurstWords * WordBytes);
   end
 
   // +spatz_burst_stats: report the own-tile bursts expanded here.
