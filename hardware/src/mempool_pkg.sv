@@ -214,9 +214,12 @@ package mempool_pkg;
    *  INSTRUCTION CACHE  *
    ***********************/
 
-  localparam int unsigned ICacheSizeByte  = 512 * NumFUsPerCore * NumCoresPerCache;     // Total Size of instruction cache in bytes
-  localparam int unsigned ICacheWays      = (NumCoresPerCache < 4) ? 2 : (NumCoresPerCache / 2);       // Number of ways (cluster_icache requires >= 2)
-  localparam int unsigned ICacheLineWidth = 32 * 2 * NumFUsPerCore * NumCoresPerCache;  // Size of each cache line in bits
+  // The L1 size is a config knob (icache_size_byte). The line, shared by the
+  // per-core L0 and the tile's L1, serves one core and does not scale.
+  localparam int unsigned ICacheSizeByte  = `ifdef ICACHE_SIZE_BYTE `ICACHE_SIZE_BYTE `else 512 * NumCoresPerCache `endif; // L1 bytes per tile
+  localparam int unsigned ICacheWays      = 2;    // L1 ways (cluster_icache requires >= 2)
+  localparam int unsigned ICacheLineWidth = 256;  // L0 and L1 line width in bits
+  localparam int unsigned ICacheL0Lines   = 8;    // L0 lines per core
 
   /*********************
    *  READ-ONLY CACHE  *
@@ -224,7 +227,7 @@ package mempool_pkg;
 
   localparam int unsigned AxiHierRadix      = `ifdef AXI_HIER_RADIX `AXI_HIER_RADIX `else NumTilesPerGroup `endif;
   localparam int unsigned ROCacheLineWidth  = `ifdef RO_LINE_WIDTH `RO_LINE_WIDTH `else 0 `endif;
-  localparam int unsigned ROCacheSizeByte   = 8192;
+  localparam int unsigned ROCacheSizeByte   = `ifdef RO_CACHE_SIZE_BYTE `RO_CACHE_SIZE_BYTE `else 8192 `endif;
   localparam int unsigned ROCacheWays       = 2;
 
   localparam int unsigned ROCacheNumAddrRules = 4;

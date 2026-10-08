@@ -64,4 +64,11 @@ noc_wide_rw_resp_remap_group_size := 2
 noc_router_input_fifo_dep  := 2
 noc_router_output_fifo_dep := 2
 
+# --- instruction caches ---------------------------------------------------
+# A 4 KiB tile L1 behind 8-line L0s, backed by a 16 KiB group read-only cache:
+# the attention loop's code for a tile's four cores does not fit 4 KiB, but the
+# group cache holds it. In GVSoC within 1 % of the 8 KiB L1 / 1024-bit lines.
+icache_size_byte   := 4096
+ro_cache_size_byte := 16384
+
 include $(MEMPOOL_DIR)/config/dse_s1_common.mk

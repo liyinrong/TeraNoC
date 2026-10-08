@@ -374,10 +374,13 @@ module mempool_tile
   axi_core_resp_t [NumCaches-1:0] axi_cache_resp_d, axi_cache_resp_q;
 
   for (genvar c = 0; unsigned'(c) < NumCaches; c++) begin: gen_caches
+    snitch_icache_pkg::icache_l0_events_t [NumCoresPerCache-1:0] icache_l0_events;
+    snitch_icache_pkg::icache_l1_events_t                        icache_l1_events;
+
     snitch_icache #(
       .NR_FETCH_PORTS     (NumCoresPerCache                                    ),
       /// Cache Line Width
-      .L0_LINE_COUNT      (4                                                   ),
+      .L0_LINE_COUNT      (ICacheL0Lines                                       ),
       .LINE_WIDTH         (ICacheLineWidth                                     ),
       .LINE_COUNT         (ICacheSizeByte / (ICacheWays * ICacheLineWidth / 8) ),
       .WAY_COUNT          (ICacheWays                                          ),
@@ -405,8 +408,8 @@ module mempool_tile
       .rst_ni               (rst_ni                  ),
       .enable_prefetching_i (1'b1                    ),
       .enable_branch_pred_i (1'b1                    ),
-      .icache_l0_events_o   (/* Unused */            ),
-      .icache_l1_events_o   (/* Unused */            ),
+      .icache_l0_events_o   (icache_l0_events        ),
+      .icache_l1_events_o   (icache_l1_events        ),
       .flush_valid_i        ({NumCoresPerCache{1'b0}}),
       .flush_ready_o        (/* Unused */            ),
       .inst_addr_i          (snitch_inst_addr[c]     ),
@@ -422,6 +425,45 @@ module mempool_tile
       .axi_req_o            (axi_cache_req_d[c]      ),
       .axi_rsp_i            (axi_cache_resp_q[c]     )
     );
+
+`ifndef SYNTHESIS
+    // pragma translate_off
+    // +icache_stats: event counts per cache. An L0 miss holds until its refill
+    // issues, so count its rising edge; L1 events are one per lookup.
+    longint unsigned l0_miss, l0_hit, l0_prefetch, l0_stall, l1_miss, l1_hit, l1_stall;
+    logic [NumCoresPerCache-1:0] ev_miss, ev_hit, ev_prefetch, ev_stall;
+    logic [NumCoresPerCache-1:0] ev_miss_q, ev_prefetch_q;
+    for (genvar i = 0; i < NumCoresPerCache; i++) begin : gen_l0_events
+      assign ev_miss[i]     = icache_l0_events[i].l0_miss;
+      assign ev_hit[i]      = icache_l0_events[i].l0_hit;
+      assign ev_prefetch[i] = icache_l0_events[i].l0_prefetch;
+      assign ev_stall[i]    = icache_l0_events[i].l0_stall;
+    end : gen_l0_events
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        {l0_miss, l0_hit, l0_prefetch, l0_stall, l1_miss, l1_hit, l1_stall} <= '0;
+        ev_miss_q     <= '0;
+        ev_prefetch_q <= '0;
+      end else begin
+        l0_miss       <= l0_miss + $countones(ev_miss & ~ev_miss_q);
+        l0_prefetch   <= l0_prefetch + $countones(ev_prefetch & ~ev_prefetch_q);
+        l0_hit        <= l0_hit + $countones(ev_hit);
+        l0_stall      <= l0_stall + $countones(ev_stall);
+        ev_miss_q     <= ev_miss;
+        ev_prefetch_q <= ev_prefetch;
+        l1_miss       <= l1_miss + icache_l1_events.l1_miss;
+        l1_hit        <= l1_hit + icache_l1_events.l1_hit;
+        l1_stall      <= l1_stall + icache_l1_events.l1_stall;
+      end
+    end
+    final begin
+      if ($test$plusargs("icache_stats"))
+        $display("[ICACHE] %m l0_miss=%0d l0_hit=%0d l0_prefetch=%0d l0_stall=%0d l1_miss=%0d ",
+                 l0_miss, l0_hit, l0_prefetch, l0_stall, l1_miss,
+                 "l1_hit=%0d l1_stall=%0d", l1_hit, l1_stall);
+    end
+    // pragma translate_on
+`endif
     axi_cut #(
       .aw_chan_t (axi_core_aw_t  ),
       .w_chan_t  (axi_core_w_t   ),

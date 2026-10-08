@@ -258,3 +258,8 @@ num_banks_per_group := $(shell echo $$(( $(num_cores) * $(num_fus_per_core) * $(
 # away instead of its vertical neighbour.
 groups_per_l2_bank  := $(shell echo $$(( $(num_groups) / $(l2_banks) )))
 axi_width_interleaved := $(shell echo $$(( $(groups_per_l2_bank) * $(num_banks_per_group) * 4 / ($(axi_data_width) / 8) )))
+
+# Instruction caches: L1 bytes per tile and read-only cache bytes per group.
+# Lines (256 bit), L1 ways and L0 lines are fixed in mempool_pkg.sv.
+icache_size_byte   ?= $(shell echo $$(( 512 * $(num_cores_per_tile) )))
+ro_cache_size_byte ?= 8192

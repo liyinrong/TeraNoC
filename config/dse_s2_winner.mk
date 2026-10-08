@@ -55,4 +55,9 @@ vlen            := 1024
 spatz_burst     := 1
 spatz_rob_depth := 32
 
+# --- instruction caches ---------------------------------------------------
+# As S1 (config/dse_s1_winner.mk); not swept for S2 yet.
+icache_size_byte   := 4096
+ro_cache_size_byte := 16384
+
 include $(MEMPOOL_DIR)/config/dse_s2_common.mk
