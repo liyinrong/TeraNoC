@@ -147,6 +147,7 @@ endif
 vlog_defs += -DNUM_CORES=$(num_cores)
 vlog_defs += -DNUM_CORES_PER_TILE=$(num_cores_per_tile)
 vlog_defs += -DICACHE_SIZE_BYTE=$(icache_size_byte) -DRO_CACHE_SIZE_BYTE=$(ro_cache_size_byte)
+vlog_defs += -DNUM_SCALAR_CORES_PER_TILE=$(num_scalar_cores_per_tile)
 vlog_defs += -DNUM_DIVSQRT_PER_TILE=$(num_divsqrt_per_tile)
 vlog_defs += -DNUM_GROUPS=$(num_groups)
 vlog_defs += -DBANKING_FACTOR=$(banking_factor)

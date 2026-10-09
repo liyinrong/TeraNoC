@@ -263,3 +263,15 @@ axi_width_interleaved := $(shell echo $$(( $(groups_per_l2_bank) * $(num_banks_p
 # Lines (256 bit), L1 ways and L0 lines are fixed in mempool_pkg.sv.
 icache_size_byte   ?= $(shell echo $$(( 512 * $(num_cores_per_tile) )))
 ro_cache_size_byte ?= 8192
+
+# Snitch-only cores per tile (no Spatz, no FP): the first ones of every tile,
+# the rest are Snitch-Spatz. Spatz builds only.
+num_scalar_cores_per_tile ?= 0
+ifneq ($(strip $(num_scalar_cores_per_tile)),0)
+ifneq ($(strip $(spatz)),1)
+$(error num_scalar_cores_per_tile needs a Spatz build (spatz=1))
+endif
+ifeq ($(shell [ $(num_scalar_cores_per_tile) -lt $(num_cores_per_tile) ] && echo ok),)
+$(error num_scalar_cores_per_tile must be below num_cores_per_tile)
+endif
+endif

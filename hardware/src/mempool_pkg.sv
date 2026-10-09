@@ -55,6 +55,13 @@ package mempool_pkg;
   localparam integer unsigned NumMemPortsPerSpatz = NumFUsPerCore;
   // Per-core TCDM master ports: 1 scalar/FP port + RVV vector-LSU ports.
   localparam integer unsigned NumDataPortsPerCore = 1 + RVV * NumMemPortsPerSpatz;
+  // Cores [0, NumScalarCoresPerTile) of a tile are Snitch-only: no Spatz and no FP
+  // (scalar FP runs on Spatz). They keep the per-core port stride, so their vector
+  // port slots stay idle. The rest are Snitch-Spatz.
+  localparam integer unsigned NumScalarCoresPerTile =
+      `ifdef NUM_SCALAR_CORES_PER_TILE `NUM_SCALAR_CORES_PER_TILE `else 0 `endif;
+  localparam integer unsigned NumSpatzCoresPerTile  =
+      RVV ? NumCoresPerTile - NumScalarCoresPerTile : 0;
 
   /***********************
    *  MEMORY PARAMETERS  *
@@ -329,13 +336,14 @@ package mempool_pkg;
   // superbanks, or one own-tile and one remote). They contend only at the tile's
   // single wide remote link, which the mux after the shims resolves.
   localparam integer unsigned NumWideSpatzPorts =
-      SpatzWideBurst ? NumCoresPerTile : 0;
+      SpatzWideBurst ? NumSpatzCoresPerTile : 0;
   // At least one slot: the arrays and the crossbars are declared unconditionally
   // and a zero-width dimension is not legal.
   localparam integer unsigned NumWideLocalPorts =
       (NumWideRmPorts + NumWideSpatzPorts) > 0 ? (NumWideRmPorts + NumWideSpatzPorts) : 1;
   localparam integer unsigned WideRmPortIdx    = 0;
-  // Base slot of the Spatz block; core c owns WideSpatzPortIdx + c.
+  // Base slot of the Spatz block; Spatz core c owns
+  // WideSpatzPortIdx + c - NumScalarCoresPerTile.
   localparam integer unsigned WideSpatzPortIdx = NumWideRmPorts;
   // Slots with an own-tile wide ingress into the bank interconnect: RedMulE's.
   // A Spatz burst to its own tile is issued on the core's narrow vector ports

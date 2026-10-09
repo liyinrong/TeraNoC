@@ -263,15 +263,19 @@ module mempool_tile
     assign hart_id = unsigned'(tile_id_i) * NumCoresPerTile + unsigned'(c);
 
     if (!TrafficGeneration) begin: gen_mempool_cc
-      // Unified core complex selected by mempool_pkg::RVV; sh_acc ports are
-      // always present (a Spatz core ties them off). Core c owns the flat-axis
-      // slice [NumDataPortsPerCore*c +: NumDataPortsPerCore] (= [c] for scalar).
+      // Unified core complex: Snitch-Spatz, or Snitch-only for the tile's first
+      // NumScalarCoresPerTile cores. sh_acc ports are always present (a Spatz
+      // core ties them off). Core c owns the flat-axis slice
+      // [NumDataPortsPerCore*c +: NumDataPortsPerCore] (= [c] for scalar builds);
+      // a Snitch-only core drives its first port and leaves the rest idle.
+      localparam bit          CoreSpatz = mempool_pkg::RVV && (c >= NumScalarCoresPerTile);
+      localparam int unsigned CorePorts = CoreSpatz ? NumDataPortsPerCore : 1;
       mempool_cc #(
         .BootAddr            (BootAddr                        ),
         .RVE                 (1'b0                            ),
         .RVM                 (1'b1                            ),
-        .SpatzEn             (mempool_pkg::RVV                ),
-        .RVV                 (mempool_pkg::RVV                ),
+        .SpatzEn             (CoreSpatz                       ),
+        .RVV                 (CoreSpatz                       ),
         .XFVEC               (mempool_pkg::XFVEC              ),
         .XFDOTP              (mempool_pkg::XFDOTP             ),
         .XFAUX               (mempool_pkg::XFAUX              ),
@@ -302,27 +306,39 @@ module mempool_tile
         .sh_acc_resp_i        (acc_resp[c]                                       ),
         .sh_acc_resp_valid_i  (sh_acc_resp_valid[c]                              ),
         .sh_acc_resp_ready_o  (sh_acc_resp_ready[c]                              ),
-        // Data Ports -- slice [NumDataPortsPerCore*c +: NumDataPortsPerCore]
-        .data_qaddr_o  (cc_data_qaddr     [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qwrite_o (cc_data_qwrite    [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qamo_o   (cc_data_qamo      [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qdata_o  (cc_data_qdata     [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qstrb_o  (cc_data_qstrb     [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qid_o    (cc_data_qid       [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qburst_len_o(cc_data_qburst_len[NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qvalid_o (cc_data_qvalid    [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_qready_i (cc_data_qready    [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_pdata_i  (cc_data_pdata     [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
+        // Data Ports -- slice [NumDataPortsPerCore*c +: CorePorts]
+        .data_qaddr_o  (cc_data_qaddr     [NumDataPortsPerCore*c +: CorePorts]),
+        .data_qwrite_o (cc_data_qwrite    [NumDataPortsPerCore*c +: CorePorts]),
+        .data_qamo_o   (cc_data_qamo      [NumDataPortsPerCore*c +: CorePorts]),
+        .data_qdata_o  (cc_data_qdata     [NumDataPortsPerCore*c +: CorePorts]),
+        .data_qstrb_o  (cc_data_qstrb     [NumDataPortsPerCore*c +: CorePorts]),
+        .data_qid_o    (cc_data_qid       [NumDataPortsPerCore*c +: CorePorts]),
+        .data_qburst_len_o(cc_data_qburst_len[NumDataPortsPerCore*c +: CorePorts]),
+        .data_qvalid_o (cc_data_qvalid    [NumDataPortsPerCore*c +: CorePorts]),
+        .data_qready_i (cc_data_qready    [NumDataPortsPerCore*c +: CorePorts]),
+        .data_pdata_i  (cc_data_pdata     [NumDataPortsPerCore*c +: CorePorts]),
         // Store write-ack is carried in a meta_id bit (Spatz); data_pwrite_i unused.
         .data_pwrite_i ('0                                                              ),
-        .data_perror_i (cc_data_perror    [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_pid_i    (cc_data_pid       [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_pvalid_i (cc_data_pvalid    [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
-        .data_pready_o (cc_data_pready    [NumDataPortsPerCore*c +: NumDataPortsPerCore]),
+        .data_perror_i (cc_data_perror    [NumDataPortsPerCore*c +: CorePorts]),
+        .data_pid_i    (cc_data_pid       [NumDataPortsPerCore*c +: CorePorts]),
+        .data_pvalid_i (cc_data_pvalid    [NumDataPortsPerCore*c +: CorePorts]),
+        .data_pready_o (cc_data_pready    [NumDataPortsPerCore*c +: CorePorts]),
         .wake_up_sync_i(wake_up[c]                                               ),
         // Core Events
         .core_events_o (/* Unused */                                             )
       );
+      if (CorePorts < NumDataPortsPerCore) begin: gen_idle_vector_ports
+        localparam int unsigned Idle = NumDataPortsPerCore - CorePorts;
+        assign cc_data_qaddr     [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
+        assign cc_data_qwrite    [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
+        assign cc_data_qamo      [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
+        assign cc_data_qdata     [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
+        assign cc_data_qstrb     [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
+        assign cc_data_qid       [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
+        assign cc_data_qburst_len[NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
+        assign cc_data_qvalid    [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
+        assign cc_data_pready    [NumDataPortsPerCore*c+CorePorts +: Idle] = '1;
+      end : gen_idle_vector_ports
       if (snitch_pkg::XDIVSQRT && !mempool_pkg::RVV) begin: gen_sh_acc_interface
         // Assign the cores' hart_id to the corresponding shared accelerator
         assign sh_acc_req[c].addr      = acc_req[c].addr;
@@ -1315,9 +1331,9 @@ module mempool_tile
     // One expander + one adapter per core, each adapter on its own wide slot. No
     // arbitration here: the cores contend only at the tile's single wide remote
     // link, which the mux after the slots resolves, together with RedMulE.
-    for (genvar c = 0; c < NumCoresPerTile; c++) begin : gen_spatz_wide_core
+    for (genvar c = NumScalarCoresPerTile; c < NumCoresPerTile; c++) begin : gen_spatz_wide_core
       localparam int unsigned P0   = NumDataPortsPerCore*c + BurstPortOff;
-      localparam int unsigned WIdx = WideSpatzPortIdx + c;
+      localparam int unsigned WIdx = WideSpatzPortIdx + c - NumScalarCoresPerTile;
 
       logic     [RecvPorts-1:0] rsp_valid;
       data_t    [RecvPorts-1:0] rsp_data;
@@ -1514,14 +1530,15 @@ module mempool_tile
       assign local_wide_resp_interco_ready[WIdx]   = 1'b1;
     end : gen_spatz_wide_core
 
-    // Ports that are not a core's vector port 0 are never diverted.
+    // Ports that are not a Spatz core's vector port 0 are never diverted.
     for (genvar i = 0; i < NumCorePorts; i++) begin : gen_plain_ports
-      localparam int unsigned Port = i % NumDataPortsPerCore;
-      if (Port != BurstPortOff) begin : gen_plain
+      localparam int unsigned Port   = i % NumDataPortsPerCore;
+      localparam bit          Scalar = (i / NumDataPortsPerCore) < NumScalarCoresPerTile;
+      if (Scalar || (Port != BurstPortOff)) begin : gen_plain
         assign core_divert[i] = 1'b0;
         assign adp_qready[i]  = 1'b0;
       end
-      if ((Port < BurstPortOff) || (Port >= BurstPortOff + RecvPorts)) begin : gen_no_lane
+      if (Scalar || (Port < BurstPortOff) || (Port >= BurstPortOff + RecvPorts)) begin : gen_no_lane
         assign adp_pvalid[i] = 1'b0;
         assign adp_pdata[i]  = '0;
         assign adp_pid[i]    = '0;

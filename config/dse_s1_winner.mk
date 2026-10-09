@@ -64,6 +64,11 @@ noc_wide_rw_resp_remap_group_size := 2
 noc_router_input_fifo_dep  := 2
 noc_router_output_fifo_dep := 2
 
+# --- cores ----------------------------------------------------------------
+# One Snitch-only core per tile for scheduling and RedMulE/DMA control, three
+# Snitch-Spatz for the vector work. Banks per tile are unchanged.
+num_scalar_cores_per_tile := 1
+
 # --- instruction caches ---------------------------------------------------
 # A 4 KiB tile L1 behind 8-line L0s, backed by a 16 KiB group read-only cache:
 # the attention loop's code for a tile's four cores does not fit 4 KiB, but the

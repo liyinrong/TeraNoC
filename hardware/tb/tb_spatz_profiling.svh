@@ -143,7 +143,7 @@
       sp_retval   = $system({"mkdir -p ", sp_log_path});
       for (int g = 0; g < NumGroups; g++)
         for (int t = 0; t < NumTilesPerGroup; t++)
-          for (int c = 0; c < NumCoresPerTile; c++) begin
+          for (int c = NumScalarCoresPerTile; c < NumCoresPerTile; c++) begin
             f_speng[g][t][c] = $fopen($sformatf("%s/spatz_g%0d_t%0d_c%0d.log",
                                                 sp_log_path, g, t, c), "w");
             // ELENB sizes one lane; RobDepth (NrOutstandingLoads, read off the
@@ -153,13 +153,13 @@
                     mempool_pkg::NumMemPortsPerSpatz,
                     spatz_pkg::N_FU * spatz_pkg::ELENB,
                     spatz_pkg::ELENB,
-                    `SPATZ_TOP(0,0,0).i_vlsu.NrOutstandingLoads);
+                    `SPATZ_TOP(0,0,NumScalarCoresPerTile).i_vlsu.NrOutstandingLoads);
           end
     end
 
     for (genvar g = 0; g < NumGroups; g++) begin : gen_g
       for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_t
-        for (genvar c = 0; c < NumCoresPerTile; c++) begin : gen_c
+        for (genvar c = NumScalarCoresPerTile; c < NumCoresPerTile; c++) begin : gen_c
           // Change-detection state for the L/B records: the last values
           // written, so a line is emitted only when one of them moves. Cleared
           // in the reset branch below -- NOT by a declaration initializer,
@@ -320,7 +320,7 @@
       // every gap between active bursts and out to the end of the run.
       for (int g = 0; g < NumGroups; g++)
         for (int t = 0; t < NumTilesPerGroup; t++)
-          for (int c = 0; c < NumCoresPerTile; c++) begin
+          for (int c = NumScalarCoresPerTile; c < NumCoresPerTile; c++) begin
             $fwrite(f_speng[g][t][c], "E %0d\n", cycle_q);
             $fclose(f_speng[g][t][c]);
           end
