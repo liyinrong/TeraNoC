@@ -749,9 +749,10 @@ needs %0d b -- lower spatz_rob_depth or widen MetaIdWidth.",
     .data_o  ( acc_resp_q      )
   );
 
-  // Snitch IPU accelerator
+  // Snitch IPU accelerator. Its id is the offload id, which a Spatz build widens
+  // (snitch_pkg::AccIdWidth) even for a Snitch-only core.
   snitch_ipu #(
-    .IdWidth ( 5 )
+    .IdWidth ( snitch_pkg::AccIdWidth )
   ) i_snitch_ipu (
     .clk_i                                   ,
     .rst_ni                                  ,
@@ -769,6 +770,8 @@ needs %0d b -- lower spatz_rob_depth or widen MetaIdWidth.",
     .acc_pvalid_o     ( ipu_resp_dvalid     ),
     .acc_pready_i     ( ipu_resp_dready     )
   );
+  // Not a store acknowledgement (Spatz only).
+  assign ipu_resp_d.write = 1'b0;
 
   // Snitch FP sub-system
   if (snitch_pkg::ZFINX) begin: gen_fpu

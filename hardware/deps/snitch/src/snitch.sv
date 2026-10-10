@@ -268,6 +268,11 @@ module snitch
     assign fpu_rnd_mode_o = fcsr_q.frm;
     // (Spatz) FP format mode from the fcsr; 0 for the scalar (Zfinx) core (RVV=0).
     assign fpu_fmt_mode_o = RVV ? fcsr_q.fmode : '0;
+  end else begin : gen_no_fcsr
+    // No FP and no Zfinx (a Snitch-only core of a Spatz build): no fcsr.
+    assign fcsr_q         = '0;
+    assign fpu_rnd_mode_o = '0;
+    assign fpu_fmt_mode_o = '0;
   end
 
   always_comb begin
