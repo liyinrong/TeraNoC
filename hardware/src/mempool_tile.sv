@@ -18,7 +18,7 @@ module mempool_tile
   // Enable a RedMulE tensor core: widens the local interconnect by RMNarrowPorts
   // (its narrow ports without the wide plane; none with it).
   parameter logic        RedMulE      = 1'b0,
-  parameter int unsigned NumLocalPorts = RedMulE ? RMNarrowPorts + NumCoresPerTile * NumDataPortsPerCore : NumCoresPerTile * NumDataPortsPerCore,
+  parameter int unsigned NumLocalPorts = RedMulE ? RMNarrowPorts + NumCorePortsPerTile : NumCorePortsPerTile,
   // Wide engines have their own local-port axis: one slot per wide client (only
   // RedMulE's has an own-tile bank-interconnect port). Derived in mempool_pkg
   // from which clients the build instantiates (RedMulE, Spatz burst adapter).
@@ -151,11 +151,12 @@ module mempool_tile
   snitch_pkg::sh_acc_req_t   [NumCoresPerTile-1:0]                 sh_acc_req;
   snitch_pkg::sh_acc_resp_t  [NumCoresPerTile-1:0]                 sh_acc_resp;
 
-  // Data interfaces. Each core drives NumDataPortsPerCore TCDM ports flattened
-  // onto one axis (port p of core c = NumDataPortsPerCore*c + p); scalar builds
-  // have NumDataPortsPerCore==1, so each index is the core id. meta_id_t is
-  // cluster-width; mempool_cc zero-extends the snitch id onto it.
-  localparam int unsigned NumCorePorts = NumCoresPerTile * NumDataPortsPerCore;
+  // Data interfaces. The cores' TCDM ports are flattened onto one axis (port p
+  // of core c = core_port_base(c) + p): one port per Snitch-only core, then
+  // NumDataPortsPerCore per Snitch-Spatz core; in scalar builds each index is
+  // the core id. meta_id_t is cluster-width; mempool_cc zero-extends the snitch
+  // id onto it.
+  localparam int unsigned NumCorePorts = NumCorePortsPerTile;
   addr_t    [NumCorePorts-1:0] snitch_data_qaddr;
   addr_t    [NumCorePorts-1:0] snitch_data_qaddr_scrambled;
   logic     [NumCorePorts-1:0] snitch_data_qwrite;
@@ -266,8 +267,7 @@ module mempool_tile
       // Unified core complex: Snitch-Spatz, or Snitch-only for the tile's first
       // NumScalarCoresPerTile cores. sh_acc ports are always present (a Spatz
       // core ties them off). Core c owns the flat-axis slice
-      // [NumDataPortsPerCore*c +: NumDataPortsPerCore] (= [c] for scalar builds);
-      // a Snitch-only core drives its first port and leaves the rest idle.
+      // [core_port_base(c) +: CorePorts] (= [c] for scalar builds).
       localparam bit          CoreSpatz = mempool_pkg::RVV && (c >= NumScalarCoresPerTile);
       localparam int unsigned CorePorts = CoreSpatz ? NumDataPortsPerCore : 1;
       mempool_cc #(
@@ -306,39 +306,27 @@ module mempool_tile
         .sh_acc_resp_i        (acc_resp[c]                                       ),
         .sh_acc_resp_valid_i  (sh_acc_resp_valid[c]                              ),
         .sh_acc_resp_ready_o  (sh_acc_resp_ready[c]                              ),
-        // Data Ports -- slice [NumDataPortsPerCore*c +: CorePorts]
-        .data_qaddr_o  (cc_data_qaddr     [NumDataPortsPerCore*c +: CorePorts]),
-        .data_qwrite_o (cc_data_qwrite    [NumDataPortsPerCore*c +: CorePorts]),
-        .data_qamo_o   (cc_data_qamo      [NumDataPortsPerCore*c +: CorePorts]),
-        .data_qdata_o  (cc_data_qdata     [NumDataPortsPerCore*c +: CorePorts]),
-        .data_qstrb_o  (cc_data_qstrb     [NumDataPortsPerCore*c +: CorePorts]),
-        .data_qid_o    (cc_data_qid       [NumDataPortsPerCore*c +: CorePorts]),
-        .data_qburst_len_o(cc_data_qburst_len[NumDataPortsPerCore*c +: CorePorts]),
-        .data_qvalid_o (cc_data_qvalid    [NumDataPortsPerCore*c +: CorePorts]),
-        .data_qready_i (cc_data_qready    [NumDataPortsPerCore*c +: CorePorts]),
-        .data_pdata_i  (cc_data_pdata     [NumDataPortsPerCore*c +: CorePorts]),
+        // Data Ports -- slice [core_port_base(c) +: CorePorts]
+        .data_qaddr_o  (cc_data_qaddr     [core_port_base(c) +: CorePorts]),
+        .data_qwrite_o (cc_data_qwrite    [core_port_base(c) +: CorePorts]),
+        .data_qamo_o   (cc_data_qamo      [core_port_base(c) +: CorePorts]),
+        .data_qdata_o  (cc_data_qdata     [core_port_base(c) +: CorePorts]),
+        .data_qstrb_o  (cc_data_qstrb     [core_port_base(c) +: CorePorts]),
+        .data_qid_o    (cc_data_qid       [core_port_base(c) +: CorePorts]),
+        .data_qburst_len_o(cc_data_qburst_len[core_port_base(c) +: CorePorts]),
+        .data_qvalid_o (cc_data_qvalid    [core_port_base(c) +: CorePorts]),
+        .data_qready_i (cc_data_qready    [core_port_base(c) +: CorePorts]),
+        .data_pdata_i  (cc_data_pdata     [core_port_base(c) +: CorePorts]),
         // Store write-ack is carried in a meta_id bit (Spatz); data_pwrite_i unused.
         .data_pwrite_i ('0                                                              ),
-        .data_perror_i (cc_data_perror    [NumDataPortsPerCore*c +: CorePorts]),
-        .data_pid_i    (cc_data_pid       [NumDataPortsPerCore*c +: CorePorts]),
-        .data_pvalid_i (cc_data_pvalid    [NumDataPortsPerCore*c +: CorePorts]),
-        .data_pready_o (cc_data_pready    [NumDataPortsPerCore*c +: CorePorts]),
+        .data_perror_i (cc_data_perror    [core_port_base(c) +: CorePorts]),
+        .data_pid_i    (cc_data_pid       [core_port_base(c) +: CorePorts]),
+        .data_pvalid_i (cc_data_pvalid    [core_port_base(c) +: CorePorts]),
+        .data_pready_o (cc_data_pready    [core_port_base(c) +: CorePorts]),
         .wake_up_sync_i(wake_up[c]                                               ),
         // Core Events
         .core_events_o (/* Unused */                                             )
       );
-      if (CorePorts < NumDataPortsPerCore) begin: gen_idle_vector_ports
-        localparam int unsigned Idle = NumDataPortsPerCore - CorePorts;
-        assign cc_data_qaddr     [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
-        assign cc_data_qwrite    [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
-        assign cc_data_qamo      [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
-        assign cc_data_qdata     [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
-        assign cc_data_qstrb     [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
-        assign cc_data_qid       [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
-        assign cc_data_qburst_len[NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
-        assign cc_data_qvalid    [NumDataPortsPerCore*c+CorePorts +: Idle] = '0;
-        assign cc_data_pready    [NumDataPortsPerCore*c+CorePorts +: Idle] = '1;
-      end : gen_idle_vector_ports
       if (snitch_pkg::XDIVSQRT && !mempool_pkg::RVV) begin: gen_sh_acc_interface
         // Assign the cores' hart_id to the corresponding shared accelerator
         assign sh_acc_req[c].addr      = acc_req[c].addr;
@@ -1233,7 +1221,7 @@ module mempool_tile
 
   // SoC requests (one per core data port; Spatz vector ports never hit SoC
   // addresses, so their slots are inert). NumDataPortsPerCore==1 for non-Spatz.
-  localparam int unsigned NumSoCPorts = NumCoresPerTile * NumDataPortsPerCore;
+  localparam int unsigned NumSoCPorts = NumCorePorts;
   dreq_t  [NumSoCPorts-1:0] soc_data_q;
   logic   [NumSoCPorts-1:0] soc_data_qvalid;
   logic   [NumSoCPorts-1:0] soc_data_qready;
@@ -1288,14 +1276,14 @@ module mempool_tile
     }
   };
 
-  // Each core's NumDataPortsPerCore TCDM master ports are flattened onto the
-  // local-port axis: port p of core c is index NumDataPortsPerCore*c + p (= i).
-  // Scalar builds have NumDataPortsPerCore == 1, so i == core id and this reduces
-  // to the original per-core loop; the Spatz vector ports extend the same axis.
+  // The cores' TCDM master ports are flattened onto the local-port axis: port p
+  // of core c is index core_port_base(c) + p (= i). Scalar builds have one port
+  // per core, so i == core id and this reduces to the original per-core loop;
+  // the Spatz vector ports extend the same axis.
   // ------------------------------------------------------------------
   //  Spatz burst -> wide plane divert
   // ------------------------------------------------------------------
-  // A burst leaves the core on its VECTOR PORT 0 (index NumDataPortsPerCore*c + 1;
+  // A burst leaves the core on its VECTOR PORT 0 (index core_port_base(c) + 1;
   // port 0 of the slice is the scalar/FP port) as a single request with
   // burst_len > 1, and its beats come back on the first RecvPorts vector ports of
   // the same core. Off => every signal below is a wire and the netlist is unchanged.
@@ -1332,7 +1320,7 @@ module mempool_tile
     // arbitration here: the cores contend only at the tile's single wide remote
     // link, which the mux after the slots resolves, together with RedMulE.
     for (genvar c = NumScalarCoresPerTile; c < NumCoresPerTile; c++) begin : gen_spatz_wide_core
-      localparam int unsigned P0   = NumDataPortsPerCore*c + BurstPortOff;
+      localparam int unsigned P0   = core_port_base(c) + BurstPortOff;
       localparam int unsigned WIdx = WideSpatzPortIdx + c - NumScalarCoresPerTile;
 
       logic     [RecvPorts-1:0] rsp_valid;
@@ -1532,8 +1520,9 @@ module mempool_tile
 
     // Ports that are not a Spatz core's vector port 0 are never diverted.
     for (genvar i = 0; i < NumCorePorts; i++) begin : gen_plain_ports
-      localparam int unsigned Port   = i % NumDataPortsPerCore;
-      localparam bit          Scalar = (i / NumDataPortsPerCore) < NumScalarCoresPerTile;
+      localparam bit          Scalar = i < NumScalarCoresPerTile;
+      localparam int unsigned Port   =
+          Scalar ? 0 : (i - NumScalarCoresPerTile) % NumDataPortsPerCore;
       if (Scalar || (Port != BurstPortOff)) begin : gen_plain
         assign core_divert[i] = 1'b0;
         assign adp_qready[i]  = 1'b0;
@@ -2192,7 +2181,7 @@ module mempool_tile
      ************************************/
     // RedMulE master ports occupy the local-port slots after the core ports:
     // slot c = p + NumSoCPorts. NumSoCPorts already folds in the Spatz vector
-    // ports (NumCoresPerTile*NumDataPortsPerCore), so this places RedMulE after
+    // ports (NumCorePortsPerTile), so this places RedMulE after
     // them without collision (== NumCoresPerTile for scalar builds). Scramble →
     // shim → local/remote, exactly as gen_core_mux.
     addr_t [RMMasterPorts-1:0] redmule_addr_scrambled;

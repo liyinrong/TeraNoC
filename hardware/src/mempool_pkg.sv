@@ -56,12 +56,20 @@ package mempool_pkg;
   // Per-core TCDM master ports: 1 scalar/FP port + RVV vector-LSU ports.
   localparam integer unsigned NumDataPortsPerCore = 1 + RVV * NumMemPortsPerSpatz;
   // Cores [0, NumScalarCoresPerTile) of a tile are Snitch-only: no Spatz and no FP
-  // (scalar FP runs on Spatz). They keep the per-core port stride, so their vector
-  // port slots stay idle. The rest are Snitch-Spatz.
+  // (scalar FP runs on Spatz), one TCDM port. The rest are Snitch-Spatz.
   localparam integer unsigned NumScalarCoresPerTile =
       `ifdef NUM_SCALAR_CORES_PER_TILE `NUM_SCALAR_CORES_PER_TILE `else 0 `endif;
   localparam integer unsigned NumSpatzCoresPerTile  =
       RVV ? NumCoresPerTile - NumScalarCoresPerTile : 0;
+  // The tile's core TCDM ports, flattened core by core: one port per Snitch-only
+  // core, then NumDataPortsPerCore per Snitch-Spatz core.
+  localparam integer unsigned NumCorePortsPerTile = NumCoresPerTile * NumDataPortsPerCore -
+      NumScalarCoresPerTile * (NumDataPortsPerCore - 1);
+  // First flat port of core c.
+  function automatic int unsigned core_port_base(int unsigned c);
+    return (c < NumScalarCoresPerTile) ? c :
+        NumScalarCoresPerTile + (c - NumScalarCoresPerTile) * NumDataPortsPerCore;
+  endfunction
 
   /***********************
    *  MEMORY PARAMETERS  *
@@ -360,8 +368,7 @@ package mempool_pkg;
   // the RedMulE narrow slots when present. Degrades to NumCoresPerTile for the
   // scalar case (NumDataPortsPerCore = 1, NumRMTiles = 0).
   localparam integer unsigned MaxLocalPortsPerTile =
-      NumRMTiles > 0 ? RMNarrowPorts + NumCoresPerTile * NumDataPortsPerCore
-                     : NumCoresPerTile * NumDataPortsPerCore;
+      NumRMTiles > 0 ? RMNarrowPorts + NumCorePortsPerTile : NumCorePortsPerTile;
 
   // Shared core<->L1 meta_id. Every engine on a tile master port carries its
   // outstanding-transaction id in this one field, so it must be as wide as the

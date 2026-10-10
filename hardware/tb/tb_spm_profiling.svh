@@ -69,11 +69,12 @@
     for (genvar g = 0; g < NumGroups; g++) begin : gen_spm_bank_g
       for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_spm_bank_t
         // local/remote boundary = this tile's NumLocalPorts (mempool_tile.sv:20):
-        // every core contributes NumDataPortsPerCore ports (1 scalar + the Spatz
-        // vector ports), and only the first NumRMTilesPerGroup tiles host a
+        // the cores contribute NumCorePortsPerTile ports (1 per Snitch-only core,
+        // 1 scalar + the Spatz vector ports per Snitch-Spatz core), and only the
+        // first NumRMTilesPerGroup tiles host a
         // RedMulE, which widens the local side by RMNarrowPorts (0 with the
         // wide plane, where RedMulE uses its wide port instead).
-        localparam int unsigned NLP = NumCoresPerTile * NumDataPortsPerCore +
+        localparam int unsigned NLP = NumCorePortsPerTile +
             ((t < NumRMTilesPerGroup) ? RMNarrowPorts : 0);
         always_ff @(posedge clk or negedge rst_n) begin
           if (!rst_n) begin
@@ -111,7 +112,7 @@
                   // The bank payload carries the wide requester's origin group/tile
                   // and meta_id (mempool_tcdm_wide_superbank gen_bank_req).
                   wloc  = (wp < NumWideBankLocalPorts) ? 1 : 0;
-                  wcore = NumCoresPerTile * NumDataPortsPerCore;  // wide engine slot
+                  wcore = NumCorePortsPerTile;  // wide engine slot
                 end
 `endif
                 $fwrite(f_bank[g][t], "P %0d %0d %0d %0h %0d %0d %0d %0d %0d %0d %0d %0d\n",

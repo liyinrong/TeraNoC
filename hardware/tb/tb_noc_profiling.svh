@@ -131,12 +131,12 @@
   logic [1:0]  ts_mrsp_st [NumGroups][NumTilesPerGroup][NumNarrowRemoteRespPortsPerTile]; logic [63:0] ts_mrsp_s [NumGroups][NumTilesPerGroup][NumNarrowRemoteRespPortsPerTile];
   logic [1:0]  ts_srsp_st [NumGroups][NumTilesPerGroup][NumNarrowRemoteRespPortsPerTile]; logic [63:0] ts_srsp_s [NumGroups][NumTilesPerGroup][NumNarrowRemoteRespPortsPerTile];
   // PE (core data port): req = data_q* (out, read/write by qwrite), resp = data_p* (in).
-  // One entry per CORE PORT, not per core: a core drives NumDataPortsPerCore
-  // TCDM ports flattened as port p of core c = NumDataPortsPerCore*c + p
-  // (mempool_tile.sv:122). Scalar builds have NumDataPortsPerCore == 1, so the
+  // One entry per CORE PORT, not per core: the cores' TCDM ports are flattened
+  // as port p of core c = core_port_base(c) + p (mempool_pkg.sv; a Snitch-only
+  // core has one port). Scalar builds have one port per core, so the
   // index stays the core id; Spatz builds add the NumMemPortsPerSpatz vector
   // ports after each core's scalar port.
-  localparam int unsigned NumCorePorts = NumCoresPerTile * NumDataPortsPerCore;
+  localparam int unsigned NumCorePorts = NumCorePortsPerTile;
   logic [1:0]  core_req_st [NumGroups][NumTilesPerGroup][NumCorePorts]; logic [63:0] core_req_s [NumGroups][NumTilesPerGroup][NumCorePorts];
   logic [1:0]  core_rsp_st [NumGroups][NumTilesPerGroup][NumCorePorts]; logic [63:0] core_rsp_s [NumGroups][NumTilesPerGroup][NumCorePorts];
   // RedMulE master-port state (RedMulE tiles only); same S/P format as PE cores.
@@ -531,7 +531,7 @@
   // -1 for a SoC/L2 access; pairing req->resp by meta_id gives the port's
   // round-trip latency, split by address class (scripts/interco_perf.py).
   // The leading demux index is the FLAT core-port index (core c port p =
-  // NumDataPortsPerCore*c + p), so Spatz builds log the scalar port AND all
+  // core_port_base(c) + p), so Spatz builds log the scalar port AND all
   // NumMemPortsPerSpatz vector ports of every core, not just the first four
   // ports of core 0.
   // ------------------------------------------------------------
