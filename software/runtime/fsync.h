@@ -11,8 +11,10 @@
 //   +0x04 ID      W   scope id; bit 0 picks h (even) or v (odd)
 //   +0x08 CONTROL W   bit0 = trigger, bit1 = clear sticky error
 //   +0x0C STATUS  R   bit0 done, bit1 error, bit2 BUSY, [7:4] lvl, [8+] rsp id
+//   +0x10 RAISE   W   core mask: raise EVT_CORE to those cores of this tile
+//   +0x14 EPOCH   R   tree responses this tile received (32 bits, wraps)
 //
-// The per-core event unit above that (SUBSCRIBE) is described
+// The per-core event unit above that (SUBSCRIBE, RAISE) is described
 // in hardware/src/fsync_shim.sv.
 //
 // SCOPE MODEL. A barrier scope is a pow2-aligned SQUARE block of TILES, and
@@ -43,10 +45,13 @@
 #define FSYNC_ID_REG_OFFSET (0x04)
 #define FSYNC_CONTROL_REG_OFFSET (0x08)
 #define FSYNC_STATUS_REG_OFFSET (0x0C)
+#define FSYNC_RAISE_REG_OFFSET 0x10u
+#define FSYNC_EPOCH_REG_OFFSET 0x14u
 #define FSYNC_SUBSCRIBE_REG_OFFSET 0x20u
 #define FSYNC_EVT_FSYNC 0x1u
 #define FSYNC_EVT_DMA 0x2u    // one group DMA transfer retired
 #define FSYNC_EVT_ENGINE 0x4u // tile engine end-of-computation (RedMulE)
+#define FSYNC_EVT_CORE 0x8u   // raised by a core of the tile (fsync_raise)
 
 #define FSYNC_CONTROL_TRIGGER (1u << 0)
 
@@ -170,6 +175,21 @@ static inline void fsync_subscribe_self(uint32_t sources) {
       sources;
 }
 
+// Tree responses this tile has received. Read it before arriving at a barrier
+// and sleep until it moves: any other wake then just re-checks.
+static inline uint32_t fsync_epoch(void) {
+  return *(volatile uint32_t *)(FSYNC_BASE + FSYNC_EPOCH_REG_OFFSET);
+}
+
+// Raise EVT_CORE to the cores of this tile in core_mask (bit = core in tile),
+// the caller included if it is set. A target subscribed to FSYNC_EVT_CORE keeps
+// it pending while awake, so `while (!cond) mempool_wfi();` cannot miss it;
+// raises before one wake coalesce into that wake. A plain store: it waits for
+// the vector stores before it, so it can announce their data.
+static inline void fsync_raise(uint32_t core_mask) {
+  *(volatile uint32_t *)(FSYNC_BASE + FSYNC_RAISE_REG_OFFSET) = core_mask;
+}
+
 // Leave the tile's barrier events entirely. A core that takes no part in its
 // tile's barriers must unsubscribe: while subscribed, every response leaves a
 // pending bit that wakes its next sleep, and mempool_barrier has no re-check.
@@ -179,12 +199,11 @@ static inline void fsync_unsubscribe_self(void) { fsync_subscribe_self(0u); }
 // Two-level barrier. EVERY core of the tile calls these.
 //
 // The core that arrives LAST triggers the tree, and every participant, the
-// trigger core included, sleeps once. A participant is subscribed to the tree
-// event only (the reset value, which every event wait restores), and pending
-// holds the response if it lands before the sleep, so the wake is always the
-// response. That needs every legacy wake_up to be spent before the barrier: a
-// software barrier before or after a phase of these is fine, one interleaved
-// with them is not. A mismatched response traps.
+// trigger core included, sleeps until the tile's EPOCH moves past the value it
+// read before arriving. pending holds the response if it lands before the
+// sleep, and any other wake (EVT_CORE, DMA, a legacy wake_up) only re-checks,
+// so a participant may stay subscribed to other sources. A mismatched response
+// traps.
 //
 // Each tile counter occupies one full tile-bank stripe, so entry t lands in
 // tile t's own banks, and the array base is aligned to a whole all-tile stripe.
@@ -230,6 +249,8 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
   if (participants == 0u || participants > (uint32_t)NUM_CORES_PER_TILE)
     __builtin_trap();
 
+  // Read before arriving: the response cannot precede this core's arrival.
+  const uint32_t epoch = fsync_epoch();
   // Intra-tile rendezvous. tile_cnt[tile] sits in THIS tile's own bank stripe,
   // so the atomic is a local access; an arrival written to the shim instead
   // would serialise at the tile's fsync arbiter.
@@ -240,8 +261,8 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
     // Everything below is off every other core's critical path: they are
     // released by the tree, not by this core.
     const uint32_t exp_level = fsync_level_of_aggr(aggr);
-    mempool_wfi();
-    // BUSY still set means something other than the response woke this core.
+    while (fsync_epoch() == epoch)
+      mempool_wfi();
     const uint32_t status = fsync_status();
     if ((status & (FSYNC_STATUS_ERROR_MASK | FSYNC_STATUS_BUSY_MASK)) != 0u ||
         fsync_status_level(status) != exp_level ||
@@ -255,7 +276,8 @@ static inline void fsync_barrier_n(volatile fsync_tile_counter_t *tile_cnt,
 #endif
   } else {
     // Released by the tree response.
-    mempool_wfi();
+    while (fsync_epoch() == epoch)
+      mempool_wfi();
   }
 }
 
