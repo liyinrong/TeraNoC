@@ -31,6 +31,8 @@
 //   +0x04 ID      W   scope id, bit 0 selects h (even) or v (odd)
 //   +0x08 CONTROL W   bit0 = trigger, bit1 = clear sticky error
 //   +0x0C STATUS  R   {rsp_id, lvl, error, BUSY(bit2), done}
+//   +0x10 RAISE   W   core mask: raise EVT_CORE to each core of this tile in it
+//   +0x14 EPOCH   R   tree responses received by this tile, 32 bits, wraps
 //   +0x20+4c SUBSCRIBE[c] RW  event sources that may wake core c of this tile
 //
 // E1, the event-unit core. A core is woken ONLY while it is asleep:
@@ -52,8 +54,13 @@
 // fsync bit, so existing code behaves exactly as before.
 //
 // A sleeping core is therefore woken only by an event it is subscribed to.
-// The fsync barrier relies on that and sleeps once per barrier, so no core may
-// receive a legacy wake_up while it waits in one.
+// The fsync barrier still re-checks EPOCH after every wake, so a wake from
+// another source (EVT_CORE, DMA, a legacy wake_up) cannot release it early.
+//
+// EVT_CORE lets any core of the tile wake others with one plain store, under
+// the same rules as the other sources. EPOCH lets a barrier waiter re-check
+// after every wake (`while (epoch == e) wfi;`), so an unrelated pending event,
+// such as an EVT_CORE taken while awake, cannot release a barrier early.
 //
 // BUSY deliberately sits at bit 2, matching MAGIA's FSYNC_MM_STATUS_BUSY_MASK.
 // The bus port is intentionally generic (req/we/addr/wdata/rdata) rather than
@@ -128,14 +135,17 @@ module fsync_shim #(
   localparam logic [7:0] REG_ID        = 8'h04;
   localparam logic [7:0] REG_CONTROL   = 8'h08;
   localparam logic [7:0] REG_STATUS    = 8'h0C;
+  localparam logic [7:0] REG_RAISE     = 8'h10;
+  localparam logic [7:0] REG_EPOCH     = 8'h14;
   localparam logic [7:0] REG_SUBSCRIBE = 8'h20;  // +4 per core
 
   // Event sources. The tree response is edge-detected (it is a level); the two
   // engine completions arrive as pulses and are taken as they are.
-  localparam int unsigned EvtWidth   = 3;
+  localparam int unsigned EvtWidth   = 4;
   localparam int unsigned EVT_FSYNC  = 0;
   localparam int unsigned EVT_DMA    = 1; // one group DMA transfer retired
   localparam int unsigned EVT_ENGINE = 2; // tile engine end-of-computation
+  localparam int unsigned EVT_CORE   = 3; // raised by a core through RAISE
 
   logic [AggrWidth-1:0] reg_aggr_q;
   logic [IdWidth-1:0]   reg_id_q;
@@ -149,12 +159,17 @@ module fsync_shim #(
   // no re-check loop. Edge-detect instead.
   logic                 wake_q;
   logic                 wake_edge;
+  logic                 rsp_q;
+  logic [31:0]          epoch_q;
   logic                 reg_wr;
   logic                 reg_trigger, reg_clear;
+  logic [NumCores-1:0]  raise;
 
   assign reg_wr      = reg_req_i & reg_we_i;
   assign reg_trigger = reg_wr & (reg_addr_i == REG_CONTROL) & reg_wdata_i[0];
   assign reg_clear   = reg_wr & (reg_addr_i == REG_CONTROL) & reg_wdata_i[1];
+  assign raise       = {NumCores{reg_wr & (reg_addr_i == REG_RAISE)}} &
+                       reg_wdata_i[NumCores-1:0];
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -176,6 +191,8 @@ module fsync_shim #(
       reg_rdata_o[7:4]                 = lvl_q;
       reg_rdata_o[8+IdWidth-1 -: IdWidth] = rsp_id_q;
     end
+    if (reg_req_i && !reg_we_i && reg_addr_i == REG_EPOCH)
+      reg_rdata_o = epoch_q;
     for (int unsigned c = 0; c < NumCores; c++) begin
       if (reg_req_i && !reg_we_i && reg_addr_i == (REG_SUBSCRIBE + 8'(4*c)))
         reg_rdata_o[EvtWidth-1:0] = subscribe_q[c];
@@ -253,6 +270,18 @@ module fsync_shim #(
   end
   assign wake_edge = wake & ~wake_q;
 
+  // One count per tree response, error responses included: those release
+  // BUSY too, and a waiter must re-check STATUS rather than sleep forever.
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      rsp_q   <= 1'b0;
+      epoch_q <= '0;
+    end else begin
+      rsp_q <= wake | err;
+      if ((wake | err) & ~rsp_q) epoch_q <= epoch_q + 32'd1;
+    end
+  end
+
   // Every trigger, and whether it was ACCEPTED or silently dropped. accept is
   // gated on ~busy_q with no back-pressure to software -- fsync_trigger() is a
   // posted MMIO write -- so a trigger arriving while the tile's previous
@@ -290,6 +319,7 @@ module fsync_shim #(
       // engine edge detector would be a second, redundant filter.
       evt_set[EVT_DMA]    = dma_done_evt_i & subscribe_q[c][EVT_DMA];
       evt_set[EVT_ENGINE] = engine_evt_i & subscribe_q[c][EVT_ENGINE];
+      evt_set[EVT_CORE]   = raise[c] & subscribe_q[c][EVT_CORE];
     end
 
     // Wake ONLY while the core is asleep. This is the whole safety argument:
