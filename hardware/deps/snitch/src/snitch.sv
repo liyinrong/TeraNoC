@@ -212,6 +212,7 @@ module snitch
   logic acc_stall;
   // (Spatz) acc-mem ordering + offload bookkeeping (RVV-gated; inert for the scalar core)
   logic is_acc, is_acc_mem, acc_mem_store, acc_mem_stall, read_fcsr;
+  logic acc_mem_busy;  // a vector load/store accepted by Spatz has not completed
   logic valid_instr;
   logic exception;
 
@@ -750,8 +751,11 @@ module snitch
       // NOP Instructions
       riscv_instr::FENCE: begin
         write_rd = 1'b0;
-        // Stall until the LSU is empty
-        fence_stall = !lsu_empty;
+        // Stall until the LSU is empty and, on a Spatz core, until every vector
+        // load/store offloaded before the fence has completed (a store completes
+        // once all its writes are acknowledged). Without it only scalar stores
+        // wait for vector memory ops, and AMOs (is_load) only for vector stores.
+        fence_stall = !lsu_empty || acc_mem_busy;
       end
       riscv_instr::WFI: begin
         if (valid_instr) begin
@@ -3360,6 +3364,7 @@ module snitch
     logic [2:0] acc_mem_str_cnt_q, acc_mem_str_cnt_d;
     `FF(acc_mem_str_cnt_q, acc_mem_str_cnt_d, '0, clk_i, rst_ni)
     assign acc_mem_stall = (is_store && acc_mem_cnt_q != '0) || (is_load && acc_mem_str_cnt_q != 0) || acc_mem_cnt_q == '1;
+    assign acc_mem_busy  = acc_mem_cnt_q != '0;
     always_comb begin
       acc_mem_cnt_d     = acc_mem_cnt_q;
       acc_mem_str_cnt_d = acc_mem_str_cnt_q;
@@ -3375,6 +3380,7 @@ module snitch
     assign lsu_qvalid = valid_instr & (is_load | is_store) & ~(ld_addr_misaligned | st_addr_misaligned) & ~acc_mem_stall;
   end else begin : gen_scalar_acc_mem
     assign acc_mem_stall = 1'b0;
+    assign acc_mem_busy  = 1'b0;
     // address can be alu_result (i.e. rs1 + iimm/simm) or rs1 (for post-increment load/stores)
     assign lsu_qaddr  = lsu_qvalid ? (is_postincr ? gpr_rdata[0] : alu_result) : '0;
     assign lsu_qvalid = valid_instr & (is_load | is_store) & ~(ld_addr_misaligned | st_addr_misaligned);
