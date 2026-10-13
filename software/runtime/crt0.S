@@ -58,6 +58,14 @@ _reset_vector:
 #if N_FPU != 0
     // Zero the FP register file (Spatz/FPU builds only; N_FPU is undefined for
     // scalar builds, so this block disappears and the binary is unchanged).
+#if NUM_SCALAR_CORES_PER_TILE > 0
+    // The first cores of a tile are Snitch-only, with no FP register file: an
+    // FP instruction traps them into the boot ROM's wfi.
+    csrr    t0, mhartid
+    andi    t0, t0, (NUM_CORES_PER_TILE - 1)
+    li      t1, NUM_SCALAR_CORES_PER_TILE
+    blt     t0, t1, 1f
+#endif
     fmv.s.x f0, zero
     fmv.s.x f1, zero
     fmv.s.x f2, zero
@@ -90,6 +98,7 @@ _reset_vector:
     fmv.s.x f29, zero
     fmv.s.x f30, zero
     fmv.s.x f31, zero
+1:
 #endif
     // Build-time guarantee that every hart's stack stays inside its OWN tile.
     // The SPM scrambler selects the tile by addr / (NUM_CORES_PER_TILE *
