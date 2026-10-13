@@ -21,10 +21,14 @@
 #include "runtime.h"
 #include "synchronization.h"
 
+#include "fsync.h"
+
 #define NUM_TILES (NUM_CORES / NUM_CORES_PER_TILE)
 #define ROW_WORDS 128u // 512 B: one e32, LMUL=8 register group at VLEN 512
 #define ITERS 8u
 
+static fsync_tile_counter_t tile_cnt[NUM_TILES]
+    __attribute__((aligned(FSYNC_TILE_COUNTER_ALIGNMENT), section(".l1")));
 // One word per bank of the machine: index i lands in bank i, so tile t owns
 // words [t * NUM_BANKS_PER_TILE, (t + 1) * NUM_BANKS_PER_TILE).
 static uint32_t row[NUM_BANKS]
@@ -76,8 +80,11 @@ static void reader(void) {
 int main() {
   const uint32_t core_id = mempool_get_core_id();
   const uint32_t num_cores = mempool_get_core_count();
+  const uint32_t tile = core_id / NUM_CORES_PER_TILE;
 
   mempool_barrier_init(core_id);
+  for (uint32_t t = core_id; t < NUM_TILES; t += num_cores)
+    fsync_tile_counter_init(&tile_cnt[t]);
   for (uint32_t i = core_id; i < NUM_BANKS; i += num_cores)
     row[i] = 0u;
   if (core_id == 0u)
@@ -89,7 +96,7 @@ int main() {
   else if (core_id == 2u)
     reader();
 
-  mempool_barrier(num_cores);
+  fsync_barrier_all(tile_cnt, tile);
   if (core_id == 0u) {
     for (uint32_t i = 0; i < ITERS; ++i)
       printf("[vfence] iter %u fence cycles: idle=%u after_512B_vse=%u\n",
@@ -97,7 +104,5 @@ int main() {
              (unsigned)cost_busy[i]);
     printf("[vfence] %s errors=%u\n", errs ? "FAIL" : "PASS", (unsigned)errs);
   }
-  // Any core leaving main ends the run here: hold them until hart 0 printed.
-  mempool_barrier(num_cores);
   return (int)errs;
 }
