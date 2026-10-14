@@ -38,7 +38,7 @@ index 7310b02..eb9a217 100644
              `ifndef MEMPOOL_SPATZ
  
 diff --git a/hardware/deps/spatz_vpu/hw/src/spatz_vfu.sv b/hardware/deps/spatz_vpu/hw/src/spatz_vfu.sv
-index 714bd96..c466f83 100644
+index 714bd96..0ae2641 100644
 --- a/hardware/deps/spatz_vpu/hw/src/spatz_vfu.sv
 +++ b/hardware/deps/spatz_vpu/hw/src/spatz_vfu.sv
 @@ -472,7 +472,17 @@ module spatz_vfu
@@ -133,21 +133,25 @@ index 714bd96..c466f83 100644
          `endif
          lat_count_d = (result_valid[0] || (red_hold_cnt_q != 0)) ? '0 : lat_count_q + 1;
  
-@@ -1569,9 +1592,11 @@ assign vfcmp_result_accepted = result_tag.is_cmp && &(result_valid | ~pending_re
+@@ -1569,9 +1592,15 @@ assign vfcmp_result_accepted = result_tag.is_cmp && &(result_valid | ~pending_re
          ipu_result_tag_d   = '0;
        end
  
 -      // Store results
 +      // Store results. A scalar operation runs on IPU 0 only (operation_valid_i
 +      // above), so the other IPUs never return a result for it.
++      // Hold the IPUs while the slot still has a result the VRF has not taken
++      // (result_ready clears the register this cycle); storing anyway would
++      // overwrite it and leave the slot pointer out of step for good.
        int_ipu_result_ready = '0;
 -      if (&int_ipu_result_valid) begin
-+      if (&int_ipu_result_valid ||
-+          (int_ipu_result_tag[0].wb && &int_ipu_result_valid[0 +: ELENB])) begin
++      if ((result_ready || !(|ipu_result_valid_q[ipu_result_pnt_q*ELENB*N_IPU +: ELENB*N_IPU])) &&
++          (&int_ipu_result_valid ||
++           (int_ipu_result_tag[0].wb && &int_ipu_result_valid[0 +: ELENB]))) begin
          ipu_result_d[ipu_result_pnt_q*ELEN*N_IPU +: ELEN*N_IPU]         = int_ipu_result;
          ipu_result_valid_d[ipu_result_pnt_q*ELENB*N_IPU +: ELENB*N_IPU] = int_ipu_result_valid;
          ipu_result_tag_d                                                = int_ipu_result_tag[0];
-@@ -1745,6 +1770,9 @@ assign vfcmp_result_accepted = result_tag.is_cmp && &(result_valid | ~pending_re
+@@ -1745,6 +1774,9 @@ assign vfcmp_result_accepted = result_tag.is_cmp && &(result_valid | ~pending_re
          .op_mod_i      (fpu_op_mode_q                                          ),
          .tag_i         (input_tag_q                                            ),
          .simd_mask_i   ('1                                                     ),
