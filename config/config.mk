@@ -319,11 +319,12 @@ endif
 # Sizing worked example, terapool: 4 MiB L1 / 16 groups = 256 KiB per group,
 # vc_levels = 2, so window 1 = 1 MiB at 0x40_0000 and window 0 = 256 KiB at
 # 0x50_0000; the region ends at 0x54_0000, i.e. 5.25 MiB = 1.33 x 4 MiB.
-# Enable the virtual-cluster remap at the three COMPUTE scrambler sites.
-# Default OFF so every existing flavor stays bit-identical; the WP3 gate
-# builds with virtual_cluster=1. The standalone replay testbench
+# Enable the virtual-cluster remap at the three COMPUTE scrambler sites. On by
+# default: it only decodes addresses above the global L1 region, so code that
+# never touches a VC window runs cycle-identically either way. Needs a square
+# mesh and tile_id_remap=0. The standalone replay testbench
 # (hardware/tb/tb_vc_scrambler.sv) exercises the permuter either way.
-virtual_cluster   ?= 0
+virtual_cluster   ?= 1
 
 num_y             := $(shell echo $$(( $(num_groups) / $(num_x) )))
 vc_group_bytes    := $(shell echo $$(( $(num_banks_per_group) * $(l1_bank_size) )))
