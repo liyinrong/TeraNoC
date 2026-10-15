@@ -51,18 +51,23 @@ generate
   for (genvar g = 0; g < NumGroup; g++) begin : gen_remapper
     localparam int start_idx  = g * GroupSize;
 
-    sel_oup_t [GroupSize-1:0] sel_q, sel_d;
+    // sel_q[i]: the output of input i. inv_q[o]: the input of output o. sel_q
+    // rotates by one input per cycle, so every inv_q entry steps down by one.
+    sel_oup_t [GroupSize-1:0] sel_q, sel_d, inv_q, inv_d;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin : p_sel_regs
       if(!rst_ni) begin
         for(int i = 0; i < (GroupSize / 2); i++) begin : gen_sel_even
           sel_q[i] <= (i * 2);
+          inv_q[i * 2] <= i;
         end
         for(int i = (GroupSize / 2); i < GroupSize; i++) begin : gen_sel_odd
           sel_q[i] <= (i * 2 - GroupSize + 1);
+          inv_q[i * 2 - GroupSize + 1] <= i;
         end
       end else begin
         sel_q <= sel_d;
+        inv_q <= inv_d;
       end
     end
 
@@ -82,21 +87,17 @@ generate
     end
 
     // sel_q is a permutation, so every output has exactly one source and nothing
-    // needs arbitrating: a one-hot AND-OR mux whose select comes from flops.
+    // needs arbitrating: a plain mux per output, selected straight from flops.
     for (genvar o = 0; o < GroupSize; o++) begin : gen_oup
-      logic [GroupSize-1:0]        src;
-      logic [$bits(payload_t)-1:0] data;
-      for (genvar i = 0; i < GroupSize; i++) begin : gen_src
-        assign src[i] = (sel_q[i] == sel_oup_t'(o));
-      end
-      always_comb begin
-        data = '0;
-        for (int i = 0; i < GroupSize; i++) begin
-          if (src[i]) data |= grp_inp_data[i];
-        end
-      end
-      assign grp_oup_data[o]  = payload_t'(data);
-      assign grp_oup_valid[o] = |(grp_inp_valid & src);
+      assign inv_d[o]         = inv_q[o] - sel_oup_t'(1);
+      assign grp_oup_data[o]  = grp_inp_data[inv_q[o]];
+      assign grp_oup_valid[o] = grp_inp_valid[inv_q[o]];
+      // pragma translate_off
+      `ifndef VERILATOR
+      assert property (@(posedge clk_i) disable iff (!rst_ni) sel_q[inv_q[o]] == sel_oup_t'(o))
+        else $fatal(1, "floo_remapper: inv_q is not the inverse of sel_q");
+      `endif
+      // pragma translate_on
     end
     for (genvar i = 0; i < GroupSize; i++) begin : gen_inp
       assign grp_inp_ready[i] = grp_oup_ready[sel_q[i]];
