@@ -191,13 +191,11 @@ module mempool_addr_scrambler
   endfunction
 
   // ---- Region decode ----------------------------------------------------
-  // K+2 constant range compares (global, K levels, tile window), OR'd. This
-  // replaces the single power-of-two TCDMMask test: global + per-level
-  // windows is 1.33x L1, which is never a
-  // power of two, so one mask would round the region up to 2x L1 — at 32x32
-  // exactly onto L2 (Track A finding S11).
-  // The global region alone IS a power of two, so the existing mask expresses
-  // it exactly; what S11 rules out is covering global+VC with a single mask.
+  // K+2 mask compares (global, K levels, tile window), OR'd. One mask cannot
+  // cover them all: global + per-level windows is 1.33x L1, which is never a
+  // power of two, so it would round the region up to 2x L1 — at 32x32
+  // exactly onto L2 (Track A finding S11). Each region alone is a power of
+  // two on its own alignment, so each gets its own mask.
   // Keeping the mask here also means an instantiation that does not set
   // TCDMSize (the DMA site) keeps its region decode unchanged.
   logic global_hit;
@@ -214,47 +212,45 @@ module mempool_addr_scrambler
     assign vc_tile_hit = 1'b0;
     assign vc_any      = 1'b0;
     assign vc_addr     = address_i;
+    assign vc_level_o  = '0;
   end else begin : gen_vc
-    logic [AddrWidth-1:0] vc_addr_lvl [VcLevels];
-    for (genvar k = 0; k < VcLevels; k++) begin : gen_vc_level
-      localparam logic [AddrWidth-1:0] Base = vc_window_base(k);
-      localparam logic [AddrWidth-1:0] Size = vc_window_size(k);
-      assign vc_hit[k] = (address_i >= Base) && (address_i < Base + Size);
-      assign vc_addr_lvl[k] = vc_permute(k, address_i - Base, group_id_i);
-    end
-    localparam logic [AddrWidth-1:0] TileBase = vc_window_base(0) + vc_window_size(0);
-    localparam logic [AddrWidth-1:0] TileSize = VcTileWinSize;
+    // Every window is a power of two on its natural alignment (gen_vc_checks),
+    // so each decode is a mask compare and the window offset is just the low
+    // bits: no comparators, no subtractors.
+    localparam logic [AddrWidth-1:0] TileBase =
+        AddrWidth'(vc_window_base(0) + vc_window_size(0));
+    localparam logic [AddrWidth-1:0] TileSize = AddrWidth'(VcTileWinSize);
     logic [AddrWidth-1:0] vc_addr_tile;
-    assign vc_tile_hit  = (address_i >= TileBase) && (address_i < TileBase + TileSize);
-    assign vc_addr_tile = vc_tile_permute(address_i - TileBase, group_id_i, tile_id_i);
-    assign vc_any = |vc_hit || vc_tile_hit;
-    always_comb begin
-      vc_addr = address_i;
-      for (int unsigned k = 0; k < VcLevels; k++) begin
-        if (vc_hit[k]) vc_addr = vc_addr_lvl[k];
-      end
-      if (vc_tile_hit) vc_addr = vc_addr_tile;
+    assign vc_tile_hit  = (address_i & ~(TileSize - 1)) == TileBase;
+    assign vc_addr_tile = vc_tile_permute(address_i & (TileSize - 1), group_id_i, tile_id_i);
+    // The windows are disjoint, so the hits are one-hot: AND-OR muxes, not
+    // priority chains. vc_addr is only read when vc_any is set.
+    logic [AddrWidth-1:0] vc_addr_or  [VcLevels+1];
+    logic [2:0]           vc_level_or [VcLevels+1];
+    assign vc_addr_or[0]  = {AddrWidth{vc_tile_hit}} & vc_addr_tile;
+    assign vc_level_or[0] = '0;
+    for (genvar k = 0; k < VcLevels; k++) begin : gen_vc_level
+      localparam logic [AddrWidth-1:0] Base = AddrWidth'(vc_window_base(k));
+      localparam logic [AddrWidth-1:0] Size = AddrWidth'(vc_window_size(k));
+      assign vc_hit[k] = (address_i & ~(Size - 1)) == Base;
+      assign vc_addr_or[k+1] = vc_addr_or[k] |
+          ({AddrWidth{vc_hit[k]}} & vc_permute(k, address_i & (Size - 1), group_id_i));
+      assign vc_level_or[k+1] = vc_level_or[k] | ({3{vc_hit[k]}} & 3'(k));
     end
+    assign vc_any     = |vc_hit || vc_tile_hit;
+    assign vc_addr    = vc_addr_or[VcLevels];
+    assign vc_level_o = vc_level_or[VcLevels];
   end
 
   logic not_io_address;
   assign not_io_address = global_hit || vc_any;
 
   assign vc_hit_o = EnableVirtualCluster && vc_any;
-  always_comb begin
-    vc_level_o = '0;
-    for (int unsigned k = 0; k < VcLevels; k++) begin
-      if (vc_hit[k]) vc_level_o = k[2:0];
-    end
-  end
 
   function automatic logic [TileIdBitsPerDma-1:0] spm_tile_id_remap (
       logic [TileIdBitsPerDma-1:0] data_in,
       logic [TileIdBitsPerDma-1:0] idx_i
   );
-    if (NumX != NumY)
-      $fatal(1, "virtual_cluster needs a square mesh (NumX=%0d, NumY=%0d): the top level is only the identity, and the Morton group id is only defined, when the axes match.",
-             NumX, NumY);
     if (EnableTileIdRemap) begin
       spm_tile_id_remap = data_in + idx_i;
     end else begin
@@ -305,11 +301,14 @@ module mempool_addr_scrambler
 
   // ---- Virtual-cluster checks -------------------------------------------
   if (EnableVirtualCluster) begin : gen_vc_checks
-    // The range compares must decode exactly the region the old mask did,
-    // so switching to them cannot move an existing config's global window.
+    // TCDMSize sizes the windows; it must describe exactly the region the
+    // global mask decodes, so enabling VC cannot move the global window.
     if (TCDMSize == 0)
-      $fatal(1, "EnableVirtualCluster needs TCDMSize; the region decode is a range compare, not a mask.");
-    if (TCDMMask !== ~(TCDMSize - 1))
+      $fatal(1, "EnableVirtualCluster needs TCDMSize to size the VC windows.");
+    if (NumX != NumY)
+      $fatal(1, "virtual_cluster needs a square mesh (NumX=%0d, NumY=%0d): the top level is only the identity, and the Morton group id is only defined, when the axes match.",
+             NumX, NumY);
+    if (TCDMMask != ~(TCDMSize - 1))
       $fatal(1, "TCDMMask (%h) and TCDMSize (%h) disagree; the VC region decode would move the global window.",
              TCDMMask, TCDMSize);
     if (TCDMBaseAddr % TCDMSize != 0)
@@ -339,6 +338,17 @@ module mempool_addr_scrambler
     if (NumTilesPerGroup != (1 << VcTileBits))
       $fatal(1, "The tile window needs a power-of-two NumTilesPerGroup (%0d).",
              NumTilesPerGroup);
+    // The mask decode in gen_vc relies on every window being a power of two
+    // on its own alignment.
+    if ((VcGroupBytes & (VcGroupBytes - 1)) != 0)
+      $fatal(1, "The VC mask decode needs a power-of-two per-group L1 (%0d).", VcGroupBytes);
+    for (genvar k = 0; k < VcLevels; k++) begin : gen_vc_align_check
+      if (vc_window_base(k) % vc_window_size(k) != 0)
+        $fatal(1, "VC window %0d base %h is not aligned to its size %h.",
+               k, vc_window_base(k), vc_window_size(k));
+    end
+    if ((vc_window_base(0) + vc_window_size(0)) % VcTileWinSize != 0)
+      $fatal(1, "The VC tile window base is not aligned to its size %h.", VcTileWinSize);
     // config/config.mk vs this module: one number pins the whole map, because
     // the region end is the sum of the global region and every window.
     if (VcRegionEndChk != 0 &&
