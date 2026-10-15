@@ -5,9 +5,9 @@
 // Author: Yinrong Li <yinrli@student.ethz.ch>
 
 module floo_remapper #(
-  /// Number of inputs into the crossbar (`> 0`).
+  /// Number of inputs (`> 0`).
   parameter int unsigned NumInp      = 32'd0,
-  /// Number of outputs from the crossbar (`> 0`).
+  /// Number of outputs, equal to the inputs (`> 0`).
   parameter int unsigned NumOut      = 32'd0,
   /// Data width of the stream. Can be overwritten by defining the type parameter `payload_t`.
   parameter int unsigned DataWidth   = 32'd1,
@@ -68,63 +68,38 @@ generate
 
     assign sel_d = {sel_q[0], sel_q[GroupSize-1:1]};
 
-    if (Interleaved == 1'b1) begin : gen_interleaved_remap
-      payload_t [GroupSize-1:0] inp_data_intlv;
-      payload_t [GroupSize-1:0] oup_data_intlv;
-      logic     [GroupSize-1:0] inp_valid_intlv;
-      logic     [GroupSize-1:0] inp_ready_intlv;
-      logic     [GroupSize-1:0] oup_valid_intlv;
-      logic     [GroupSize-1:0] oup_ready_intlv;
-      for (genvar i = 0; i < GroupSize; i++) begin : gen_intlv
-        assign inp_data_intlv[i]   = inp_data_i[g + i * NumGroup];
-        assign inp_valid_intlv[i]  = inp_valid_i[g + i * NumGroup];
-        assign inp_ready_o[g + i * NumGroup] = inp_ready_intlv[i];
-        // Keep input and output bundles identical.
-        assign oup_data_o[g + i * NumGroup] = oup_data_intlv[i];
-        assign oup_valid_o[g + i * NumGroup] = oup_valid_intlv[i];
-        assign oup_ready_intlv[i] = oup_ready_i[g + i * NumGroup];
+    // Group port i is flat port g + i * NumGroup when interleaved, else start_idx + i.
+    payload_t [GroupSize-1:0] grp_inp_data, grp_oup_data;
+    logic     [GroupSize-1:0] grp_inp_valid, grp_inp_ready, grp_oup_valid, grp_oup_ready;
+    for (genvar i = 0; i < GroupSize; i++) begin : gen_port
+      localparam int unsigned Idx = Interleaved ? g + i * NumGroup : start_idx + i;
+      assign grp_inp_data[i]  = inp_data_i[Idx];
+      assign grp_inp_valid[i] = inp_valid_i[Idx];
+      assign inp_ready_o[Idx] = grp_inp_ready[i];
+      assign oup_data_o[Idx]  = grp_oup_data[i];
+      assign oup_valid_o[Idx] = grp_oup_valid[i];
+      assign grp_oup_ready[i] = oup_ready_i[Idx];
+    end
+
+    // sel_q is a permutation, so every output has exactly one source and nothing
+    // needs arbitrating: a one-hot AND-OR mux whose select comes from flops.
+    for (genvar o = 0; o < GroupSize; o++) begin : gen_oup
+      logic [GroupSize-1:0]        src;
+      logic [$bits(payload_t)-1:0] data;
+      for (genvar i = 0; i < GroupSize; i++) begin : gen_src
+        assign src[i] = (sel_q[i] == sel_oup_t'(o));
       end
-      stream_xbar #(
-        .NumInp(GroupSize),
-        .NumOut(GroupSize),
-        .payload_t(payload_t),
-        .AxiVldRdy(1'b0),
-        .LockIn(1'b0)
-      ) i_stream_xbar (
-        .clk_i  (clk_i),
-        .rst_ni (rst_ni),
-        .flush_i(1'b0),
-        .rr_i   ('0),
-        .data_i (inp_data_intlv),
-        .sel_i  (sel_q),
-        .valid_i(inp_valid_intlv),
-        .ready_o(inp_ready_intlv),
-        .data_o (oup_data_intlv),
-        .idx_o  (),
-        .valid_o(oup_valid_intlv),
-        .ready_i(oup_ready_intlv)
-      );
-    end else begin: gen_non_interleaved_remap
-      stream_xbar #(
-        .NumInp(GroupSize),
-        .NumOut(GroupSize),
-        .payload_t(payload_t),
-        .AxiVldRdy(1'b0),
-        .LockIn(1'b0)
-      ) i_stream_xbar (
-        .clk_i  (clk_i),
-        .rst_ni (rst_ni),
-        .flush_i(1'b0),
-        .rr_i   ('0),
-        .data_i (inp_data_i[start_idx +: GroupSize]),
-        .sel_i  (sel_q),
-        .valid_i(inp_valid_i[start_idx +: GroupSize]),
-        .ready_o(inp_ready_o[start_idx +: GroupSize]),
-        .data_o (oup_data_o[start_idx +: GroupSize]),
-        .idx_o  (),
-        .valid_o(oup_valid_o[start_idx +: GroupSize]),
-        .ready_i(oup_ready_i[start_idx +: GroupSize])
-      );
+      always_comb begin
+        data = '0;
+        for (int i = 0; i < GroupSize; i++) begin
+          if (src[i]) data |= grp_inp_data[i];
+        end
+      end
+      assign grp_oup_data[o]  = payload_t'(data);
+      assign grp_oup_valid[o] = |(grp_inp_valid & src);
+    end
+    for (genvar i = 0; i < GroupSize; i++) begin : gen_inp
+      assign grp_inp_ready[i] = grp_oup_ready[sel_q[i]];
     end
 
   end
