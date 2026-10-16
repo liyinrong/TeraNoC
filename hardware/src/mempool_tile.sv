@@ -2070,55 +2070,57 @@ module mempool_tile
   /************************************
    *  Group-local iDMA register port  *
    ************************************/
-  // reg_bus completes in the cycle valid && ready; the response is held here
-  // until core 0 takes it, and no new request is offered while it waits.
-  logic        dma_ctrl_resp_valid_q;
-  logic [31:0] dma_ctrl_resp_data_q;
-  logic        dma_ctrl_resp_error_q;
-  logic        dma_ctrl_resp_write_q;
-  meta_id_t    dma_ctrl_resp_id_q;
-  logic        dma_ctrl_can_accept;
-  logic        dma_ctrl_req_fire;
+  // Both directions are registered so the tile/group boundary starts and ends
+  // in flops. reg_bus completes in the cycle valid && ready, so a request is
+  // offered only while the response register has room. Order is kept.
+  dreq_t  dma_ctrl_cut_q;
+  logic   dma_ctrl_cut_qvalid, dma_ctrl_cut_qready;
+  logic   dma_ctrl_resp_valid, dma_ctrl_resp_ready;
+  dresp_t dma_ctrl_resp;
 
-  assign dma_ctrl_can_accept = !dma_ctrl_resp_valid_q || dma_ctrl_pready;
-  assign dma_ctrl_req_fire   = dma_ctrl_qvalid & dma_ctrl_can_accept & idma_ctrl_rsp_i.ready;
-  assign dma_ctrl_qready     = dma_ctrl_can_accept & idma_ctrl_rsp_i.ready;
+  spill_register #(
+    .T(dreq_t)
+  ) i_dma_ctrl_req_register (
+    .clk_i  (clk_i              ),
+    .rst_ni (rst_ni             ),
+    .data_i (dma_ctrl_q         ),
+    .valid_i(dma_ctrl_qvalid    ),
+    .ready_o(dma_ctrl_qready    ),
+    .data_o (dma_ctrl_cut_q     ),
+    .valid_o(dma_ctrl_cut_qvalid),
+    .ready_i(dma_ctrl_cut_qready)
+  );
+
+  assign dma_ctrl_cut_qready = dma_ctrl_resp_ready & idma_ctrl_rsp_i.ready;
 
   assign idma_ctrl_req_o = '{
-    addr  : dma_ctrl_q.addr - DMABaseAddr,
-    write : dma_ctrl_q.write,
-    wdata : dma_ctrl_q.data,
-    wstrb : dma_ctrl_q.strb,
-    valid : dma_ctrl_qvalid & dma_ctrl_can_accept
+    addr  : dma_ctrl_cut_q.addr - DMABaseAddr,
+    write : dma_ctrl_cut_q.write,
+    wdata : dma_ctrl_cut_q.data,
+    wstrb : dma_ctrl_cut_q.strb,
+    valid : dma_ctrl_cut_qvalid & dma_ctrl_resp_ready
   };
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      dma_ctrl_resp_valid_q <= 1'b0;
-      dma_ctrl_resp_data_q  <= '0;
-      dma_ctrl_resp_error_q <= 1'b0;
-      dma_ctrl_resp_write_q <= 1'b0;
-      dma_ctrl_resp_id_q    <= '0;
-    end else begin
-      if (dma_ctrl_resp_valid_q && dma_ctrl_pready)
-        dma_ctrl_resp_valid_q <= 1'b0;
-      if (dma_ctrl_req_fire) begin
-        dma_ctrl_resp_valid_q <= 1'b1;
-        dma_ctrl_resp_data_q  <= idma_ctrl_rsp_i.rdata;
-        dma_ctrl_resp_error_q <= idma_ctrl_rsp_i.error;
-        dma_ctrl_resp_write_q <= dma_ctrl_q.write;
-        dma_ctrl_resp_id_q    <= dma_ctrl_q.id;
-      end
-    end
-  end
-
-  assign dma_ctrl_pvalid = dma_ctrl_resp_valid_q;
-  assign dma_ctrl_p = '{
-    data  : dma_ctrl_resp_data_q,
-    id    : dma_ctrl_resp_id_q,
-    write : dma_ctrl_resp_write_q,
-    error : dma_ctrl_resp_error_q
+  assign dma_ctrl_resp_valid = dma_ctrl_cut_qvalid & idma_ctrl_rsp_i.ready;
+  assign dma_ctrl_resp = '{
+    data  : idma_ctrl_rsp_i.rdata,
+    id    : dma_ctrl_cut_q.id,
+    write : dma_ctrl_cut_q.write,
+    error : idma_ctrl_rsp_i.error
   };
+
+  spill_register #(
+    .T(dresp_t)
+  ) i_dma_ctrl_resp_register (
+    .clk_i  (clk_i              ),
+    .rst_ni (rst_ni             ),
+    .data_i (dma_ctrl_resp      ),
+    .valid_i(dma_ctrl_resp_valid),
+    .ready_o(dma_ctrl_resp_ready),
+    .data_o (dma_ctrl_p         ),
+    .valid_o(dma_ctrl_pvalid    ),
+    .ready_i(dma_ctrl_pready    )
+  );
 
   dreq_t                             fs_arb_q;
   logic                              fs_arb_valid;
