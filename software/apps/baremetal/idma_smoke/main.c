@@ -59,9 +59,9 @@ static uint32_t expected(uint32_t buffer, uint32_t group, uint32_t row,
   return 0x51000000u ^ (buffer << 24) ^ (group << 16) ^ (row << 8) ^ word;
 }
 
+// Only core 0 of tile 0 reaches its group's DMA (mempool_tile.sv).
 static uint32_t group_leader(uint32_t group) {
-  const uint32_t tile = group % (NUM_CORES_PER_GROUP / NUM_CORES_PER_TILE);
-  return group * NUM_CORES_PER_GROUP + tile * NUM_CORES_PER_TILE;
+  return group * NUM_CORES_PER_GROUP;
 }
 
 int main() {

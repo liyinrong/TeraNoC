@@ -50,21 +50,16 @@ enum {
 
 // THE ENGINE'S DESCRIPTOR REGISTERS ARE ONE CONTEXT PER GROUP.
 //
-// DMA_BASE carries no tile index: the context is selected by which tile's port
-// the access arrives on, and every tile of a group now reaches the SAME one
-// (mempool_group.sv arbitrates them). Programming a transfer takes SEVERAL
-// writes -- CONF, SRC, DST, LENGTH, the strides, then the NEXT_ID read that
-// launches it -- and the arbiters make each access atomic but not the
-// sequence. Two issuers of one group therefore interleave their writes into
-// the single register set and each launches the other's descriptor, silently:
-// the transfer completes, with the wrong address or length.
-//
-// ONE ISSUER PER GROUP IS THEREFORE ABSOLUTE, and there is no lock: the
-// centralized DMA this replaced had one context for the whole machine and no
-// lock either. mempool_is_group_coordinator() is how every caller in-tree
-// elects its issuer, and the collective has exactly one per group by
-// construction. A caller that cannot keep to one issuer has no safe option
-// here; it must serialise at a higher level.
+// DMA_BASE carries no group index: the context is the issuing core's own
+// group's. Programming a transfer takes SEVERAL writes -- CONF, SRC, DST,
+// LENGTH, the strides, then the NEXT_ID read that launches it -- so the context
+// has exactly one issuer, and the hardware enforces which: only core 0 of tile
+// 0, i.e. mempool_is_group_coordinator(), is wired to it (mempool_tile.sv,
+// mempool_group.sv). Core 0 of the other tiles reads 0 with an error response
+// and its writes are dropped; the other cores have no DMA window at all, so an
+// access goes out of the SoC port like any unmapped address. Every DMA access,
+// status polls included, must therefore come from the coordinator; others
+// learn completion from it (dma_collective.c) or from the DMA done event.
 //
 // KEEP EACH CONTIGUOUS CHUNK WITHIN THE APPLICABLE L1 AND L2 STRIPES.
 //
@@ -88,10 +83,6 @@ enum {
 // may cover multiple rows if its strides preserve L1 ownership and L2 burst
 // boundaries. dma_collective.c handles these constraints for linear copies;
 // raw dma_local_* callers must enforce them themselves.
-//
-// Reads (status, done id) are single-register, so the arbiter serialises them
-// and EVERY core may poll them freely -- that is what idma_ctx_share
-// exercises.
 
 static inline volatile uint32_t *dma_local_reg(uint32_t offset) {
   return (volatile uint32_t *)(DMA_BASE + offset);
