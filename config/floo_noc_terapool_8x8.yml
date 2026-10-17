@@ -52,201 +52,201 @@ endpoints:
   - name: "hbm0"
     addr_range:
       - start: 0x80000000
-        end: 0x81000000
-    sbr_port_protocol:
-      - "wide_out"
-  - name: "hbm1"
-    addr_range:
-      - start: 0x81000000
         end: 0x82000000
     sbr_port_protocol:
       - "wide_out"
-  - name: "hbm2"
-    addr_range:
-      - start: 0x82000000
-        end: 0x83000000
-    sbr_port_protocol:
-      - "wide_out"
-  - name: "hbm3"
-    addr_range:
-      - start: 0x83000000
-        end: 0x84000000
-    sbr_port_protocol:
-      - "wide_out"
-  - name: "host_hbm4_peri"
+  - name: "host_hbm1_peri"
     # Everything below L2. The rule that used to cover
     # 0xA000_0000-0xC000_FFFF held the bootrom and the testbench UART; both now
     # sit below 0x8000_0000 (config/config.mk `bootrom_base` / `periph_base`),
     # so the whole 2 GiB above `l2_base` belongs to L2/HBM and nothing else.
     addr_range:
-      - start: 0x84000000
-        end: 0x85000000
+      - start: 0x82000000
+        end: 0x84000000
       - start: 0x00000000
         end: 0x80000000
     mgr_port_protocol:
       - "wide_in"
     sbr_port_protocol:
       - "wide_out"
+  - name: "hbm2"
+    addr_range:
+      - start: 0x84000000
+        end: 0x86000000
+    sbr_port_protocol:
+      - "wide_out"
+  - name: "hbm3"
+    addr_range:
+      - start: 0x86000000
+        end: 0x88000000
+    sbr_port_protocol:
+      - "wide_out"
+  - name: "hbm4"
+    addr_range:
+      - start: 0x88000000
+        end: 0x8A000000
+    sbr_port_protocol:
+      - "wide_out"
   - name: "hbm5"
     addr_range:
-      - start: 0x85000000
-        end: 0x86000000
+      - start: 0x8A000000
+        end: 0x8C000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm6"
     addr_range:
-      - start: 0x86000000
-        end: 0x87000000
+      - start: 0x8C000000
+        end: 0x8E000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm7"
     addr_range:
-      - start: 0x87000000
-        end: 0x88000000
+      - start: 0x8E000000
+        end: 0x90000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm8"
     addr_range:
-      - start: 0x88000000
-        end: 0x89000000
+      - start: 0x90000000
+        end: 0x92000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm9"
     addr_range:
-      - start: 0x89000000
-        end: 0x8A000000
+      - start: 0x92000000
+        end: 0x94000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm10"
     addr_range:
-      - start: 0x8A000000
-        end: 0x8B000000
+      - start: 0x94000000
+        end: 0x96000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm11"
     addr_range:
-      - start: 0x8B000000
-        end: 0x8C000000
+      - start: 0x96000000
+        end: 0x98000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm12"
     addr_range:
-      - start: 0x8C000000
-        end: 0x8D000000
+      - start: 0x98000000
+        end: 0x9A000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm13"
     addr_range:
-      - start: 0x8D000000
-        end: 0x8E000000
+      - start: 0x9A000000
+        end: 0x9C000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm14"
     addr_range:
-      - start: 0x8E000000
-        end: 0x8F000000
+      - start: 0x9C000000
+        end: 0x9E000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm15"
     addr_range:
-      - start: 0x8F000000
-        end: 0x90000000
+      - start: 0x9E000000
+        end: 0xA0000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm16"
     addr_range:
-      - start: 0x90000000
-        end: 0x91000000
+      - start: 0xA0000000
+        end: 0xA2000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm17"
     addr_range:
-      - start: 0x91000000
-        end: 0x92000000
+      - start: 0xA2000000
+        end: 0xA4000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm18"
     addr_range:
-      - start: 0x92000000
-        end: 0x93000000
+      - start: 0xA4000000
+        end: 0xA6000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm19"
     addr_range:
-      - start: 0x93000000
-        end: 0x94000000
+      - start: 0xA6000000
+        end: 0xA8000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm20"
     addr_range:
-      - start: 0x94000000
-        end: 0x95000000
+      - start: 0xA8000000
+        end: 0xAA000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm21"
     addr_range:
-      - start: 0x95000000
-        end: 0x96000000
+      - start: 0xAA000000
+        end: 0xAC000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm22"
     addr_range:
-      - start: 0x96000000
-        end: 0x97000000
+      - start: 0xAC000000
+        end: 0xAE000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm23"
     addr_range:
-      - start: 0x97000000
-        end: 0x98000000
+      - start: 0xAE000000
+        end: 0xB0000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm24"
     addr_range:
-      - start: 0x98000000
-        end: 0x99000000
+      - start: 0xB0000000
+        end: 0xB2000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm25"
     addr_range:
-      - start: 0x99000000
-        end: 0x9A000000
+      - start: 0xB2000000
+        end: 0xB4000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm26"
     addr_range:
-      - start: 0x9A000000
-        end: 0x9B000000
+      - start: 0xB4000000
+        end: 0xB6000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm27"
     addr_range:
-      - start: 0x9B000000
-        end: 0x9C000000
+      - start: 0xB6000000
+        end: 0xB8000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm28"
     addr_range:
-      - start: 0x9C000000
-        end: 0x9D000000
+      - start: 0xB8000000
+        end: 0xBA000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm29"
     addr_range:
-      - start: 0x9D000000
-        end: 0x9E000000
+      - start: 0xBA000000
+        end: 0xBC000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm30"
     addr_range:
-      - start: 0x9E000000
-        end: 0x9F000000
+      - start: 0xBC000000
+        end: 0xBE000000
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm31"
     addr_range:
-      - start: 0x9F000000
-        end: 0xA0000000
+      - start: 0xBE000000
+        end: 0xC0000000
     sbr_port_protocol:
       - "wide_out"
 
@@ -265,65 +265,67 @@ connections:
     - [0, 7]
     - [0, 7]
     dst_dir: "Eject"
+  # HBM channels: bank -> perimeter port as solved for Morton group ids by
+  # hardware/scripts/gen_l2_bank_map.py (checked against it on every build).
   - src: "hbm0"
     dst: "group_router"
     dst_idx: [0, 0]
     dst_dir: "West"
-  - src: "hbm1"
-    dst: "group_router"
-    dst_idx: [0, 1]
-    dst_dir: "West"
-  - src: "hbm2"
-    dst: "group_router"
-    dst_idx: [0, 6]
-    dst_dir: "West"
-  - src: "hbm3"
-    dst: "group_router"
-    dst_idx: [0, 7]
-    dst_dir: "West"
-  - src: "host_hbm4_peri"
+  - src: "host_hbm1_peri"
     dst: "group_router"
     dst_idx: [0, 0]
     dst_dir: "South"
-  - src: "hbm5"
+  - src: "hbm2"
+    dst: "group_router"
+    dst_idx: [0, 1]
+    dst_dir: "West"
+  - src: "hbm3"
     dst: "group_router"
     dst_idx: [0, 3]
     dst_dir: "West"
-  - src: "hbm6"
-    dst: "group_router"
-    dst_idx: [0, 5]
-    dst_dir: "West"
-  - src: "hbm7"
-    dst: "group_router"
-    dst_idx: [0, 7]
-    dst_dir: "North"
-  - src: "hbm8"
+  - src: "hbm4"
     dst: "group_router"
     dst_idx: [1, 0]
     dst_dir: "South"
-  - src: "hbm9"
-    dst: "group_router"
-    dst_idx: [0, 2]
-    dst_dir: "West"
-  - src: "hbm10"
-    dst: "group_router"
-    dst_idx: [0, 4]
-    dst_dir: "West"
-  - src: "hbm11"
-    dst: "group_router"
-    dst_idx: [1, 7]
-    dst_dir: "North"
-  - src: "hbm12"
+  - src: "hbm5"
     dst: "group_router"
     dst_idx: [2, 0]
     dst_dir: "South"
-  - src: "hbm13"
+  - src: "hbm6"
+    dst: "group_router"
+    dst_idx: [0, 2]
+    dst_dir: "West"
+  - src: "hbm7"
     dst: "group_router"
     dst_idx: [3, 0]
     dst_dir: "South"
-  - src: "hbm14"
+  - src: "hbm8"
+    dst: "group_router"
+    dst_idx: [0, 6]
+    dst_dir: "West"
+  - src: "hbm9"
+    dst: "group_router"
+    dst_idx: [0, 5]
+    dst_dir: "West"
+  - src: "hbm10"
+    dst: "group_router"
+    dst_idx: [0, 7]
+    dst_dir: "West"
+  - src: "hbm11"
+    dst: "group_router"
+    dst_idx: [0, 7]
+    dst_dir: "North"
+  - src: "hbm12"
+    dst: "group_router"
+    dst_idx: [0, 4]
+    dst_dir: "West"
+  - src: "hbm13"
     dst: "group_router"
     dst_idx: [3, 7]
+    dst_dir: "North"
+  - src: "hbm14"
+    dst: "group_router"
+    dst_idx: [1, 7]
     dst_dir: "North"
   - src: "hbm15"
     dst: "group_router"
@@ -335,61 +337,61 @@ connections:
     dst_dir: "South"
   - src: "hbm17"
     dst: "group_router"
-    dst_idx: [4, 0]
+    dst_idx: [6, 0]
     dst_dir: "South"
   - src: "hbm18"
     dst: "group_router"
-    dst_idx: [4, 7]
-    dst_dir: "North"
-  - src: "hbm19"
-    dst: "group_router"
-    dst_idx: [5, 7]
-    dst_dir: "North"
-  - src: "hbm20"
-    dst: "group_router"
-    dst_idx: [6, 0]
+    dst_idx: [4, 0]
     dst_dir: "South"
-  - src: "hbm21"
+  - src: "hbm19"
     dst: "group_router"
     dst_idx: [7, 3]
     dst_dir: "East"
-  - src: "hbm22"
-    dst: "group_router"
-    dst_idx: [7, 5]
-    dst_dir: "East"
-  - src: "hbm23"
-    dst: "group_router"
-    dst_idx: [6, 7]
-    dst_dir: "North"
-  - src: "hbm24"
+  - src: "hbm20"
     dst: "group_router"
     dst_idx: [7, 0]
     dst_dir: "South"
-  - src: "hbm25"
-    dst: "group_router"
-    dst_idx: [7, 2]
-    dst_dir: "East"
-  - src: "hbm26"
-    dst: "group_router"
-    dst_idx: [7, 4]
-    dst_dir: "East"
-  - src: "hbm27"
-    dst: "group_router"
-    dst_idx: [7, 7]
-    dst_dir: "East"
-  - src: "hbm28"
+  - src: "hbm21"
     dst: "group_router"
     dst_idx: [7, 0]
     dst_dir: "East"
-  - src: "hbm29"
+  - src: "hbm22"
+    dst: "group_router"
+    dst_idx: [7, 2]
+    dst_dir: "East"
+  - src: "hbm23"
     dst: "group_router"
     dst_idx: [7, 1]
     dst_dir: "East"
-  - src: "hbm30"
+  - src: "hbm24"
+    dst: "group_router"
+    dst_idx: [4, 7]
+    dst_dir: "North"
+  - src: "hbm25"
+    dst: "group_router"
+    dst_idx: [7, 5]
+    dst_dir: "East"
+  - src: "hbm26"
+    dst: "group_router"
+    dst_idx: [5, 7]
+    dst_dir: "North"
+  - src: "hbm27"
+    dst: "group_router"
+    dst_idx: [6, 7]
+    dst_dir: "North"
+  - src: "hbm28"
+    dst: "group_router"
+    dst_idx: [7, 4]
+    dst_dir: "East"
+  - src: "hbm29"
     dst: "group_router"
     dst_idx: [7, 6]
     dst_dir: "East"
-  - src: "hbm31"
+  - src: "hbm30"
     dst: "group_router"
     dst_idx: [7, 7]
     dst_dir: "North"
+  - src: "hbm31"
+    dst: "group_router"
+    dst_idx: [7, 7]
+    dst_dir: "East"

@@ -61,17 +61,6 @@ BIG = 10 ** 6
 DIR_CODE = {'N': 0, 'E': 1, 'S': 2, 'W': 3}
 DIR_NAME = {'N': 'North', 'E': 'East', 'S': 'South', 'W': 'West'}
 
-# The map the RTL shipped for the 4x4 mesh, transcribed from the pre-generator
-# wrapper. It is one of several equal-cost optima (8 hops); the solver finds a
-# different one with a better worst case (max 1 vs 2). We PIN the shipped map
-# so that regenerating for N=4 leaves every existing 4x4 build bit-identical --
-# the DSE calibration was measured against it.
-SHIPPED_4X4 = [('W', 0, 0), ('W', 0, 1), ('W', 0, 2), ('W', 0, 3),
-               ('S', 1, 0), ('S', 0, 0), ('N', 0, 3), ('N', 1, 3),
-               ('S', 2, 0), ('S', 3, 0), ('N', 3, 3), ('N', 2, 3),
-               ('E', 3, 0), ('E', 3, 1), ('E', 3, 2), ('E', 3, 3)]
-
-
 def hungarian(cost):
     """Minimum-cost perfect matching, O(n^3) (Jonker-Volgenant style)."""
     n = len(cost)
@@ -127,8 +116,17 @@ def edge_ports(n):
 
 
 def group_pos(n, g):
-    """RTL group id -> router coord. g = x*N + y, so ids run down a column."""
-    return g // n, g % n
+    """RTL group id -> router coord, as mempool_pkg::group_xy_of.
+
+    Square meshes number groups in Morton order (gy in the even bits, gx in the
+    odd ones), so ids 2k, 2k+1 are still vertical neighbours but larger blocks
+    are squares, not columns.
+    """
+    x = y = 0
+    for i in range(max(n - 1, 0).bit_length()):
+        y |= ((g >> (2 * i)) & 1) << i
+        x |= ((g >> (2 * i + 1)) & 1) << i
+    return x, y
 
 
 def served_groups(n, bank, nb_banks, fold):
@@ -186,11 +184,13 @@ def best(n, nb_banks, fold):
 
 
 def placement(n, nb_banks=None, fold=None):
-    """The map to emit: pinned at N=4, solved otherwise."""
+    """The map to emit, solved for Morton ids at every mesh size.
+
+    The 4x4 map was once pinned to the one solved for raster ids (8 hops then,
+    28 under Morton); the stable branch, which keeps raster ids, still ships it.
+    """
     nb_banks = nb_banks or 4 * n
     fold = fold or (n * n // nb_banks)
-    if n == 4 and nb_banks == 16 and fold == 1:
-        return list(SHIPPED_4X4)
     return best(n, nb_banks, fold)
 
 
@@ -238,8 +238,8 @@ def emit_sv(n, place):
     lines += ['  };', '',
               '  // The host/peripheral chimney shares the channel on the',
               '  // South port of the corner router [0][0]. Which bank id',
-              '  // that is depends on the placement (5 on the 4x4 mesh, 4',
-              '  // on the 8x8), so it is derived rather than hardcoded.',
+              '  // that is depends on the placement, so it is derived',
+              '  // rather than hardcoded.',
               '  localparam int unsigned HostL2Bank = %d;' % host_bank(place),
               '', 'endpackage']
     return '\n'.join(lines) + '\n'

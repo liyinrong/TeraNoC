@@ -115,8 +115,8 @@ module mempool_system
     floo_wide_t [NumAXIMasters-1:0] floo_axi_wide_out;
 
     // The host/peripheral chimney shares a mesh port with one L2 bank -- the
-    // one on South of router [0][0]. Its bank id follows the placement (5 on
-    // the 4x4 mesh, 4 on the 8x8), so take it from the generated map.
+    // one on South of router [0][0]. Its bank id follows the placement, so take
+    // it from the generated map.
     localparam int unsigned HostHbmBank = l2_bank_map_pkg::HostL2Bank;
     localparam addr_t Hbm5BaseAddr = L2MemoryBaseAddr + HostHbmBank*L2BankSize;
     localparam addr_t Hbm5EndAddr  = Hbm5BaseAddr + L2BankSize;

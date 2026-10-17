@@ -53,10 +53,18 @@ endpoints:
         end: 0x8200_0000
     sbr_port_protocol:
       - "wide_out"
-  - name: "hbm1"
+  - name: "host_hbm1_peri"
+    # Everything below L2. The rule that used to cover
+    # 0xA000_0000-0xC000_FFFF held the bootrom and the testbench UART; both now
+    # sit below 0x8000_0000 (config/config.mk `bootrom_base` / `periph_base`),
+    # so the whole 2 GiB above `l2_base` belongs to L2/HBM and nothing else.
     addr_range:
       - start: 0x8200_0000
         end: 0x8400_0000
+      - start: 0x0000_0000
+        end: 0x8000_0000
+    mgr_port_protocol:
+      - "wide_in"
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm2"
@@ -77,18 +85,10 @@ endpoints:
         end: 0x8A00_0000
     sbr_port_protocol:
       - "wide_out"
-  - name: "host_hbm5_peri"
-    # Everything below L2. The rule that used to cover
-    # 0xA000_0000-0xC000_FFFF held the bootrom and the testbench UART; both now
-    # sit below 0x8000_0000 (config/config.mk `bootrom_base` / `periph_base`),
-    # so the whole 2 GiB above `l2_base` belongs to L2/HBM and nothing else.
+  - name: "hbm5"
     addr_range:
       - start: 0x8A00_0000
         end: 0x8C00_0000
-      - start: 0x0000_0000
-        end: 0x8000_0000
-    mgr_port_protocol:
-      - "wide_in"
     sbr_port_protocol:
       - "wide_out"
   - name: "hbm6"
@@ -168,72 +168,69 @@ connections:
     - [0, 3]
     dst_dir: "Eject"
   # HBM West
+  # HBM channels: bank -> perimeter port as solved for Morton group ids by
+  # hardware/scripts/gen_l2_bank_map.py (checked against it on every build).
   - src: "hbm0"
     dst: "group_router"
     dst_idx: [0, 0]
     dst_dir: "West"
-  - src: "hbm1"
+  - src: "host_hbm1_peri"
+    dst: "group_router"
+    dst_idx: [0, 0]
+    dst_dir: "South"
+  - src: "hbm2"
+    dst: "group_router"
+    dst_idx: [1, 0]
+    dst_dir: "South"
+  - src: "hbm3"
     dst: "group_router"
     dst_idx: [0, 1]
     dst_dir: "West"
-  - src: "hbm2"
+  - src: "hbm4"
     dst: "group_router"
     dst_idx: [0, 2]
     dst_dir: "West"
-  - src: "hbm3"
+  - src: "hbm5"
     dst: "group_router"
     dst_idx: [0, 3]
     dst_dir: "West"
-  # HBM North
   - src: "hbm6"
-    dst: "group_router"
-    dst_idx: [0, 3]
-    dst_dir: "North"
-  - src: "hbm7"
     dst: "group_router"
     dst_idx: [1, 3]
     dst_dir: "North"
-  # HBM North
+  - src: "hbm7"
+    dst: "group_router"
+    dst_idx: [0, 3]
+    dst_dir: "North"
+  - src: "hbm8"
+    dst: "group_router"
+    dst_idx: [2, 0]
+    dst_dir: "South"
+  - src: "hbm9"
+    dst: "group_router"
+    dst_idx: [3, 1]
+    dst_dir: "East"
   - src: "hbm10"
     dst: "group_router"
-    dst_idx: [3, 3]
-    dst_dir: "North"
+    dst_idx: [3, 0]
+    dst_dir: "East"
   - src: "hbm11"
     dst: "group_router"
-    dst_idx: [2, 3]
-    dst_dir: "North"
-  # HBM East
-  - src: "hbm15"
-    dst: "group_router"
-    dst_idx: [3, 3]
-    dst_dir: "East"
-  - src: "hbm14"
+    dst_idx: [3, 0]
+    dst_dir: "South"
+  - src: "hbm12"
     dst: "group_router"
     dst_idx: [3, 2]
     dst_dir: "East"
   - src: "hbm13"
     dst: "group_router"
-    dst_idx: [3, 1]
+    dst_idx: [2, 3]
+    dst_dir: "North"
+  - src: "hbm14"
+    dst: "group_router"
+    dst_idx: [3, 3]
     dst_dir: "East"
-  - src: "hbm12"
+  - src: "hbm15"
     dst: "group_router"
-    dst_idx: [3, 0]
-    dst_dir: "East"
-  # HBM South
-  - src: "hbm9"
-    dst: "group_router"
-    dst_idx: [3, 0]
-    dst_dir: "South"
-  - src: "hbm8"
-    dst: "group_router"
-    dst_idx: [2, 0]
-    dst_dir: "South"
-  - src: "hbm4"
-    dst: "group_router"
-    dst_idx: [1, 0]
-    dst_dir: "South"
-  # Special
-  - src: "host_hbm5_peri"
-    dst: "group_router"
-    dst_idx: [0, 0]
-    dst_dir: "South"
+    dst_idx: [3, 3]
+    dst_dir: "North"
