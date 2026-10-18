@@ -309,13 +309,19 @@ int main() {
 #endif
   mempool_barrier(num_cores);
 
-  // One RVV core per tile: the stripe is per tile, and a scalar-only core
-  // (NUM_SCALAR_CORES_PER_TILE) would trap on the vector stores.
-  if (redmule_id < QWEN_ACTIVE_ENGINES &&
-      core_id % NUM_CORES_PER_TILE == NUM_SCALAR_CORES_PER_TILE) {
+  // Only the tile agent has a redmule_id. On a 1+3 tile it is scalar-only and
+  // would trap on llm_zero_f16's vector stores, so it zeroes with plain stores.
+  if (redmule_id < QWEN_ACTIVE_ENGINES) {
+#if NUM_SCALAR_CORES_PER_TILE > 0
+    uint32_t *zw = (uint32_t *)(qwen_l1_z + redmule_id * QWEN_ROWS_PER_ENGINE *
+                                                QWEN_COLS_PER_ENGINE);
+    for (uint32_t i = 0; i < QWEN_ROWS_PER_ENGINE * QWEN_COLS_PER_ENGINE / 2; i++)
+      zw[i] = 0;
+#else
     llm_zero_f16(qwen_l1_z +
                      redmule_id * QWEN_ROWS_PER_ENGINE * QWEN_COLS_PER_ENGINE,
                  QWEN_ROWS_PER_ENGINE * QWEN_COLS_PER_ENGINE);
+#endif
   }
   mempool_barrier(num_cores);
 
