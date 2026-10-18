@@ -217,7 +217,9 @@ spatz_ld_trace ?= 0
 # allocator walks one id per lane per cycle, putting that latency in front of every burst
 # request; 1 = every lane is granted its whole window at once. The window is one lane's
 # share of a full burst, so the buffer depth must be at least two windows.
-spatz_block_alloc ?= 0
+# On wherever bursts are: the walk is never the design, and without bursts there
+# is no window (MaxBurstWords / NrMemPorts would be 0).
+spatz_block_alloc ?= $(spatz_burst)
 
 # Words (32 bit) in one vector-load burst. A burst is unpacked from a SINGLE wide
 # access, so this is a property of the wide plane, not of Spatz: it must be
