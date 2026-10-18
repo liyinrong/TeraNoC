@@ -39,9 +39,10 @@ noc_resp_wide_wo_port_num := 1
 noc_wide_wo_merge         := 2
 
 # --- RedMulE outstanding-transaction credit ------------------------------
-# The DSE used nominal 24, but ROB_NW = 1 << idx_width(ROB_DEPTH) made it
-# 32 physical entries. State that effective depth directly, as in GVSoC.
-rob_depth := 32
+# 16, not the DSE's 32: the 28 Qwen GEMMs are 0.9% faster on 4x4 and the 8x8
+# prefill GEMMs 3-9% faster (RTL and GVSoC agree; 8 loses 6-40%). It also sets
+# meta_id: idx_width(4 streams x 16) = 6 bits, one less on every TCDM flit.
+rob_depth := 16
 
 # --- Spatz burst ---------------------------------------------------------
 # Unit-stride vector loads issue as bursts: remote ones as one wide access,
