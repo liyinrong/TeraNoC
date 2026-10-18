@@ -441,8 +441,17 @@ int main() {
       qwen_l1_z + redmule_id * QWEN_ROWS_PER_ENGINE * QWEN_COLS_PER_ENGINE;
 #endif
 
-  if (is_eng)
+  // is_eng holds on the tile agent only. On a 1+3 tile it is scalar-only and
+  // would trap on llm_zero_f16's vector stores, so it zeroes with plain stores.
+  if (is_eng) {
+#if NUM_SCALAR_CORES_PER_TILE > 0
+    uint32_t *zw = (uint32_t *)ze;
+    for (uint32_t i = 0; i < QWEN_ROWS_PER_ENGINE * QWEN_COLS_PER_ENGINE / 2; i++)
+      zw[i] = 0;
+#else
     llm_zero_f16(ze, QWEN_ROWS_PER_ENGINE * QWEN_COLS_PER_ENGINE);
+#endif
+  }
   mempool_barrier(num_cores);
 
   const uint32_t time_init = mempool_get_timer();
