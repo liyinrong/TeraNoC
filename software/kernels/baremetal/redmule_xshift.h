@@ -6,17 +6,18 @@
 // generated register map; write it with redmule_x_shift_set() from
 // hal_redmule.h).
 //
-// Every engine walks the contraction from element 0, so after a barrier they all
-// address the same L1 tile and drain through it one at a time. Starting each
-// engine at a different element and wrapping fixes that: the set of accumulated
-// products is unchanged, only the summation order.
+// Every engine walks the contraction from element 0, so after a barrier they
+// all address the same L1 tile and drain through it one at a time. Starting
+// each engine at a different element and wrapping fixes that: the set of
+// accumulated products is unchanged, only the summation order.
 //
 // The offset is expressed in elements along N, but the useful granularity comes
-// from the L1 address map. One RedMulE access covers PORT_WIDTH elements; one L1
-// tile covers several accesses ("superbank slots"), and successive tiles then
-// successive groups follow above that. So the shift space is two levels deep:
+// from the L1 address map. One RedMulE access covers PORT_WIDTH elements; one
+// L1 tile covers several accesses ("superbank slots"), and successive tiles
+// then successive groups follow above that. So the shift space is two levels
+// deep:
 //
-//     shift = (tile_slot * slots_per_tile + bank_slot) * PORT_WIDTH   [elements]
+//     shift = (tile_slot * slots_per_tile + bank_slot) * PORT_WIDTH [elements]
 //
 // Policy, in priority order:
 //   1. Spend TILE offsets first -- two engines on different tiles never contend
@@ -136,9 +137,9 @@ static inline uint16_t redmule_x_shift(uint32_t engine_id, uint32_t n_size,
 // slot generally does not share a W slot. No extra seeding is needed.
 //
 // Note the reachable range is usually small: an engine's whole column span is
-// k_size elements, which in a typical config is one L1 tile, so this resolves to
-// a superbank offset rather than a tile offset. That is still useful -- a tile
-// serves its superbanks concurrently -- but it is weaker than the X shift.
+// k_size elements, which in a typical config is one L1 tile, so this resolves
+// to a superbank offset rather than a tile offset. That is still useful -- a
+// tile serves its superbanks concurrently -- but it is weaker than the X shift.
 static inline uint16_t redmule_w_shift(uint32_t engine_id, uint32_t k_size,
                                        uint32_t port_width, uint32_t elem_bytes,
                                        uint32_t banks_per_tile,

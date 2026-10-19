@@ -16,8 +16,8 @@
 // that places an operand somewhere other than the flat global buffer -- a
 // virtual-cluster window, say -- can compute its own bases without this
 // header knowing anything about the placement.
-static inline void qwen_redmule_op_engine_f16(const __fp16 *xe, const __fp16 *we,
-                                              __fp16 *ze,
+static inline void qwen_redmule_op_engine_f16(const __fp16 *xe,
+                                              const __fp16 *we, __fp16 *ze,
                                               uint32_t rows_per_engine,
                                               uint32_t tile_n,
                                               uint32_t cols_per_engine) {
