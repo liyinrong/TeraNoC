@@ -55,8 +55,7 @@ static float fp8_to_float(uint8_t value) {
   return sign * std::ldexp((float)(0x4 | mant), exp - 17);
 }
 
-static bool check_fp_error(float result, float expected,
-                           float tolerance) {
+static bool check_fp_error(float result, float expected, float tolerance) {
   if (std::isnan(result) || std::isnan(expected) || std::isnan(tolerance)) {
     return true;
   }
