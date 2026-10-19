@@ -25,6 +25,19 @@
 // branch merges; deriving this one keeps the list of things to fix shorter.
 #define FSYNC_BASE (REDMULE_BASE_ADD + 0x10000)
 
+// Domain build (runtime.mk `domains`): DOMAINS copies of the logical
+// configuration on a mesh with DOMAINS times its groups. Domain d is physical
+// groups d*NUM_GROUPS .. (d+1)*NUM_GROUPS-1 (contiguous under Morton ids) and
+// sees its top-level VC window, at DOMAIN_L1_BASE, as its global L1.
+#ifndef DOMAINS
+#define DOMAINS 1
+#endif
+#if DOMAINS > 1
+#define DOMAIN_L1_DATA_BASE ((uint32_t)DOMAIN_L1_BASE)
+#else
+#define DOMAIN_L1_DATA_BASE 0u
+#endif
+
 #include "control_registers.h"
 
 #endif // _DMA_H_

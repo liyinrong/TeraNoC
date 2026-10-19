@@ -144,8 +144,14 @@ _reset_vector:
     li      t0, (CONTROL_REGISTER_OFFSET + CONTROL_REGISTERS_RO_CACHE_END_0_REG_OFFSET) // Get peripheral register to set cacheable region
     la      t1, _erodata                                        // Write the end of the read-only data to be cacheable
     sw      t1, 0(t0)
+#if defined(DOMAINS) && DOMAINS > 1
+    call    domain_init                                         // hart 0: reset the end-of-run join
+#endif
 _jump_main:
     call    main
+#if defined(DOMAINS) && DOMAINS > 1
+    call    domain_exit                                         // a0 = main's retval; hart 0 waits for all domains
+#endif
 
 _eoc:
     // ONLY hart 0 ends the run.

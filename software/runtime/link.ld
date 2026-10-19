@@ -21,9 +21,11 @@ SECTIONS {
     *(.l1_prio)
     *(.l1)
     *(.bss)
+    /* Phase scratch last: a phase may overlay it and the heap above it. */
+    *(.l1_tail)
     __l1_alloc_base = ALIGN(0x10);
     __heap_start = .;
-  } > l1
+  } > l1_data /* = l1, or a domain's top-level VC window (arch.ld.c) */
 
   /* Instructions on L2 */
   .text : {
@@ -86,6 +88,7 @@ SECTIONS {
   .l2_bss (NOLOAD) : {
     . = ALIGN(0x10);
     *(.l2_bss)
+    __l2_bss_end = .;
   } > l2
 
   .comment : {

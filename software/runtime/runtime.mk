@@ -121,12 +121,25 @@ DEFINES += -DL2_SIZE=$(l2_size)
 # through hardware/Makefile's vlog_defs.
 DEFINES += -DVIRTUAL_CLUSTER=$(virtual_cluster)
 DEFINES += -DVC_LEVELS=$(vc_levels)
-DEFINES += -DVC_REGION_END=$(vc_region_end)
-DEFINES += -DVC_TILE_WINDOW_BASE=$(vc_tile_window_base)
+# Domain build: `domains` copies of this configuration run side by side on a
+# mesh with `domains` times the groups (four S1 quadrants of an 8x8 mesh, or
+# four 2x2-group domains of S1). The copies' top-level VC window is their
+# global L1, so every window moves up by the physical L1 size and all copies
+# run the same addresses. The configuration selected here is the LOGICAL one.
+domains ?= 1
+ifeq ($(domains),1)
+vc_domain_shift := 0
+else
+vc_domain_shift := $(shell echo $$(( $(l1_total_bytes) * $(domains) )))
+DEFINES += -DDOMAINS=$(domains) -DDOMAIN_L1_BASE=$(vc_domain_shift)
+endif
+vc_shift = $(shell echo $$(( $(1) + $(vc_domain_shift) )))
+DEFINES += -DVC_REGION_END=$(call vc_shift,$(vc_region_end))
+DEFINES += -DVC_TILE_WINDOW_BASE=$(call vc_shift,$(vc_tile_window_base))
 DEFINES += -DVC_TILE_WINDOW_SIZE=$(vc_tile_window_size)
 DEFINES += -DVC_GROUP_BYTES=$(vc_group_bytes)
 DEFINES += -DNUM_X=$(num_x) -DNUM_Y=$(num_y)
-DEFINES += $(foreach k,$(vc_level_list),-DVC_WINDOW_BASE_$(k)=$(vc_window_base_$(k)) -DVC_WINDOW_SIZE_$(k)=$(vc_window_size_$(k)))
+DEFINES += $(foreach k,$(vc_level_list),-DVC_WINDOW_BASE_$(k)=$(call vc_shift,$(vc_window_base_$(k))) -DVC_WINDOW_SIZE_$(k)=$(vc_window_size_$(k)))
 DEFINES += -DSEQ_MEM_SIZE=$(seq_mem_size)
 DEFINES += -DLOG2_SEQ_MEM_SIZE=$(shell awk 'BEGIN{print log($(seq_mem_size))/log(2)}')
 DEFINES += -DSTACK_SIZE=$(stack_size)

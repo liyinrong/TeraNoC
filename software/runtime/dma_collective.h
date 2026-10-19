@@ -57,6 +57,32 @@ typedef struct {
   uint32_t status; // this core's submit error
 } dma_collective_op_t;
 
+// Divergent stage workers use one fixed issuer per group. The group
+// coordinator calls this once for a global linear L1 <-> L2 range; it issues
+// only the descriptors for its group's L1 stripes. No other core participates
+// and no barrier is implied. id==0 with status OK means this group owns no
+// bytes. The coordinator must publish completion for every participating
+// group before consumers read the destination or reuse the source buffer.
+typedef struct {
+  uint32_t id;
+  uint32_t status;
+  uint32_t descriptors;
+} dma_coordinator_op_t;
+
+dma_coordinator_op_t dma_coordinator_submit_linear(uint32_t stream, void *dest,
+                                                   const void *src, size_t len);
+
+// As dma_coordinator_submit_linear for `pieces` source pieces of `piece_len`
+// bytes each, `src_stride` bytes apart in L2, landing back to back at `dest`
+// in L1 (a strided gather into one contiguous L1 range). Row-aligned pieces
+// take one 3-D descriptor per group; anything else falls back to one linear
+// submit per piece.
+dma_coordinator_op_t dma_coordinator_submit_pieces(uint32_t stream, void *dest,
+                                                   const void *src,
+                                                   size_t piece_len,
+                                                   size_t src_stride,
+                                                   uint32_t pieces);
+
 // The level-`level` rectangle containing this core's group.
 static inline dma_collective_scope_t
 dma_collective_scope_level(uint32_t level) {

@@ -63,13 +63,19 @@
 // One global row-plane spans every bank of every group, so a global address
 // `a` lives in row a / (VC_ROW_BYTES * NUM_GROUPS).
 #define VC_GLOBAL_ROW_BYTES ((uint32_t)VC_ROW_BYTES * NUM_GROUPS)
+// Where cores see the global map: 0, or a domain's top-level window
+// (addrmap.h). Row r of the map is at VC_GLOBAL_BASE + r * VC_GLOBAL_ROW_BYTES
+// for cores; a global alias (VC_GLOBAL_BASE excluded) is what the DMA takes.
+#define VC_GLOBAL_BASE DOMAIN_L1_DATA_BASE
+#define VC_GLOBAL_ROW(a) (((uint32_t)(a)-VC_GLOBAL_BASE) / VC_GLOBAL_ROW_BYTES)
 
 extern uint32_t __heap_start;
 
 // Rows reserved for linker-placed data. Runtime value, not a constant,
 // because __heap_start is a link-time symbol.
 static inline uint32_t vc_floor_rows(void) {
-  const uint32_t heap = (uint32_t)&__heap_start;
+  // In a domain build the heap is in the domain's top-level window.
+  const uint32_t heap = (uint32_t)&__heap_start - VC_GLOBAL_BASE;
   return (heap + VC_GLOBAL_ROW_BYTES - 1) / VC_GLOBAL_ROW_BYTES;
 }
 

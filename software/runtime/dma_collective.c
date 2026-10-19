@@ -295,8 +295,8 @@ static dma_id_t dma_collective_issue_linear(uint32_t stream, void *dest,
                                             const void *src, size_t len,
                                             uint32_t group, uint32_t *error,
                                             uint32_t *descriptors) {
-  const uint32_t dest_addr = (uint32_t)dest;
-  const uint32_t src_addr = (uint32_t)src;
+  const uint32_t dest_addr = dma_l1_alias((uint32_t)dest);
+  const uint32_t src_addr = dma_l1_alias((uint32_t)src);
   const uint32_t dest_in_l1 = dest_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
   const uint32_t src_in_l1 = src_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
   const uint32_t l1_start = dest_in_l1 ? dest_addr : src_addr;
@@ -371,6 +371,84 @@ static dma_id_t dma_collective_issue_linear(uint32_t stream, void *dest,
   return last_id;
 }
 
+dma_coordinator_op_t dma_coordinator_submit_linear(uint32_t stream, void *dest,
+                                                   const void *src,
+                                                   size_t len) {
+  dma_coordinator_op_t op = {
+      .id = 0u, .status = DMA_COLLECTIVE_OK, .descriptors = 0u};
+  const uint32_t dest_addr = dma_l1_alias((uint32_t)dest);
+  const uint32_t src_addr = dma_l1_alias((uint32_t)src);
+  const uint32_t dest_in_l1 = dest_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
+  const uint32_t src_in_l1 = src_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
+  const uint32_t l1_start = dest_in_l1 ? dest_addr : src_addr;
+  if (!mempool_is_group_coordinator()) {
+    op.status = DMA_COLLECTIVE_ERROR_SCOPE;
+  } else if (stream >= (uint32_t)NUM_DMAS_PER_GROUP ||
+             dest_in_l1 == src_in_l1 || len == 0u ||
+             len > (size_t)((uint32_t)DMA_COLLECTIVE_TCDM_SIZE - l1_start)) {
+    op.status = DMA_COLLECTIVE_ERROR_ARGUMENT;
+  } else {
+    op.id = dma_collective_issue_linear(stream, dest, src, len,
+                                        mempool_get_group_id(), &op.status,
+                                        &op.descriptors);
+  }
+  return op;
+}
+
+dma_coordinator_op_t dma_coordinator_submit_pieces(uint32_t stream, void *dest,
+                                                   const void *src,
+                                                   size_t piece_len,
+                                                   size_t src_stride,
+                                                   uint32_t pieces) {
+  dma_coordinator_op_t op = {
+      .id = 0u, .status = DMA_COLLECTIVE_OK, .descriptors = 0u};
+  const uint32_t dest_addr = dma_l1_alias((uint32_t)dest);
+  const uint32_t src_addr = dma_l1_alias((uint32_t)src);
+  const uint32_t total = (uint32_t)piece_len * pieces;
+  if (!mempool_is_group_coordinator()) {
+    op.status = DMA_COLLECTIVE_ERROR_SCOPE;
+  } else if (stream >= (uint32_t)NUM_DMAS_PER_GROUP || pieces == 0u ||
+             piece_len == 0u ||
+             dest_addr >= (uint32_t)DMA_COLLECTIVE_TCDM_SIZE ||
+             src_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE ||
+             total > (uint32_t)DMA_COLLECTIVE_TCDM_SIZE - dest_addr) {
+    op.status = DMA_COLLECTIVE_ERROR_ARGUMENT;
+  } else if ((dest_addr % DMA_COLLECTIVE_ROW_BYTES) == 0u &&
+             ((uint32_t)piece_len % DMA_COLLECTIVE_ROW_BYTES) == 0u &&
+             DMA_COLLECTIVE_ROWS_FOLD) {
+    // This group's stripe of every row of every piece: rows within a piece
+    // are ROW_BYTES apart on both sides, pieces are piece_len apart in L1 and
+    // src_stride apart in L2.
+    // The ND midend advances the pointer by stride_3 from the plane's LAST
+    // row, not from its first, so subtract the rows already walked.
+    const uint32_t off = mempool_get_group_id() * DMA_COLLECTIVE_GROUP_BYTES;
+    const uint32_t rows = (uint32_t)piece_len / DMA_COLLECTIVE_ROW_BYTES;
+    const uint32_t walked = (rows - 1u) * DMA_COLLECTIVE_ROW_BYTES;
+    op.descriptors = 1u;
+    op.id = dma_local_memcpy_3d_nonblocking(
+        stream, (void *)(dest_addr + off), (const void *)(src_addr + off),
+        DMA_COLLECTIVE_GROUP_BYTES, DMA_COLLECTIVE_ROW_BYTES,
+        DMA_COLLECTIVE_ROW_BYTES, rows, (uint32_t)piece_len - walked,
+        (uint32_t)src_stride - walked, pieces);
+    if (op.id == 0)
+      op.status = dma_collective_launch_error();
+  } else {
+    for (uint32_t p = 0u; p < pieces; ++p) {
+      uint32_t descriptors = 0u;
+      const dma_id_t id = dma_collective_issue_linear(
+          stream, (void *)(dest_addr + p * (uint32_t)piece_len),
+          (const void *)(src_addr + p * (uint32_t)src_stride), piece_len,
+          mempool_get_group_id(), &op.status, &descriptors);
+      op.descriptors += descriptors;
+      if (id != 0)
+        op.id = id;
+      if (op.status != DMA_COLLECTIVE_OK)
+        break;
+    }
+  }
+  return op;
+}
+
 // Every core counts every submit; the count names the operation. An invalid
 // scope still counts, so every core stays in step.
 static dma_collective_op_t
@@ -420,8 +498,8 @@ dma_collective_submit_general(const dma_collective_scope_t *scope,
   if (op.status != DMA_COLLECTIVE_OK)
     return op;
 
-  const uint32_t dest_addr = (uint32_t)dest;
-  const uint32_t src_addr = (uint32_t)src;
+  const uint32_t dest_addr = dma_l1_alias((uint32_t)dest);
+  const uint32_t src_addr = dma_l1_alias((uint32_t)src);
   const uint32_t dest_in_l1 = dest_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
   const uint32_t src_in_l1 = src_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
   const uint32_t l1_start = dest_in_l1 ? dest_addr : src_addr;
@@ -469,8 +547,8 @@ dma_collective_submit_all_general(uint32_t stream, void *dest, const void *src,
 // 64-byte instruction-cache lines; everything else takes the general path.
 DMA_HOT dma_collective_op_t dma_collective_submit_all_nonblocking(
     uint32_t stream, void *dest, const void *src, size_t len) {
-  const uint32_t dest_addr = (uint32_t)dest;
-  const uint32_t src_addr = (uint32_t)src;
+  const uint32_t dest_addr = dma_l1_alias((uint32_t)dest);
+  const uint32_t src_addr = dma_l1_alias((uint32_t)src);
   const uint32_t dest_in_l1 = dest_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
   const uint32_t src_in_l1 = src_addr < (uint32_t)DMA_COLLECTIVE_TCDM_SIZE;
   const uint32_t l1_start = dest_in_l1 ? dest_addr : src_addr;

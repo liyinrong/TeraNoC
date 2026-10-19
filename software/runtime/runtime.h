@@ -60,11 +60,26 @@ typedef uint32_t mempool_timer_t;
 /// Obtain the number of cores in the current cluster.
 static inline mempool_id_t mempool_get_core_count() { return NUM_CORES; }
 
-/// Obtain the ID of the current core.
+/// Obtain the ID of the current core (within its domain, addrmap.h).
 static inline mempool_id_t mempool_get_core_id() {
   mempool_id_t r;
   asm volatile("csrr %0, mhartid" : "=r"(r));
+#if DOMAINS > 1
+  return r % NUM_CORES;
+#else
   return r;
+#endif
+}
+
+/// Obtain the domain of the current core: 0 unless built with `domains`.
+static inline uint32_t mempool_get_domain_id() {
+#if DOMAINS > 1
+  mempool_id_t r;
+  asm volatile("csrr %0, mhartid" : "=r"(r));
+  return r / NUM_CORES;
+#else
+  return 0u;
+#endif
 }
 
 /// Obtain the number of tiles in the current cluster.
@@ -198,6 +213,34 @@ static inline void mempool_wait(uint32_t cycles) {
 
 static inline void mempool_wfi() { asm volatile("wfi"); }
 
+#if DOMAINS > 1
+// A domain wakes only its own cores: ids and masks are domain-relative, and
+// the per-group tile registers (one per physical group, all 64 of them) reach
+// every group, unlike the 32-bit group mask. A tile mask with bits beyond the
+// group's tiles is ignored (ctrl_registers), so "all tiles" is the exact mask.
+static inline void domain_wake_group(uint32_t group, uint32_t tile_mask) {
+  const uint32_t g = mempool_get_domain_id() * NUM_GROUPS + group;
+  *(uint32_t volatile *)(CONTROL_REGISTER_OFFSET +
+                         CONTROL_REGISTERS_WAKE_UP_TILE_0_REG_OFFSET + 4u * g) =
+      tile_mask;
+}
+static inline void wake_up_group(uint32_t group_mask) {
+  for (uint32_t g = 0; g < NUM_GROUPS; ++g)
+    if (group_mask >> g & 1u)
+      domain_wake_group(g, (1u << NUM_TILES_PER_GROUP) - 1u); // exact mask
+}
+static inline void wake_up(uint32_t core_id) {
+  if (core_id == (uint32_t)-1)
+    wake_up_group((uint32_t)-1);
+  else
+    *wake_up_reg = mempool_get_domain_id() * NUM_CORES + core_id;
+}
+static inline void wake_up_all() { wake_up((uint32_t)-1); }
+static inline void wake_up_all_group() { wake_up_group((uint32_t)-1); }
+static inline void wake_up_tile(uint32_t group_id, uint32_t tile_mask) {
+  domain_wake_group(group_id, tile_mask);
+}
+#else
 // Wake up core with given core_id by writing in the wake up control register.
 // If core_id equals -1, wake up all cores.
 static inline void wake_up(uint32_t core_id) { *wake_up_reg = core_id; }
@@ -239,6 +282,7 @@ static inline void wake_up_tile(uint32_t group_id, uint32_t tile_mask) {
     break;
   }
 }
+#endif // DOMAINS > 1
 
 static inline void set_wake_up_stride(uint32_t stride) {
   *wake_up_stride_reg = stride;
