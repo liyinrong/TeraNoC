@@ -62,6 +62,22 @@ _Static_assert(Q38_NK == NUM_GROUPS && Q38_NV == 3u * Q38_NK &&
 #define Q38_GDN2_DEBUG_CTX (Q38_GDN2_DEBUG_TOKENS != 0u)
 #endif
 #define G2_PROJECT_ROWS (Q38_GDN2_DEBUG_TOKENS ? Q38_FFN_ROWS : Q38_R)
+// The stages take their row window [w0, w1) as arguments in the batch-major
+// layer (Q38_X8_BATCH, layer_resident.c) and are whole-sequence otherwise.
+#if Q38_X8_BATCH
+_Static_assert(!Q38_GDN2_DEBUG_TOKENS && !Q38_GDN2_DEBUG_OUT_ROWS &&
+                   !Q38_GDN2_DEBUG_NO_FFN,
+               "Batch-major GDN runs the full layer");
+#define G2_WIN_VOID uint32_t w0, uint32_t w1
+#define G2_WIN_PARAMS , uint32_t w0, uint32_t w1
+#define G2_WIN_ARGS , w0, w1
+#define G2_WIN(a, b)
+#else
+#define G2_WIN_VOID void
+#define G2_WIN_PARAMS
+#define G2_WIN_ARGS
+#define G2_WIN(a, b) const uint32_t w0 = (a), w1 = (b)
+#endif
 #define G2_C 64u                            // tokens per chunk
 #define G2_H 3u                             // value heads per key head
 #define G2_QW 32u                           // state columns per tile
@@ -86,7 +102,13 @@ _Static_assert(G2_OK *Q38_GDN2_OUT_SLICES == Q38_GDIM &&
 #ifndef Q38_GDN2_L2_GAP
 #define Q38_GDN2_L2_GAP 0u
 #endif
-#define G2_L2_TOP (L2_BASE + L2_SIZE - Q38_GDN2_L2_GAP)
+#if Q38_X8_BATCH
+// Batch-major: P must outlive the FFN of the previous batch (the chunk core
+// reads its three history rows), so the GDN buffers sit below G.
+#define G2_L2_TOP ((uint32_t)F2_G_L2 - Q38_GDN2_L2_GAP)
+#else
+#define G2_L2_TOP (Q38_L2_TOP - Q38_GDN2_L2_GAP)
+#endif
 #define G2_P_L2 ((__fp16 *)(G2_L2_TOP - Q38_R * G2_PSTRIDE * 2u))
 #define G2_O_L2 ((__fp16 *)((uint32_t)G2_P_L2 - Q38_R * Q38_GDIM * 2u))
 #define G2_CTX_L2 ((__fp16 *)((uint32_t)G2_O_L2 - Q38_NV * Q38_R * Q38_VD * 2u))
@@ -108,6 +130,27 @@ _Static_assert(G2_OK *Q38_GDN2_OUT_SLICES == Q38_GDIM &&
 #endif
 _Static_assert((G2_PSTRIDE + Q38_GDIM) >= Q38_I,
                "Contexts must lie below the FFN's G");
+#if Q38_L2_TILED
+// P slice-major: q|k|v|z in slices of 4096 columns (8 KiB L2 rows), then the
+// a|b columns and padding at a pitch of G2_PSTRIDE - G2_PMAIN.
+#define G2_PSLICE 4096u
+#define G2_PMAIN (Q38_QKVDIM + Q38_GDIM)
+#define G2_PTAIL (G2_PSTRIDE - G2_PMAIN)
+_Static_assert(G2_PMAIN % G2_PSLICE == 0u && 8192u % (G2_PTAIL * 2u) == 0u &&
+                   (G2_PSLICE % Q38_KD == 0u && G2_PSLICE % Q38_VD == 0u),
+               "P slices are whole L2 rows and the tail divides one");
+#define G2_PAT(row, col)                                                       \
+  (G2_PSRC + ((col) < G2_PMAIN                                                 \
+                  ? (col) / G2_PSLICE * Q38_R * G2_PSLICE + (row)*G2_PSLICE +  \
+                        (col) % G2_PSLICE                                      \
+                  : G2_PMAIN * Q38_R + (row)*G2_PTAIL + (col)-G2_PMAIN))
+#define G2_PPITCH(col) ((col) < G2_PMAIN ? G2_PSLICE : G2_PTAIL)
+// O rows (pitch G2_OK) whose starts repeat their offset in an 8 KiB L2 row.
+#define G2_OSTEP (8192u / (G2_OK * 2u & (0u - G2_OK * 2u)))
+_Static_assert((G2_OK * 2u & (0u - G2_OK * 2u)) < 8192u &&
+                   G2_C / 4u % G2_OSTEP == 0u,
+               "O row classes divide a tile's rows");
+#endif
 
 // Group-window arena: one instance per group (vc_group_window). RedMulE uses
 // these pointers; Spatz, scalar code and the DMA use the global alias, row by
@@ -384,6 +427,44 @@ static NOSTACK void g2_load_params(void) {
 
 // The raw projected rows of the chunk at t0 into raw, with 3 history rows
 // (the first chunk's are zeroed by the compute cores).
+#if Q38_L2_TILED
+// a or b (column col): blocks of G2_AB_ROWS rows, one L2 row at the tail
+// pitch and within one window row each.
+#define G2_AB_ROWS (8192u / (G2_PTAIL * 2u))
+_Static_assert(G2_C % G2_AB_ROWS == 0u &&
+                   VC_ROW_BYTES %
+                           (G2_AB_ROWS * sizeof(((g2_raw_t *)0)->ab[0])) ==
+                       0u,
+               "a|b blocks are whole L2 rows inside window rows");
+static dma_id_t g2_load_ab(__fp16 *win, uint32_t t0, uint32_t col) {
+  dma_id_t id = 0u;
+  for (uint32_t r = 0u; r < G2_C; r += G2_AB_ROWS)
+    id = dma_local_memcpy_2d_nonblocking(
+        0u, G2G(win + r * 8u), G2_PAT(t0 + r, col), 6u, 8u * sizeof(__fp16),
+        G2_PTAIL * 2u, G2_AB_ROWS);
+  return id;
+}
+
+static NOSTACK dma_id_t g2_load(uint32_t t0, g2_raw_t *raw) {
+  const uint32_t g = mempool_get_group_id();
+  const uint32_t first = t0 ? t0 - 3u : 0u, rows = t0 ? G2_C + 3u : G2_C;
+  const uint32_t dst = t0 ? 0u : 3u;
+  dma_id_t id =
+      g2_dma(&raw->qk[dst][0], sizeof(raw->qk[0]), G2_PAT(first, G2_COL_Q(g)),
+             Q38_KD * 2u, G2_PPITCH(G2_COL_Q(g)) * 2u, rows, 0u);
+  id = g2_dma(&raw->qk[dst][Q38_KD], sizeof(raw->qk[0]),
+              G2_PAT(first, G2_COL_K(g)), Q38_KD * 2u,
+              G2_PPITCH(G2_COL_K(g)) * 2u, rows, 0u);
+  for (uint32_t h = 0u; h < G2_H; ++h) {
+    const uint32_t col = G2_COL_V(g) + h * Q38_VD;
+    id = g2_dma(&raw->v[h][dst][0], Q38_VD * 2u, G2_PAT(first, col),
+                Q38_VD * 2u, G2_PPITCH(col) * 2u, rows, 0u);
+  }
+  id = g2_load_ab(&raw->ab[0][0], t0, G2_COL_A(g));
+  id = g2_load_ab(&raw->ab[0][3], t0, G2_COL_B(g));
+  return id; // DONE_ID is monotone: the last covers them all
+}
+#else
 static NOSTACK dma_id_t g2_load(uint32_t t0, g2_raw_t *raw) {
   const uint32_t g = mempool_get_group_id(), stride = G2_PSTRIDE * 2u;
   const uint32_t first = t0 ? t0 - 3u : 0u, rows = t0 ? G2_C + 3u : G2_C;
@@ -405,6 +486,7 @@ static NOSTACK dma_id_t g2_load(uint32_t t0, g2_raw_t *raw) {
               G2_C, 0u);
   return id; // DONE_ID is monotone: the last covers them all
 }
+#endif
 
 // A tile's gated-row block <-> 16 L2 rows of the group's three heads (768
 // contiguous bytes each): six tile-window rows per L2 row, one descriptor.
@@ -424,6 +506,62 @@ static dma_id_t g2_dma_gz(__fp16 *l2, uint32_t l2_stride, uint32_t b,
                      l2_plane, G2_C / 4u);
 }
 
+#if Q38_L2_TILED
+// Pieces p0 .. p0 + np - 1 of rows r0, r0 + step, ... (nr of them) of a
+// tile's block; l2 is piece p0 of row r0, pitch the L2 row stride. The planes
+// step whole L2 rows when step * pitch does.
+static dma_id_t g2_dma_gzp(char *l2, uint32_t pitch, uint32_t step, uint32_t b,
+                           uint32_t q, uint32_t to_l2, uint32_t r0, uint32_t nr,
+                           uint32_t p0, uint32_t np) {
+  G2_SELF;
+  char *const tile = (char *)G2TG(&G2L->gz[b][0][0][0], q) +
+                     (r0 * G2_ZPIECES + p0) * VC_GLOBAL_ROW_BYTES;
+  const uint32_t l2_plane = step * pitch - (np - 1u) * VC_TILE_ROW_BYTES;
+  const uint32_t tile_plane =
+      (step * G2_ZPIECES - np + 1u) * VC_GLOBAL_ROW_BYTES;
+  return to_l2 ? dma_local_memcpy_3d_nonblocking(
+                     0u, l2, tile, VC_TILE_ROW_BYTES, VC_TILE_ROW_BYTES,
+                     VC_GLOBAL_ROW_BYTES, np, l2_plane, tile_plane, nr)
+               : dma_local_memcpy_3d_nonblocking(
+                     0u, tile, l2, VC_TILE_ROW_BYTES, VC_GLOBAL_ROW_BYTES,
+                     VC_TILE_ROW_BYTES, np, tile_plane, l2_plane, nr);
+}
+
+// Rows r0, r0 + step, ... of a tile's block from l2 (row r0, piece 0), cut
+// where a row's 768 bytes cross an 8 KiB L2 row (all rows of the class cross
+// at the same piece when step * pitch is whole L2 rows).
+static dma_id_t g2_dma_gzc(char *l2, uint32_t pitch, uint32_t step, uint32_t b,
+                           uint32_t q, uint32_t to_l2, uint32_t r0,
+                           uint32_t nr) {
+  const uint32_t room = 8192u - (uint32_t)l2 % 8192u;
+  const uint32_t n1 = Q38_MIN(G2_ZPIECES, room / VC_TILE_ROW_BYTES);
+  dma_id_t id = g2_dma_gzp(l2, pitch, step, b, q, to_l2, r0, nr, 0u, n1);
+  if (n1 < G2_ZPIECES)
+    id = g2_dma_gzp(l2 + n1 * VC_TILE_ROW_BYTES, pitch, step, b, q, to_l2, r0,
+                    nr, n1, G2_ZPIECES - n1);
+  return id;
+}
+
+// The z rows of the chunk at t0 from P's slices: a group whose z columns
+// cross a slice takes two descriptors.
+static NOSTACK dma_id_t g2_load_z(uint32_t t0) {
+  const uint32_t g = mempool_get_group_id(), b = t0 / G2_C & 1u;
+  const uint32_t col = G2_COL_Z(g);
+  const uint32_t n1 = Q38_MIN(G2_ZPIECES, (G2_PSLICE - col % G2_PSLICE) * 2u /
+                                              VC_TILE_ROW_BYTES);
+  dma_id_t id = 0u;
+  for (uint32_t q = 0u; q < NUM_TILES_PER_GROUP; ++q) {
+    const uint32_t row = t0 + q * (G2_C / 4u);
+    id = g2_dma_gzp((char *)G2_PAT(row, col), G2_PSLICE * 2u, 1u, b, q, 0u, 0u,
+                    G2_C / 4u, 0u, n1);
+    if (n1 < G2_ZPIECES)
+      id = g2_dma_gzp((char *)G2_PAT(row, col + n1 * VC_TILE_ROW_BYTES / 2u),
+                      G2_PSLICE * 2u, 1u, b, q, 0u, 0u, G2_C / 4u, n1,
+                      G2_ZPIECES - n1);
+  }
+  return id;
+}
+#else
 // The z rows of the chunk at t0, rows 16q .. 16q+15 into tile q, over the
 // gated rows of chunk t0 - 2C.
 static NOSTACK dma_id_t g2_load_z(uint32_t t0) {
@@ -435,6 +573,7 @@ static NOSTACK dma_id_t g2_load_z(uint32_t t0) {
                    G2_PSTRIDE * 2u, b, q, 0u);
   return id;
 }
+#endif
 
 // Gated rows (in the tiles) and contexts of the chunk at t0 to L2. The
 // contexts are a checked diagnostic only: a debug run exports them all, a
@@ -445,12 +584,27 @@ static NOSTACK dma_id_t g2_store(uint32_t t0) {
   G2_SELF;
   const uint32_t g = mempool_get_group_id(), b = t0 / G2_C & 1u;
   dma_id_t id = 0u;
+#if Q38_L2_TILED
+  // O rows repeat their place in an 8 KiB L2 row every G2_OSTEP rows: one
+  // class of rows per descriptor (two where its rows cross an L2 row).
+  for (uint32_t q = 0u; q < NUM_TILES_PER_GROUP; ++q) {
+    char *const l2 =
+        (char *)(G2_O_L2 +
+                 (g * G2_H * Q38_VD / G2_OK * Q38_R + t0 + q * (G2_C / 4u)) *
+                     G2_OK +
+                 g * G2_H * Q38_VD % G2_OK);
+    for (uint32_t r = 0u; r < G2_OSTEP; ++r)
+      id = g2_dma_gzc(l2 + r * G2_OK * 2u, G2_OK * 2u, G2_OSTEP, b, q, 1u, r,
+                      G2_C / 4u / G2_OSTEP);
+  }
+#else
   for (uint32_t q = 0u; q < NUM_TILES_PER_GROUP; ++q)
     id = g2_dma_gz(
         G2_O_L2 +
             (g * G2_H * Q38_VD / G2_OK * Q38_R + t0 + q * (G2_C / 4u)) * G2_OK +
             g * G2_H * Q38_VD % G2_OK,
         G2_OK * 2u, b, q, 1u);
+#endif
 #if Q38_GDN2_DEBUG_CTX
   for (uint32_t h = 0u; h < G2_H; ++h) {
     const uint32_t head = g * G2_H + h;
@@ -472,7 +626,7 @@ static NOSTACK dma_id_t g2_store(uint32_t t0) {
           Q38_MIN(runs[i] + Q38_RUNLEN_CONTEXT - p, G2_QW - col % G2_QW);
       if (head / G2_H == g && row - t0 < G2_C)
         id = dma_local_memcpy_nonblocking(
-            0u, result_sample_context + i * Q38_RUNLEN_CONTEXT + (p - runs[i]),
+            0u, Q38_RES_SAMPLE_CONTEXT + i * Q38_RUNLEN_CONTEXT + (p - runs[i]),
             G2TG(&G2L->o[head % G2_H][row - t0][col % G2_QW], col / G2_QW),
             n * 2u);
       p += n;
@@ -483,17 +637,81 @@ static NOSTACK dma_id_t g2_store(uint32_t t0) {
 
 // The convolution state: the last four raw rows (tokens R-4 .. R-1).
 static NOSTACK void g2_store_conv(g2_raw_t *raw) {
-  const uint32_t g = mempool_get_group_id(), stride = Q38_QKVDIM * 2u;
+  const uint32_t g = mempool_get_group_id(), stride = Q38_RES_CONV_PITCH;
   dma_id_t id = g2_dma(&raw->qk[G2_C - 1u][0], sizeof(raw->qk[0]),
-                       result_conv + G2_COL_Q(g), Q38_KD * 2u, stride, 4u, 1u);
+                       Q38_RES_CONV + G2_COL_Q(g), Q38_KD * 2u, stride, 4u, 1u);
   id = g2_dma(&raw->qk[G2_C - 1u][Q38_KD], sizeof(raw->qk[0]),
-              result_conv + G2_COL_K(g), Q38_KD * 2u, stride, 4u, 1u);
+              Q38_RES_CONV + G2_COL_K(g), Q38_KD * 2u, stride, 4u, 1u);
   for (uint32_t h = 0u; h < G2_H; ++h)
     id = g2_dma(&raw->v[h][G2_C - 1u][0], Q38_VD * 2u,
-                result_conv + G2_COL_V(g) + h * Q38_VD, Q38_VD * 2u, stride, 4u,
-                1u);
+                Q38_RES_CONV + G2_COL_V(g) + h * Q38_VD, Q38_VD * 2u, stride,
+                4u, 1u);
   g2_dma_wait(id);
 }
+
+#if Q38_X8_BATCH
+// The FP16 state between row batches: each tile's g2_tile_t.s, contiguous in
+// L2 below the contexts, [group][tile].
+#define G2_SC_BYTES sizeof(((g2_tile_t *)0)->s)
+#define G2_SC_L2                                                               \
+  ((char *)G2_CTX_L2 - NUM_GROUPS * NUM_TILES_PER_GROUP * G2_SC_BYTES)
+_Static_assert(G2_SC_BYTES % VC_TILE_ROW_BYTES == 0u &&
+                   G2_SC_BYTES % 512u == 0u && offsetof(g2_tile_t, s) == 0u,
+               "The state takes whole tile-window rows and L2 granules");
+
+#if Q38_X8_PIPE
+// Layer pipeline: below domain dom's state slot, its mixer rows and its
+// layer's output rows (the next layer's input). F2_G_L2 and the GDN buffers
+// above follow the same per-domain span.
+_Static_assert(Q38_GDN2_L2_GAP == 0u, "The pipeline spans start at G");
+#define X8_DOM_TOP(dom)                                                        \
+  (Q38_L2_TOP - (dom)*Q38_X8_SPAN - Q38_R * Q38_I * 2u -                       \
+   Q38_R * (G2_PSTRIDE + Q38_GDIM + Q38_NV * Q38_VD) * 2u -                    \
+   NUM_GROUPS * NUM_TILES_PER_GROUP * G2_SC_BYTES)
+#define X8_MIX_L2(dom) ((__fp16 *)(X8_DOM_TOP(dom) - Q38_R * Q38_D * 2u))
+#define X8_ACT_L2(dom) ((__fp16 *)(X8_DOM_TOP(dom) - 2u * Q38_R * Q38_D * 2u))
+_Static_assert(!Q38_X8_SPAN ||
+                   Q38_L2_TOP - X8_DOM_TOP(0u) + 2u * Q38_R * Q38_D * 2u <=
+                       Q38_X8_SPAN,
+               "A domain's scratch fits its span");
+#if Q38_L2_HOME_SLOTS
+_Static_assert(Q38_RES_HOME_END <= X8_DOM_TOP(0u) - 2u * Q38_R * Q38_D * 2u &&
+                   Q38_RES_CONV_PITCH * 4u <= 0x20000u &&
+                   Q38_NV * Q38_KD * Q38_VD * 4u <= 0x300000u,
+               "The home result slots fit below the scratch");
+#endif
+#endif
+
+// The state of the group's four tiles to (to_l2) or from its L2 slot: one
+// descriptor per tile, whole tile-window rows.
+static NOSTACK dma_id_t g2_state_dma(uint32_t to_l2) {
+  G2_SELF;
+  const uint32_t g = mempool_get_group_id();
+  const uint32_t rows = G2_SC_BYTES / VC_TILE_ROW_BYTES;
+  dma_id_t id = 0u;
+  for (uint32_t q = 0u; q < NUM_TILES_PER_GROUP; ++q) {
+    char *const l2 = G2_SC_L2 + (g * NUM_TILES_PER_GROUP + q) * G2_SC_BYTES;
+    char *const tile = (char *)G2TG(&G2L->s[0][0][0], q);
+#if Q38_L2_TILED
+    // Planes of one 8 KiB L2 row each: whole-row plane steps on both sides.
+    const uint32_t per = VC_GLOBAL_ROW_BYTES / VC_TILE_ROW_BYTES;
+    _Static_assert(G2_SC_BYTES % VC_GLOBAL_ROW_BYTES == 0u,
+                   "The state takes whole 8 KiB L2 rows");
+#else
+    const uint32_t per = rows;
+#endif
+    id = to_l2 ? dma_local_memcpy_3d_nonblocking(
+                     0u, l2, tile, VC_TILE_ROW_BYTES, VC_TILE_ROW_BYTES,
+                     VC_GLOBAL_ROW_BYTES, per, VC_TILE_ROW_BYTES,
+                     VC_GLOBAL_ROW_BYTES, rows / per)
+               : dma_local_memcpy_3d_nonblocking(
+                     0u, tile, l2, VC_TILE_ROW_BYTES, VC_GLOBAL_ROW_BYTES,
+                     VC_TILE_ROW_BYTES, per, VC_GLOBAL_ROW_BYTES,
+                     VC_TILE_ROW_BYTES, rows / per);
+  }
+  return id;
+}
+#endif
 
 // --- compute cores: Spatz
 // -----------------------------------------------------
@@ -1449,10 +1667,19 @@ static NOSTACK void gdn2_layout(void) {
   const uint32_t end = p + rows * VC_GLOBAL_ROW_BYTES;
   if (end > (uint32_t)&__heap_end)
     q38_fatal("[qwen38_fatal] gdn2 over L1=", end - (uint32_t)&__heap_end);
+#if Q38_X8_PIPE && Q38_SAMPLED_CHECKS && !DOMAIN_L2_HOME
+  // The lowest scratch row must clear the fixture (gold_sample_recurrent is
+  // its last tensor). Not with DOMAIN_L2_HOME: its folded DMA aliases the
+  // fixture anyway (timing-only, values garbage by design).
+  const uint32_t low = (uint32_t)X8_ACT_L2(mempool_get_domain_id());
+  if (low < (uint32_t)gold_sample_recurrent + 0x10000u)
+    q38_fatal("[qwen38_fatal] x8 scratch over the fixture=", low);
+#endif
 }
 
 // In-projection of all rows: [qkv | z | a b] = RMSNorm(x) W_in, to P in L2.
-static NOSTACK void gdn2_project(void) {
+static NOSTACK void gdn2_project(G2_WIN_VOID) {
+  G2_WIN(0u, G2_PROJECT_ROWS);
   const uint32_t core = mempool_get_core_id();
   if (core == 0u) {
     f2.peak = 0u;
@@ -1463,24 +1690,32 @@ static NOSTACK void gdn2_project(void) {
     f2.seg_w[0] = w_qkv, f2.seg_panels[0] = Q38_QKVDIM / NT;
     f2.seg_w[1] = w_z, f2.seg_panels[1] = Q38_GDIM / NT;
     f2.seg_w[2] = w_ab, f2.seg_panels[2] = (2u * Q38_NV + NT - 1u) / NT;
+#if Q38_L2_TILED
+    f2.g_out = G2_P_L2, f2.g_kc = G2_PSLICE, f2.g_rows = Q38_R;
+    f2.g_main = G2_PMAIN, f2.g_kc_last = G2_PSTRIDE - G2_PMAIN;
+#else
     f2.g_out = G2_P_L2, f2.g_kc = G2_PSTRIDE, f2.g_rows = Q38_R;
+#endif
+    // f2 sits in remote L1 and f2_layout reloads it at once on this core:
+    // a fence first (GVSoC L1 reload-after-store).
+    __sync_synchronize();
   }
   if (mempool_is_group_coordinator())
     f2_down[mempool_get_group_id()].weight_valid = 0u;
 #pragma clang loop unroll(disable)
-  for (uint32_t first = 0u; first < G2_PROJECT_ROWS; first += Q38_FFN_ROWS) {
+  for (uint32_t first = w0; first < w1; first += Q38_FFN_ROWS) {
     f2_layout(0u);
     f2_reset_progress();
 #if Q38_F2_NORM_HOME
-    f2_home_setup(gamma, first, 0u);
+    f2_home_setup(gamma, first, w0);
 #endif
     if (core == 0u)
       f2.first = first;
     f2_sync_all();
 #if Q38_F2_NORM_HOME
-    f2_norm_batch(input_init, w_input_norm, gamma, first, 0u);
+    f2_norm_batch(X8_IN, w_input_norm, gamma, first, w0);
 #else
-    f2_transfer(f2.residual, input_init + first * Q38_D,
+    f2_transfer(f2.residual, X8_IN + first * Q38_D,
                 Q38_FFN_ROWS * Q38_D * sizeof(__fp16));
     norm_rows_sliced(f2.residual, w_input_norm, f2.input, Q38_FFN_ROWS, gamma);
 #endif
@@ -1489,20 +1724,27 @@ static NOSTACK void gdn2_project(void) {
 }
 
 // Out-projection with the residual: mixer = x + O W_out, to result_mixer.
-static NOSTACK void gdn2_output(void) {
+static NOSTACK void gdn2_output(G2_WIN_VOID) {
+  G2_WIN(0u, G2_OUT_ROWS);
   const uint32_t core = mempool_get_core_id();
   _Static_assert(G2_OUT_ROWS % Q38_FFN_DN_ROWS == 0,
                  "Out-projection rows are whole down batches");
   if (core == 0u) {
     f2.k_dn = G2_OK, f2.k_full = Q38_GDIM, f2.n_dn = Q38_D;
     f2.rows_dn = Q38_FFN_DN_ROWS, f2.slices = Q38_GDN2_OUT_SLICES;
+#if Q38_L2_TILED
+    f2.k_last = 0u;
+#endif
     f2.dn_lag = Q38_GDN2_OUT_LAG;
-    f2.end = G2_OUT_ROWS;
+    f2.end = w1;
     f2.w_dn = w_out, f2.dn_in = G2_O_L2, f2.dn_rows = Q38_R;
-    f2.res_src = input_init, f2.dn_out = result_mixer;
+    f2.res_src = X8_IN, f2.dn_out = X8_MIX;
 #if Q38_FFN_STAMPS
     f2_nst = 0u; // .l1 powers up undefined
 #endif
+    // f2 sits in remote L1 and f2_layout reloads it at once on this core:
+    // a fence first (GVSoC L1 reload-after-store).
+    __sync_synchronize();
   }
   if (mempool_is_group_coordinator()) {
     const uint32_t g = mempool_get_group_id();
@@ -1510,7 +1752,7 @@ static NOSTACK void gdn2_output(void) {
     f2_down[g].x_pending = 0u;
   }
 #pragma clang loop unroll(disable)
-  for (uint32_t first = 0u; first < G2_OUT_ROWS; first += Q38_FFN_DN_ROWS) {
+  for (uint32_t first = w0; first < w1; first += Q38_FFN_DN_ROWS) {
     f2_layout(1u);
     f2_reset_progress();
     if (core == 0u)
@@ -1520,7 +1762,8 @@ static NOSTACK void gdn2_output(void) {
     for (uint32_t slice = 0u; slice < Q38_GDN2_OUT_SLICES; ++slice) {
       if (core == 0u) {
         f2.slice = slice;
-        f2.weight_epoch = first / Q38_FFN_DN_ROWS * Q38_GDN2_OUT_SLICES + slice;
+        f2.weight_epoch =
+            (first - w0) / Q38_FFN_DN_ROWS * Q38_GDN2_OUT_SLICES + slice;
         f2.input = f2.x_buf[f2.weight_epoch & 1u];
       }
       f2_slice_reset();
@@ -1539,18 +1782,23 @@ static NOSTACK void gdn2_output(void) {
 // vector instruction of the compute half (hoisted constants included) can
 // reach a scheduler, which is rv32ima; ctrlcheck.py checks g2_sched_loop.
 #define G2_CTRL __attribute__((noinline, section(".text.ctrl")))
-#define G2_CHUNKS (G2_TOKENS / G2_C)
+#define G2_CHUNKS ((w1 - w0) / G2_C) // of the window
 
 // Tile schedulers: RedMulE jobs; the group coordinator also moves the data,
 // one chunk ahead. Chunk c's operands sit in pre[c & 1], its raw rows in
 // raw[c & 1]; the compute cores convolve chunk c + 1 during U~, W, U and O.
-static G2_CTRL void g2_sched_loop(uint32_t coord) {
+static G2_CTRL void g2_sched_loop(uint32_t coord G2_WIN_PARAMS) {
   G2_SELF;
+  G2_WIN(0u, G2_TOKENS);
   dma_id_t load = 0u, zload = 0u, store = 0u;
   if (coord) {
     g2_load_params();
-    g2_load(0u, &G2->raw[0]);
-    g2_dma_wait(g2_load_z(0u));
+#if Q38_X8_BATCH
+    if (w0) // the state the previous batch left (no zeroing then)
+      g2_state_dma(0u);
+#endif
+    g2_load(w0, &G2->raw[0]);
+    g2_dma_wait(g2_load_z(w0));
   }
   g2_sync(); // 0 raw rows of chunk 0
   g2_sync(); // convolution and gates of chunk 0
@@ -1561,7 +1809,7 @@ static G2_CTRL void g2_sched_loop(uint32_t coord) {
   // Raw rows go one chunk ahead of their convolution: chunk c+2's are
   // requested under chunk c's gate rows (raw[c & 1] is free from then on).
   if (coord && G2_CHUNKS > 1u)
-    load = g2_load(G2_C, &G2->raw[1]);
+    load = g2_load(w0 + G2_C, &G2->raw[1]);
   g2_job_wait(g2_rm_gram(&G2->pre[0]));
   g2_sync(); // K K^T, Q K^T of chunk 0
   uint8_t state_job = 0u;
@@ -1571,7 +1819,7 @@ static G2_CTRL void g2_sched_loop(uint32_t coord) {
     // The coordinator programs chunk c-1's exports during the solve, where
     // it has nothing else to do until the level-3 jobs.
     if (coord && c)
-      store = g2_store((c - 1u) * G2_C);
+      store = g2_store(w0 + (c - 1u) * G2_C);
     uint8_t lq_job = 0u;
     if (g2_tile() == 3u)
       lq_job = g2_rm_lq(pre);
@@ -1582,7 +1830,7 @@ static G2_CTRL void g2_sched_loop(uint32_t coord) {
       // buffer: the next chunk's z rows may land there, U, O may follow.
       g2_dma_wait(store);
       if (c + 1u < G2_CHUNKS)
-        zload = g2_load_z((c + 1u) * G2_C);
+        zload = g2_load_z(w0 + (c + 1u) * G2_C);
       g2_dma_wait(load); // chunk c+1's raw rows, for its convolution
     }
     if (lq_job)
@@ -1598,7 +1846,7 @@ static G2_CTRL void g2_sched_loop(uint32_t coord) {
     const uint8_t gram_job =
         c + 1u < G2_CHUNKS ? g2_rm_gram(&G2->pre[(c + 1u) & 1u]) : 0u;
     if (coord && c + 2u < G2_CHUNKS)
-      load = g2_load((c + 2u) * G2_C, &G2->raw[c & 1u]);
+      load = g2_load(w0 + (c + 2u) * G2_C, &G2->raw[c & 1u]);
     if (gram_job)
       g2_job_wait(gram_job);
     g2_sync(); // 5 gated rows, scaled state and U; next chunk's K K^T, Q K^T
@@ -1608,20 +1856,36 @@ static G2_CTRL void g2_sched_loop(uint32_t coord) {
     g2_job_wait(state_job);
   g2_sync();
   if (coord) {
-    g2_dma_wait(g2_store((G2_CHUNKS - 1u) * G2_C));
-    if (!Q38_GDN2_DEBUG_TOKENS)
+    g2_dma_wait(g2_store(w0 + (G2_CHUNKS - 1u) * G2_C));
+    if (!Q38_GDN2_DEBUG_TOKENS && w1 == Q38_R)
       g2_store_conv(&G2->raw[(G2_CHUNKS - 1u) & 1u]);
+#if Q38_X8_BATCH
+    if (w1 != Q38_R) // the next batch's initial state
+      g2_dma_wait(g2_state_dma(1u));
+#endif
   }
   g2_sync(); // the raw rows are free
   g2_sync(); // the FP32 state, staged over them
-  if (coord) {
+  if (coord && w1 == G2_TOKENS) {
     const float(*const fs)[Q38_VD] = (const float(*)[Q38_VD]) & G2->raw[0];
     dma_id_t id = 0u;
     for (uint32_t h = 0u; h < G2_H; ++h) {
       const uint32_t head = mempool_get_group_id() * G2_H + h;
+#if Q38_L2_TILED
+      // One window row per 512 B state row: 16 rows fill an 8 KiB L2 row,
+      // so planes of 16 step whole rows on both sides.
+      _Static_assert(sizeof(fs[0]) == VC_ROW_BYTES && Q38_KD % 16u == 0u,
+                     "State rows are window rows, 16 to an L2 row");
+      id = dma_local_memcpy_3d_nonblocking(
+          0u, Q38_RES_RECURRENT + head * Q38_KD * Q38_VD,
+          G2G(&fs[h * Q38_KD][0]), VC_ROW_BYTES, VC_ROW_BYTES,
+          VC_GLOBAL_ROW_BYTES, 16u, VC_ROW_BYTES, VC_GLOBAL_ROW_BYTES,
+          Q38_KD / 16u);
+#else
       id = g2_dma(fs[h * Q38_KD], sizeof(fs[0]),
-                  result_recurrent + head * Q38_KD * Q38_VD, sizeof(fs[0]),
+                  Q38_RES_RECURRENT + head * Q38_KD * Q38_VD, sizeof(fs[0]),
                   sizeof(fs[0]), Q38_KD, 1u);
+#endif
     }
     g2_dma_wait(id);
   }
@@ -1727,20 +1991,24 @@ static NOSTACK void g2_memprobe(void) {
 #endif
 
 // Compute cores (Spatz): convolution, gates, operands, solve, gated norm.
-static NOSTACK void g2_compute_loop(uint32_t cid) {
+static NOSTACK void g2_compute_loop(uint32_t cid G2_WIN_PARAMS) {
   G2_SELF;
+  G2_WIN(0u, G2_TOKENS);
 #if Q38_GDN2_MEMPROBE
   if (cid == 0u && mempool_get_group_id() == 0u)
     g2_memprobe();
 #endif
   float *const tmp = G2G(&G2->tmp[cid][0]);
-  // Zero the first chunk's history rows and the state.
-  for (uint32_t r = cid; r < 3u * (1u + G2_H); r += 12u)
-    if (r < 3u)
-      g2_zero16(G2G(&G2->raw[0].qk[r][0]), 2u * Q38_KD);
-    else
-      g2_zero16(G2G(&G2->raw[0].v[(r - 3u) / 3u][(r - 3u) % 3u][0]), Q38_VD);
-  g2_zero16(&G2L->s[cid % 3u][0][0], Q38_KD * G2_QW);
+  // Zero the first chunk's history rows and the state. A later window's
+  // come from P (g2_load) and from the previous window (g2_state_dma).
+  if (!w0) {
+    for (uint32_t r = cid; r < 3u * (1u + G2_H); r += 12u)
+      if (r < 3u)
+        g2_zero16(G2G(&G2->raw[0].qk[r][0]), 2u * Q38_KD);
+      else
+        g2_zero16(G2G(&G2->raw[0].v[(r - 3u) / 3u][(r - 3u) % 3u][0]), Q38_VD);
+    g2_zero16(&G2L->s[cid % 3u][0][0], Q38_KD * G2_QW);
+  }
   if (cid == 0u)
     *G2G(&G2->ntask[0][0]) = 0u;
   if (cid % 3u == 0u) { // .l1 powers up undefined
@@ -1786,10 +2054,10 @@ static NOSTACK void g2_compute_loop(uint32_t cid) {
                          sizeof(G2->raw) + sizeof(G2->pre) &&
                      offsetof(g2_group_t, pre) == sizeof(G2->raw),
                  "The FP32 state fits over the raw rows and the operands");
-  // Core c of tile q: quarter q of head c's rows.
+  // Core c of tile q: quarter q of head c's rows. Last window only.
   const float zh = llm_f16box(0.0f);
   const uint32_t q = cid / 3u, h = cid % 3u;
-  for (uint32_t d = 0u; d < Q38_KD; ++d) {
+  for (uint32_t d = 0u; w1 == G2_TOKENS && d < Q38_KD; ++d) {
     asm volatile("vsetvli zero, %0, e16, m1, ta, ma" : : "r"(G2_QW));
     asm volatile("vle16.v v0, (%0)" : : "r"(&G2L->s[h][d][0]) : "memory");
     asm volatile("vfwadd.vf v8, v0, %0" : : "f"(zh));
@@ -1803,7 +2071,7 @@ static NOSTACK void g2_compute_loop(uint32_t cid) {
 }
 
 // The chunked recurrence over all tokens.
-static NOSTACK void gdn2_chunks(void) {
+static NOSTACK void gdn2_chunks(G2_WIN_VOID) {
   const uint32_t sched = g2_is_sched();
 #if Q38_GDN2_STAMPS
   if (mempool_get_core_id() == 0u)
@@ -1817,14 +2085,15 @@ static NOSTACK void gdn2_chunks(void) {
   fsync_subscribe_self(FSYNC_EVT_FSYNC | FSYNC_EVT_CORE |
                        (sched ? FSYNC_EVT_ENGINE | FSYNC_EVT_DMA : 0u));
   if (sched)
-    g2_sched_loop(mempool_is_group_coordinator());
+    g2_sched_loop(mempool_is_group_coordinator() G2_WIN_ARGS);
   else
-    g2_compute_loop(g2_cid());
+    g2_compute_loop(g2_cid() G2_WIN_ARGS);
   fsync_subscribe_self(0u);
   fsync_subscribe_self(FSYNC_EVT_FSYNC);
   f2_sync_all();
 }
 
+#if !Q38_X8_BATCH
 static NOSTACK void gdn2(void) {
 #if Q38_GDN2_DEBUG_PLOAD
   // The loader is still writing the sidecar: wait for the preloaded rows,
@@ -1888,3 +2157,4 @@ static NOSTACK void gdn2(void) {
   }
   // The context samples were copied chunk by chunk (g2_store).
 }
+#endif

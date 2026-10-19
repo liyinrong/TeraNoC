@@ -473,29 +473,28 @@ avs_query_parts(uint32_t base, uint32_t batch, uint32_t bank, uint32_t what) {
       for (uint32_t lane = 0u; lane < lanes && lane < rows; ++lane) {
         const uint32_t count = (rows - lane + lanes - 1u) / lanes;
         const uint32_t token = base + avs_row_at(j, lane);
+        const uint32_t s2 = lanes * avs_row_step() * Q38_HD * 2u;
+        const uint32_t k = s2 < 8192u ? 8192u / s2 : count;
         if (what & 1u)
-          id = dma_local_memcpy_2d_nonblocking(
-              0u, q38_la(q + lane * Q38_HD),
-              av_q + (h * AV_QG_ROWS + token) * Q38_HD, Q38_HD * 2u,
-              VC_GLOBAL_ROW_BYTES, lanes * avs_row_step() * Q38_HD * 2u, count);
+          id = av_dma_rows(q38_la(q + lane * Q38_HD),
+                           av_q + (h * AV_QG_ROWS + token) * Q38_HD,
+                           Q38_HD * 2u, VC_GLOBAL_ROW_BYTES, s2, count, k);
         if (what & 2u)
-          id = dma_local_memcpy_2d_nonblocking(
-              0u, q38_la(g + lane * Q38_HD),
-              av_gate + (h * AV_QG_ROWS + token) * Q38_HD, Q38_HD * 2u,
-              VC_GLOBAL_ROW_BYTES, lanes * avs_row_step() * Q38_HD * 2u, count);
+          id = av_dma_rows(q38_la(g + lane * Q38_HD),
+                           av_gate + (h * AV_QG_ROWS + token) * Q38_HD,
+                           Q38_HD * 2u, VC_GLOBAL_ROW_BYTES, s2, count, k);
       }
       continue;
     }
     const uint32_t bytes = rows * Q38_HD * 2u;
     if (what & 1u)
-      id = dma_local_memcpy_2d_nonblocking(
-          0u, q38_la(q), av_q + (h * AV_QG_ROWS + row) * Q38_HD, VC_ROW_BYTES,
-          VC_GLOBAL_ROW_BYTES, VC_ROW_BYTES, bytes / VC_ROW_BYTES);
+      id = av_dma_rows(q38_la(q), av_q + (h * AV_QG_ROWS + row) * Q38_HD,
+                       VC_ROW_BYTES, VC_GLOBAL_ROW_BYTES, VC_ROW_BYTES,
+                       bytes / VC_ROW_BYTES, 8192u / VC_ROW_BYTES);
     if (what & 2u)
-      id = dma_local_memcpy_2d_nonblocking(
-          0u, q38_la(g), av_gate + (h * AV_QG_ROWS + row) * Q38_HD,
-          VC_ROW_BYTES, VC_GLOBAL_ROW_BYTES, VC_ROW_BYTES,
-          bytes / VC_ROW_BYTES);
+      id = av_dma_rows(q38_la(g), av_gate + (h * AV_QG_ROWS + row) * Q38_HD,
+                       VC_ROW_BYTES, VC_GLOBAL_ROW_BYTES, VC_ROW_BYTES,
+                       bytes / VC_ROW_BYTES, 8192u / VC_ROW_BYTES);
     const uint32_t whole = bytes / VC_ROW_BYTES * VC_ROW_BYTES;
     if (whole != bytes) {
       if (what & 1u)
@@ -532,15 +531,14 @@ static dma_id_t avs_mat_load(uint32_t key, uint32_t which, uint32_t m) {
   const uint32_t vc = mempool_get_group_id() / Q38_VC_GROUPS;
   const uint32_t kv = vc % Q38_KVH, group = mempool_get_group_id() % 4u;
   const uint32_t matrix = AVS_MAT_ELEMS * 2u;
-  const __fp16 *const src = result_cache +
-                            key / BK * 2u * Q38_KVH * Q38_HD * BK +
+  const __fp16 *const src = AV_CACHE + key / BK * 2u * Q38_KVH * Q38_HD * BK +
                             (which * Q38_KVH + kv) * Q38_HD * BK;
   const uint32_t offset = (uint32_t)avs_kv - VC_WINDOW_BASE_1 + m * matrix;
   const vc_rect_t rect = vc_rect(1u);
   const uint32_t dst = vc_global_addr(&rect, offset) + group * VC_ROW_BYTES;
-  return dma_local_memcpy_2d_nonblocking(
-      0u, (void *)dst, (const char *)src + group * VC_ROW_BYTES, VC_ROW_BYTES,
-      VC_GLOBAL_ROW_BYTES, Q38_VC_ROW, matrix / Q38_VC_ROW);
+  return av_dma_rows((void *)dst, (const char *)src + group * VC_ROW_BYTES,
+                     VC_ROW_BYTES, VC_GLOBAL_ROW_BYTES, Q38_VC_ROW,
+                     matrix / Q38_VC_ROW, 8192u / Q38_VC_ROW);
 }
 
 // K and V of one block into combined slot `slot` (per-window pipeline).
@@ -569,11 +567,12 @@ static dma_id_t avs_export(uint32_t base, uint32_t batch, uint32_t bank) {
     const uint32_t h = avs_head(batch, j), rows = avs_owner_rows(base, j);
     for (uint32_t lane = 0u; lane < lanes && lane < rows; ++lane) {
       const uint32_t token = base + avs_row_at(j, lane);
-      id = dma_local_memcpy_2d_nonblocking(
-          0u, AV_GATED(token, h),
+      const uint32_t d2 = lanes * avs_row_step() * AV_GPITCH(h) * 2u;
+      id = av_dma_rows(
+          AV_GATED(token, h),
           q38_la(avs_gated_bank(bank) + (j * AVS_TILE + lane) * Q38_HD),
-          Q38_HD * 2u, lanes * avs_row_step() * AV_GK * 2u, VC_GLOBAL_ROW_BYTES,
-          (rows - lane + lanes - 1u) / lanes);
+          Q38_HD * 2u, d2, VC_GLOBAL_ROW_BYTES,
+          (rows - lane + lanes - 1u) / lanes, d2 < 8192u ? 8192u / d2 : rows);
     }
   }
   return id;
@@ -1531,11 +1530,12 @@ static NOSTACK void avs_finish(uint32_t base, uint32_t batch, uint32_t bank,
       const uint32_t lanes = VC_ROW_BYTES / (Q38_HD * 2u);
       for (uint32_t lane = 0u; lane < lanes && lane < rows; ++lane) {
         const uint32_t token = base + avs_row_at(j, lane);
-        id = dma_local_memcpy_2d_nonblocking(
-            0u, AV_GATED(token, h),
+        const uint32_t d2 = lanes * avs_row_step() * AV_GPITCH(h) * 2u;
+        id = av_dma_rows(
+            AV_GATED(token, h),
             q38_la(avs_gated_bank(bank) + (j * AVS_TILE + lane) * Q38_HD),
-            Q38_HD * 2u, lanes * avs_row_step() * AV_GK * 2u,
-            VC_GLOBAL_ROW_BYTES, (rows - lane + lanes - 1u) / lanes);
+            Q38_HD * 2u, d2, VC_GLOBAL_ROW_BYTES,
+            (rows - lane + lanes - 1u) / lanes, d2 < 8192u ? 8192u / d2 : rows);
       }
 #else
       for (uint32_t r = 0; r < avs_owner_rows(base, j); ++r)

@@ -153,7 +153,14 @@ _Static_assert(Q38_FFN_WORKERS >= 1 && Q38_FFN_WORKERS <= F2_LANES,
 #define F2_WORKER_MASK (((1u << Q38_FFN_WORKERS) - 1u) << 1)
 #define F2_GROUP_WORDS (NUM_TILES_PER_GROUP * NUM_BANKS_PER_TILE)
 #define F2_Z_ELEMS (Q38_FFN_GU_ROWS * NT)
-#define F2_G_L2 ((__fp16 *)(L2_BASE + L2_SIZE - Q38_R * Q38_I * sizeof(__fp16)))
+#if Q38_X8_PIPE && Q38_X8_SPAN
+// Layer pipeline: each domain's scratch in its own span below the L2 top.
+#define F2_G_L2                                                                \
+  ((__fp16 *)(Q38_L2_TOP - mempool_get_domain_id() * Q38_X8_SPAN -             \
+              Q38_R * Q38_I * sizeof(__fp16)))
+#else
+#define F2_G_L2 ((__fp16 *)(Q38_L2_TOP - Q38_R * Q38_I * sizeof(__fp16)))
+#endif
 #ifndef Q38_GDN_V2
 #define Q38_GDN_V2 0
 #endif
@@ -252,6 +259,11 @@ static struct {
   uint32_t k_dn, k_full, n_dn, rows_dn, slices, end, dn_rows, dn_lag;
   const __fp16 *w_dn, *dn_in, *res_src;
   __fp16 *dn_out;
+#if Q38_L2_TILED
+  // Uneven K slices: the last is k_last wide (0: as the others); g_out's
+  // columns from g_main on take pitch g_kc_last.
+  uint32_t k_last, g_main, g_kc_last;
+#endif
 }
 #if Q38_F2_REP
 ;
@@ -265,6 +277,22 @@ f2 Q38_VC_SMALL;
 #endif
 #if Q38_F2_C1
 static struct { uint32_t w_flat, x_win; } f2c1 Q38_VC_SMALL;
+#endif
+
+#if Q38_L2_TILED
+// FFN down K slices stay Q38_FFN_DOWN_SLICES even ones: an extra short slice
+// costs about a whole slice (S1 A/B 10-19, down +22.6%). G keeps its pitch
+// and its ships are cut into row-local runs (f2_ship_progress).
+#define F2_KC Q38_KC
+#define F2_DN_SLICES Q38_FFN_DOWN_SLICES
+static uint32_t f2_k(uint32_t slice) {
+  return f2.k_last && slice + 1u == f2.slices ? f2.k_last : f2.k_dn;
+}
+#define F2_K(slice) f2_k(slice)
+#else
+#define F2_KC Q38_KC
+#define F2_DN_SLICES Q38_FFN_DOWN_SLICES
+#define F2_K(slice) f2.k_dn
 #endif
 
 #if Q38_F2_NORM_HOME
@@ -572,13 +600,44 @@ static NOSTACK dma_id_t f2_load_at(uint32_t v, uint32_t t, uint32_t slice,
   if (!panels)
     return 0u;
   const uint32_t group = mempool_get_group_id();
-  const uint32_t k = f2.down ? f2.k_dn : f2.k_up;
+  const uint32_t k = f2.down ? F2_K(slice) : f2.k_up;
   const uint32_t first = f2_n(t) * f2.pv * Q38_VC_COUNT + v * f2.pv;
   const __fp16 *const source = f2_panel(first, t, slice);
   const uint32_t rows = k * NT * 2u / Q38_VC_ROW;
   const uint32_t offset = f2.w_offset + slot * f2.slot_bytes;
   void *dest = (void *)(offset / Q38_VC_ROW * VC_GLOBAL_ROW_BYTES +
                         group * VC_ROW_BYTES);
+#if Q38_L2_TILED
+  // One descriptor per panel: four VC rows (one 8 KiB L2 row) by rows / 4
+  // planes, so every plane step is a whole L2 row (split-free domain fold).
+  // A panel across the home wrap goes as two, cut at the wrap row.
+  if (rows % 4u == 0u) {
+    const uint32_t stride = (f2.down ? f2.k_full : f2.k_up) * NT * 2u;
+    const char *src =
+        (const char *)source + group % Q38_VC_GROUPS * VC_ROW_BYTES;
+    char *dst = (char *)dest;
+    dma_id_t id = 0u;
+    for (uint32_t p = 0u; p < panels; ++p, src += stride) {
+      uint32_t planes = rows / 4u, cut = planes;
+#if DOMAIN_L2_HOME
+      if (dma_domain_home((uint32_t)src)) {
+        const uint32_t wrapo = DMA_DOMAIN_HOME_WRAP / DOMAINS;
+        const uint32_t row = ((uint32_t)src - DMA_DOMAIN_HOME_BASE) /
+                             VC_GLOBAL_ROW_BYTES * VC_GLOBAL_ROW_BYTES;
+        const uint32_t left = (wrapo - row % wrapo) / VC_GLOBAL_ROW_BYTES;
+        cut = Q38_MIN(planes, left);
+      }
+#endif
+      for (uint32_t at = 0u; at < planes; at += cut, cut = planes - at)
+        id = dma_local_memcpy_3d_nonblocking(
+            0u, dst + at * 4u * VC_GLOBAL_ROW_BYTES,
+            src + at * VC_GLOBAL_ROW_BYTES, VC_ROW_BYTES, VC_GLOBAL_ROW_BYTES,
+            Q38_VC_ROW, 4u, VC_GLOBAL_ROW_BYTES, Q38_VC_ROW, cut);
+      dst += rows * VC_GLOBAL_ROW_BYTES;
+    }
+    return id; // DONE_ID is monotone: the last covers them all
+  }
+#endif
   return dma_local_memcpy_3d_nonblocking(
       0u, dest, (const char *)source + group % Q38_VC_GROUPS * VC_ROW_BYTES,
       VC_ROW_BYTES, VC_GLOBAL_ROW_BYTES, Q38_VC_ROW, rows, VC_GLOBAL_ROW_BYTES,
@@ -630,10 +689,17 @@ static NOSTACK void f2_prefetch_x(void) {
       return;
     slice = 0u, first += f2.rows;
   }
+#if Q38_L2_TILED
+  const dma_coordinator_op_t op = dma_coordinator_submit_linear(
+      0u, f2.x_buf[(f2.weight_epoch + 1u) & 1u],
+      f2.dn_in + slice * f2.dn_rows * f2.k_dn + first * F2_K(slice),
+      f2.rows * F2_K(slice) * sizeof(__fp16));
+#else
   const dma_coordinator_op_t op = dma_coordinator_submit_linear(
       0u, f2.x_buf[(f2.weight_epoch + 1u) & 1u],
       f2.dn_in + (slice * f2.dn_rows + first) * f2.k_dn,
       f2.rows * f2.k_dn * sizeof(__fp16));
+#endif
   if (op.status)
     q38_fatal("[qwen38_fatal] x prefetch status=", op.status);
   f2_down[mempool_get_group_id()].x_pending = op.id;
@@ -675,6 +741,62 @@ static NOSTACK void f2_ship_progress(void) {
   // A producer panel group can cross the consumer's K boundary.
   // Preserve the source row stride while exporting each destination piece.
   uint32_t exported = 0u, remaining = panels * NT;
+#if Q38_L2_TILED
+  // Slices of g_kc columns at an 8 KiB pitch up to g_main, then one slice at
+  // pitch g_kc_last. A short pitch packs m rows per 8 KiB L2 row: each
+  // descriptor takes at most m rows of a stripe, and its planes step whole
+  // L2 rows, or it takes one stripe only.
+  while (remaining) {
+    const uint32_t column = col + exported;
+    const uint32_t slice = column / f2.g_kc;
+    const uint32_t pitch = column < f2.g_main ? f2.g_kc : f2.g_kc_last;
+    const uint32_t width = Q38_MIN(remaining, pitch - column % f2.g_kc);
+    const uint32_t p = pitch * sizeof(__fp16);
+    const uint32_t row_fit =
+        p % VC_GLOBAL_ROW_BYTES == 0u || VC_GLOBAL_ROW_BYTES % p == 0u;
+    const uint32_t m =
+        p < VC_GLOBAL_ROW_BYTES ? VC_GLOBAL_ROW_BYTES / p : inner;
+    const uint32_t sub = row_fit ? Q38_MIN(inner, m) : inner;
+    const uint32_t stripes = f2.ship_rows / inner;
+    const uint32_t whole = !row_fit || inner * p % VC_GLOBAL_ROW_BYTES == 0u;
+    __fp16 *const dst = f2.g_out + slice * f2.g_rows * f2.g_kc +
+                        (f2.first + row) * pitch + column % f2.g_kc;
+    const char *const src = (const char *)Q38_VC_GLOBAL(source + exported);
+    if (!row_fit) {
+      // Neither a divisor nor a multiple of the row: per stripe, runs of rows
+      // whose bursts move forward inside their L2 rows (one 2-D descriptor
+      // each), cut where a row's burst wraps to the next L2 row's start.
+      const uint32_t len = width * sizeof(__fp16);
+      for (uint32_t s = 0u; s < stripes; ++s)
+        for (uint32_t h = 0u; h < inner;) {
+          const uint32_t a = (uint32_t)(dst + (s * inner + h) * pitch);
+          uint32_t n = 1u;
+          while (h + n < inner &&
+                 (a + n * p) % VC_GLOBAL_ROW_BYTES >
+                     (a + (n - 1u) * p) % VC_GLOBAL_ROW_BYTES &&
+                 (a + n * p) % VC_GLOBAL_ROW_BYTES + len <= VC_GLOBAL_ROW_BYTES)
+            ++n;
+          f2_ship[g].pending = dma_local_memcpy_2d_nonblocking(
+              0u, (void *)a, src + s * VC_GLOBAL_ROW_BYTES + h * row_bytes, len,
+              p, row_bytes, n);
+          h += n;
+        }
+      remaining -= width;
+      exported += width;
+      continue;
+    }
+    for (uint32_t s = 0u; s < (whole ? 1u : stripes); ++s)
+      for (uint32_t h = 0u; h < inner; h += sub)
+        f2_ship[g].pending = dma_local_memcpy_3d_nonblocking(
+            0u, dst + (s * inner + h) * pitch,
+            src + s * VC_GLOBAL_ROW_BYTES + h * row_bytes,
+            width * sizeof(__fp16), p, row_bytes, sub,
+            inner * p - (sub - 1u) * p,
+            VC_GLOBAL_ROW_BYTES - (sub - 1u) * row_bytes, whole ? stripes : 1u);
+    remaining -= width;
+    exported += width;
+  }
+#else
   while (remaining) {
     const uint32_t column = col + exported;
     const uint32_t slice = column / f2.g_kc;
@@ -689,13 +811,14 @@ static NOSTACK void f2_ship_progress(void) {
     remaining -= width;
     exported += width;
   }
+#endif
 }
 
 static uint8_t f2_configure(uint32_t t, uint32_t engine) {
   const uint32_t v = engine / Q38_VC_ENGINES, ev = engine % Q38_VC_ENGINES;
   const uint32_t r = ev / f2.pv, q = ev % f2.pv;
   const uint32_t n = f2_n(t);
-  const uint32_t k = f2.down ? f2.k_dn : f2.k_up;
+  const uint32_t k = f2.down ? F2_K(f2.slice) : f2.k_up;
 #if Q38_F2_W_PLACE
   const __fp16 *w = (const __fp16 *)(VC_WINDOW_BASE_1 + f2.w_offset +
                                      f2_weight_slot(t) * f2.slot_bytes) +
@@ -743,6 +866,30 @@ static NOSTACK dma_id_t f2_down_transfer(uint32_t n, uint32_t output) {
     __fp16 *remote = (output ? f2.dn_out : (__fp16 *)f2.res_src) +
                      (f2.first + r * f2.tile_rows) * f2.n_dn + panel * NT;
     const uint32_t packed = NT * sizeof(__fp16);
+#if Q38_L2_TILED
+    // L2 rows repeat their offset in an 8 KiB L2 row every `step` rows: one
+    // descriptor per class of a stripe's rows, planes over the stripes.
+    const uint32_t pitch = f2.n_dn * 2u, low = pitch & (0u - pitch);
+    const uint32_t step =
+        low < VC_GLOBAL_ROW_BYTES ? VC_GLOBAL_ROW_BYTES / low : 1u;
+    if (inner % step == 0u) {
+      const uint32_t per = inner / step;
+      const uint32_t l2_plane = inner * pitch - (per - 1u) * step * pitch;
+      const uint32_t l1_plane =
+          VC_GLOBAL_ROW_BYTES - (per - 1u) * step * packed;
+      char *const l1 = (char *)Q38_VC_GLOBAL(local);
+      for (uint32_t j = 0u; j < step; ++j) {
+        char *const a = (char *)remote + j * pitch, *const b = l1 + j * packed;
+        pending = dma_local_memcpy_3d_nonblocking(
+            0u, output ? a : b, output ? b : a, packed,
+            output ? step * pitch : step * packed,
+            output ? step * packed : step * pitch, per,
+            output ? l2_plane : l1_plane, output ? l1_plane : l2_plane,
+            f2.tile_rows / inner);
+      }
+      continue;
+    }
+#endif
     const uint32_t global = VC_GLOBAL_ROW_BYTES - (inner - 1u) * packed;
     pending = dma_local_memcpy_3d_nonblocking(
         0u, output ? (void *)remote : Q38_VC_GLOBAL(local),
@@ -992,7 +1139,7 @@ static NOSTACK uint32_t f2_q_service(f2_q_t *s, uint32_t v) {
 #if Q38_FFN_W_CHECK
 // Mismatches among 4 sampled halfwords of engine q's panel of step t.
 static uint32_t f2_w_check(uint32_t v, uint32_t q, uint32_t t) {
-  const uint32_t k = f2.down ? f2.k_dn : f2.k_up, bytes = k * NT * 2u;
+  const uint32_t k = f2.down ? F2_K(f2.slice) : f2.k_up, bytes = k * NT * 2u;
   const uint32_t first = f2_n(t) * f2.pv * Q38_VC_COUNT + v * f2.pv + q;
   const char *const l1 = (const char *)(VC_WINDOW_BASE_1 + f2.w_offset +
                                         f2_weight_slot(t) * f2.slot_bytes) +
@@ -1343,11 +1490,16 @@ static NOSTACK void f2_x_seed(uint32_t start) {
 
 // A down slice's X: in place already when the previous slice prefetched it.
 static NOSTACK void f2_down_input(void) {
+#if Q38_L2_TILED
+  const __fp16 *const src =
+      f2.dn_in + f2.slice * f2.dn_rows * f2.k_dn + f2.first * F2_K(f2.slice);
+#else
   const __fp16 *const src =
       f2.dn_in + (f2.slice * f2.dn_rows + f2.first) * f2.k_dn;
+#endif
   F2_STAMP(4u);
   if (!Q38_FFN_X_PREFETCH || !f2.weight_epoch)
-    f2_transfer(f2.input, src, f2.rows * f2.k_dn * sizeof(__fp16));
+    f2_transfer(f2.input, src, f2.rows * F2_K(f2.slice) * sizeof(__fp16));
 #if Q38_FFN_X_CHECK
   if (mempool_get_core_id() == 0u) {
     uint32_t bad = 0u, n = 0u;
@@ -1359,19 +1511,31 @@ static NOSTACK void f2_down_input(void) {
 #endif
 }
 
+#if Q38_X8_BATCH
+// Rows [w0, w1) only: one batch of the batch-major layer (layer_resident.c).
+static NOSTACK void ffn_rows(uint32_t w0, uint32_t w1) {
+#else
 static NOSTACK void ffn(void) {
+  const uint32_t w0 = Q38_EXEC_START, w1 = Q38_EXEC_END;
+#endif
   const uint32_t core = mempool_get_core_id();
   if (core == 0u) {
     f2.peak = 0u;
     f2.pair = 1u, f2.k_up = Q38_D, f2.n_up = Q38_I, f2.rows_up = Q38_FFN_ROWS;
     f2.seg_w[0] = w_gate, f2.seg_w[1] = w_up, f2.nseg = 2u;
-    f2.g_out = F2_G_L2, f2.g_kc = Q38_KC, f2.g_rows = Q38_R;
-    f2.k_dn = Q38_KC, f2.k_full = Q38_I, f2.n_dn = Q38_D;
-    f2.rows_dn = Q38_FFN_DN_ROWS, f2.slices = Q38_FFN_DOWN_SLICES;
+    f2.g_out = F2_G_L2, f2.g_kc = F2_KC, f2.g_rows = Q38_R;
+    f2.k_dn = F2_KC, f2.k_full = Q38_I, f2.n_dn = Q38_D;
+    f2.rows_dn = Q38_FFN_DN_ROWS, f2.slices = F2_DN_SLICES;
+#if Q38_L2_TILED
+    f2.k_last = 0u, f2.g_main = ~0u; // even slices, one pitch
+#endif
     f2.dn_lag = 0u;
-    f2.end = Q38_EXEC_END, f2.w_dn = w_down, f2.dn_in = F2_G_L2;
-    f2.dn_rows = Q38_R, f2.res_src = result_mixer, f2.dn_out = result_output;
+    f2.end = w1, f2.w_dn = w_down, f2.dn_in = F2_G_L2;
+    f2.dn_rows = Q38_R, f2.res_src = X8_MIX, f2.dn_out = X8_OUT;
     f2.q_base = 0u;
+    // f2 sits in remote L1 and f2_layout reloads it at once on this core:
+    // a fence first (GVSoC L1 reload-after-store).
+    __sync_synchronize();
   }
   if (tnc_is_tile_agent())
     f2_progress[mempool_get_redmule_id()].step_done = 0u;
@@ -1381,9 +1545,8 @@ static NOSTACK void ffn(void) {
     f2_down[g].x_pending = 0u;
   }
 #if Q38_FFN_X_CHECK
-  f2_x_seed(Q38_EXEC_START);
+  f2_x_seed(w0);
 #endif
-  const uint32_t w0 = Q38_EXEC_START, w1 = Q38_EXEC_END;
 #pragma clang loop unroll(disable)
   for (uint32_t first = w0; !Q38_FFN_DEBUG_DOWN_ONLY && first < w1;
        first += Q38_FFN_ROWS) {
@@ -1396,16 +1559,16 @@ static NOSTACK void ffn(void) {
       f2.first = first;
     f2_sync_all();
 #if Q38_F2_NORM_HOME
-    f2_norm_batch(result_mixer, w_ffn_norm, gamma, first, w0);
+    f2_norm_batch(X8_MIX, w_ffn_norm, gamma, first, w0);
 #else
-    f2_transfer(f2.residual, result_mixer + first * Q38_D,
+    f2_transfer(f2.residual, X8_MIX + first * Q38_D,
                 Q38_FFN_ROWS * Q38_D * sizeof(__fp16));
     norm_rows_sliced(f2.residual, w_ffn_norm, f2.input, Q38_FFN_ROWS, gamma);
 #endif
     f2_execute();
   }
 #pragma clang loop unroll(disable)
-  for (uint32_t first = Q38_EXEC_START; first < Q38_EXEC_END;
+  for (uint32_t first = w0; !Q38_X8_FFN_UP_ONLY && first < w1;
        first += Q38_FFN_DN_ROWS) {
     f2_layout(1u);
     f2_reset_progress();
@@ -1413,12 +1576,10 @@ static NOSTACK void ffn(void) {
       f2.first = first;
     f2_sync_all();
 #pragma clang loop unroll(disable)
-    for (uint32_t slice = 0u; slice < Q38_FFN_DOWN_SLICES; ++slice) {
+    for (uint32_t slice = 0u; slice < F2_DN_SLICES; ++slice) {
       if (core == 0u) {
         f2.slice = slice;
-        f2.weight_epoch =
-            (first - Q38_EXEC_START) / Q38_FFN_DN_ROWS * Q38_FFN_DOWN_SLICES +
-            slice;
+        f2.weight_epoch = (first - w0) / Q38_FFN_DN_ROWS * F2_DN_SLICES + slice;
         f2.input = f2.x_buf[f2.weight_epoch & 1u];
       }
       f2_slice_reset();

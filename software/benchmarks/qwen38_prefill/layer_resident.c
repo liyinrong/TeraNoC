@@ -80,6 +80,120 @@
 #if Q38_GDN_V2 && !(Q38_FFN_L2 && Q38_KIND != 0)
 #error "GDN v2 needs a GDN fixture and the L2 GEMM engine (Q38_FFN_L2)"
 #endif
+// Batch-major GDN layer (8x8 layer pipeline): each Q38_FFN_ROWS row batch
+// runs in-projection, chunk core, out-projection and FFN in turn; the chunk
+// core carries its FP16 state from batch to batch through L2 (q38_gdn2.c).
+#ifndef Q38_X8_BATCH
+#define Q38_X8_BATCH 0
+#endif
+#if Q38_X8_BATCH &&                                                            \
+    !(Q38_GDN_V2 && !Q38_SCHEDULE_PROBE && Q38_PROBE_PHASE == 0 &&             \
+      Q38_FFN_ROWS % 128u == 0u && Q38_R % Q38_FFN_ROWS == 0u)
+#error "Q38_X8_BATCH needs the GDN v2 full layer and 128-row-aligned batches"
+#endif
+// Layer pipeline (8x8 P2, q38_x8_pipe.c): layer l runs batch-major on domain
+// l % DOMAINS; each batch's output rows reach layer l + 1 through L2, behind a
+// ready flag.
+#ifndef Q38_X8_PIPE
+#define Q38_X8_PIPE 0
+#endif
+#ifndef Q38_X8_LAYERS
+#define Q38_X8_LAYERS 2u
+#endif
+// Debug (numeric): every layer after the first reads a copy of the layer
+// input, published like a real output, so all layers match the one-layer
+// golden.
+#ifndef Q38_X8_PIPE_RELAY
+#define Q38_X8_PIPE_RELAY 0
+#endif
+// Debug (timing): P2 steady state without the fill. Layer l starts at batch
+// R / Q38_FFN_ROWS - 1 - l, its input (l - 1, that batch) taken as published.
+#ifndef Q38_X8_PIPE_SNAP
+#define Q38_X8_PIPE_SNAP 0
+#endif
+// Debug (timing): stop after phase k of each domain's first item (1 in-proj,
+// 2 chunk core, 3 out-proj, 4 FFN).
+#ifndef Q38_X8_STOP_PHASE
+#define Q38_X8_STOP_PHASE 0
+#endif
+// Debug (timing, with SNAP): the first item starts at its FFN (in-proj,
+// chunk core and out-projection skipped; their inputs are garbage anyway).
+#ifndef Q38_X8_START_FFN
+#define Q38_X8_START_FFN 0
+#endif
+// Debug (timing): the FFN runs its up passes only (no down projection); in a
+// layer pipeline only with a debug stop, also in FFN-only schedule probes.
+#ifndef Q38_X8_FFN_UP_ONLY
+#define Q38_X8_FFN_UP_ONLY 0
+#endif
+#if (Q38_X8_START_FFN && !Q38_X8_PIPE_SNAP) ||                                 \
+    (Q38_X8_FFN_UP_ONLY && Q38_X8_PIPE && !Q38_X8_STOP_PHASE) ||               \
+    (Q38_X8_FFN_UP_ONLY && !Q38_X8_PIPE && !Q38_SCHEDULE_PROBE)
+#error "START_FFN is a snapshot knob; FFN_UP_ONLY needs a debug stop or probe"
+#endif
+// Debug (numeric): no layer; a ring of handoffs from domain to domain that
+// checks the flags and the cross-domain DMA (q38_x8_pipe.c).
+#ifndef Q38_X8_PIPE_TEST
+#define Q38_X8_PIPE_TEST 0
+#endif
+// L2 bytes per domain below the top for its scratch (G, GDN buffers, mixer,
+// output rows); 0 = the same addresses in every domain (DOMAIN_L2_HOME
+// separates them, timing-only).
+#ifndef Q38_X8_SPAN
+#define Q38_X8_SPAN 0u
+#endif
+// Deployment L2 layouts (S1 and 8x8 alike): every L2-side burst stays in one
+// 8 KiB L2 row with whole-row plane steps, so the domain fold never splits.
+#ifndef Q38_L2_TILED
+#define Q38_L2_TILED 0
+#endif
+// P2 home builds: the written L2 scratch sits in home segment 0 (below the
+// wrap), and the GDN end state and last layer's output stay in the domain's
+// home instead of the shared result_* buffers below the home base.
+#if Q38_L2_TILED && DOMAINS > 1 && DOMAIN_L2_HOME && Q38_X8_PIPE
+#define Q38_L2_HOME_SLOTS 1
+#define Q38_L2_TOP (DMA_DOMAIN_HOME_BASE + DMA_DOMAIN_HOME_WRAP / DOMAINS)
+#define Q38_RES_SAMPLE_CONTEXT ((__fp16 *)(DMA_DOMAIN_HOME_BASE + 0x210000u))
+#define Q38_RES_CONV ((__fp16 *)(DMA_DOMAIN_HOME_BASE + 0x220000u))
+#define Q38_RES_RECURRENT ((float *)(DMA_DOMAIN_HOME_BASE + 0x240000u))
+#define Q38_RES_HOME_END (DMA_DOMAIN_HOME_BASE + 0x540000u)
+// Conv history rows three L2 rows apart (whole-row plane steps).
+#define Q38_RES_CONV_PITCH 0x6000u
+#else
+#define Q38_L2_HOME_SLOTS 0
+#define Q38_L2_TOP (L2_BASE + L2_SIZE)
+#define Q38_RES_SAMPLE_CONTEXT result_sample_context
+#define Q38_RES_CONV result_conv
+#define Q38_RES_RECURRENT result_recurrent
+#define Q38_RES_CONV_PITCH (Q38_QKVDIM * 2u)
+#endif
+// Pipeline synchronization: 0 = per-(layer, batch) ready flags, core 0 polls;
+// 1 = lock-step, one chip-wide fractal_sync barrier per step (quadrant q runs
+// its k-th item in step k + q; a quadrant without an item that step arrives
+// at once). Default lock-step; the snapshot and debug-stop knobs need flags.
+#ifndef Q38_X8_SYNC
+#define Q38_X8_SYNC (!Q38_X8_PIPE_SNAP && !Q38_X8_STOP_PHASE)
+#endif
+#if Q38_X8_SYNC && (Q38_X8_PIPE_SNAP || Q38_X8_STOP_PHASE)
+#error "The lock-step pipeline has no snapshot or debug stop"
+#endif
+#if Q38_X8_PIPE && !Q38_X8_BATCH
+#error "Q38_X8_PIPE runs the batch-major layer (Q38_X8_BATCH)"
+#endif
+#if Q38_X8_PIPE
+// The current layer's rows: input, mixer (out-projection result) and output.
+static struct {
+  const __fp16 *in;
+  __fp16 *mix, *out;
+} x8_io __attribute__((section(".l1"), aligned(8)));
+#define X8_IN x8_io.in
+#define X8_MIX x8_io.mix
+#define X8_OUT x8_io.out
+#else
+#define X8_IN input_init
+#define X8_MIX result_mixer
+#define X8_OUT result_output
+#endif
 #ifndef Q38_VC_PROFILE
 #define Q38_VC_PROFILE Q38_SCHEDULE_PROBE
 #endif
@@ -1802,6 +1916,65 @@ __asm__(".globl q38_call_on_stack\n"
         "  ret\n");
 static int q38_main(void);
 #endif
+#if Q38_GDN_V2 && Q38_X8_BATCH
+// The batch-major GDN layer: in-projection of batch b+1 after the FFN of
+// batch b, so that a later overlap can move it under the chunk core of b.
+#define X8_BATCHES (Q38_R / Q38_FFN_ROWS)
+// Debug (numeric coverage): run the chunk core in windows of this many rows
+// within each batch, so that a short sequence also runs middle windows (state
+// in and out).
+#ifndef Q38_X8_CHUNK_ROWS
+#define Q38_X8_CHUNK_ROWS Q38_FFN_ROWS
+#endif
+_Static_assert(Q38_FFN_ROWS % Q38_X8_CHUNK_ROWS == 0u &&
+                   Q38_X8_CHUNK_ROWS % 128u == 0u,
+               "Chunk windows divide the batch and keep the z-buffer parity");
+// Core 0's phase stamps per batch: in_proj (since the previous FFN), chunks,
+// out_proj, FFN; printed after the layer.
+#if !Q38_X8_PIPE
+static uint32_t x8_stamp[X8_BATCHES][4] Q38_VC_SMALL;
+static NOSTACK void x8_gdn_layer(void) {
+  const uint32_t core = mempool_get_core_id();
+  uint32_t t0 = mempool_get_timer();
+  gdn2_project(0u, Q38_FFN_ROWS);
+#pragma clang loop unroll(disable)
+  for (uint32_t b = 0u; b < X8_BATCHES; ++b) {
+    const uint32_t w0 = b * Q38_FFN_ROWS, w1 = w0 + Q38_FFN_ROWS;
+    const uint32_t t1 = mempool_get_timer();
+#pragma clang loop unroll(disable)
+    for (uint32_t c0 = w0; c0 < w1; c0 += Q38_X8_CHUNK_ROWS)
+      gdn2_chunks(c0, c0 + Q38_X8_CHUNK_ROWS);
+    const uint32_t t2 = mempool_get_timer();
+    gdn2_output(w0, w1);
+    const uint32_t t3 = mempool_get_timer();
+    ffn_rows(w0, w1);
+    const uint32_t t4 = mempool_get_timer();
+    if (core == 0u) {
+      x8_stamp[b][0] = t1 - t0, x8_stamp[b][1] = t2 - t1;
+      x8_stamp[b][2] = t3 - t2, x8_stamp[b][3] = t4 - t3;
+    }
+    t0 = t4;
+    if (w1 < Q38_R)
+      gdn2_project(w1, w1 + Q38_FFN_ROWS);
+  }
+}
+
+static void x8_report(void) {
+  uint32_t t[4] = {0u};
+  for (uint32_t b = 0u; b < X8_BATCHES; ++b) {
+    printf("[x8_batch] rows=%u in_proj=%u chunks=%u out_proj=%u ffn=%u\n",
+           b * Q38_FFN_ROWS, x8_stamp[b][0], x8_stamp[b][1], x8_stamp[b][2],
+           x8_stamp[b][3]);
+    for (uint32_t i = 0u; i < 4u; ++i)
+      t[i] += x8_stamp[b][i];
+  }
+  printf("[gdn2] in_proj=%u chunks=%u out_proj=%u total=%u ffn=%u\n", t[0],
+         t[1], t[2], t[0] + t[1] + t[2], t[3]);
+}
+#else
+#include "q38_x8_pipe.c"
+#endif
+#endif
 // GVSoC sends a trapping core (e.g. an FP or vector instruction on a scalar
 // agent) back through the boot ROM into main, silently: it then waits in a
 // barrier the others never reach. Initialized data, so loaded with the ELF.
@@ -1950,6 +2123,12 @@ for (uint32_t base = 0u; base < Q38_R; base += Q38_FFN_ROWS) {
 #if Q38_PROBE_PHASE != 2
 #if Q38_KIND == 0
   attention();
+#elif Q38_GDN_V2 && Q38_X8_PIPE && Q38_X8_PIPE_TEST
+  x8_pipe_test();
+#elif Q38_GDN_V2 && Q38_X8_PIPE
+  x8_pipe();
+#elif Q38_GDN_V2 && Q38_X8_BATCH
+  x8_gdn_layer();
 #elif Q38_GDN_V2
   gdn2();
 #if Q38_GDN2_DEBUG_TOKENS || Q38_GDN2_DEBUG_OUT_ROWS || Q38_GDN2_DEBUG_NO_FFN
@@ -1967,7 +2146,7 @@ for (uint32_t base = 0u; base < Q38_R; base += Q38_FFN_ROWS) {
 #endif
 #if Q38_F2_C1
   f2_c1();
-#elif Q38_PROBE_PHASE != 1
+#elif Q38_PROBE_PHASE != 1 && !Q38_X8_BATCH
   ffn();
 #endif
 #if Q38_SCHEDULE_PROBE
@@ -1987,8 +2166,11 @@ for (uint32_t base = 0u; base < Q38_R; base += Q38_FFN_ROWS) {
 #endif
   const uint32_t end = mempool_get_timer();
   const uint32_t cycles = end - start;
-#if Q38_SCHEDULE_PROBE
-  // Numerical tensors are deliberately incomplete in this scheduling run.
+#if Q38_SCHEDULE_PROBE ||                                                      \
+    (Q38_X8_PIPE && (!Q38_X8_PIPE_RELAY || DOMAINS > 1 || Q38_X8_PIPE_SNAP ||  \
+                     Q38_X8_STOP_PHASE || Q38_X8_PIPE_TEST))
+  // Numerical tensors are deliberately incomplete in this scheduling run (or
+  // in a layer pipeline other than the one-domain relay chain).
 #else
 #if Q38_SAMPLED_CHECKS
   // Descriptor order must match the fixture's tensor order: the harness maps
@@ -2069,6 +2251,12 @@ for (uint32_t base = 0u; base < Q38_R; base += Q38_FFN_ROWS) {
   if (core == 0) {
 #if Q38_SCHEDULE_PROBE
     probe_report();
+#endif
+#if Q38_GDN_V2 && Q38_X8_PIPE
+    if (!Q38_X8_PIPE_TEST)
+      x8_pipe_report();
+#elif Q38_GDN_V2 && Q38_X8_BATCH
+    x8_report();
 #endif
 #if Q38_FFN_L2
     printf("[qwen38_ffn_l2] gu_batch=%u down_batch=%u gu_tile=%u "

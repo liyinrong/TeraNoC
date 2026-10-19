@@ -150,6 +150,17 @@ static inline uint32_t fsync_aggr_global(void) {
   return fsync_aggr_of_side((uint32_t)FSYNC_TILE_SIDE);
 }
 
+// Every tile of the chip. In a domain build the DOMAINS logical meshes tile
+// the physical grid as a sqrt(DOMAINS) x sqrt(DOMAINS) square, so the chip is
+// a complete subtree two levels per doubling above fsync_aggr_global(); its
+// response level tells it apart from a domain barrier on the same id.
+static inline uint32_t fsync_aggr_chip(void) {
+  uint32_t side = (uint32_t)FSYNC_TILE_SIDE;
+  for (uint32_t d = DOMAINS; d > 1u; d >>= 2)
+    side <<= 1;
+  return fsync_aggr_of_side(side);
+}
+
 // ---------------------------------------------------------------------------
 // Hardware access. Only available once the shim is mapped into the tile.
 // ---------------------------------------------------------------------------

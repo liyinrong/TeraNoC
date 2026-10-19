@@ -61,7 +61,15 @@ _Static_assert(VIRTUAL_CLUSTER &&FSYNC_TPG_SIDE != 0 &&
 // above it (run_layers.py checks the two are disjoint).
 #define Q38_AV_HEADS_ELEMS (Q38_QH * Q38_R * Q38_HD)
 #define Q38_AV_L2_BYTES ((2u * Q38_AV_HEADS_ELEMS + Q38_R * Q38_QDIM) * 2u)
+#if DOMAINS > 1 && DOMAIN_L2_HOME && Q38_L2_TILED
+// Home builds: the attention scratch in home segment 0 (below the wrap),
+// from its top down: gated context (+ Q/gates), P, the K/V cache, the mixer
+// output (AV_CACHE, AV_MIXER: not result_* below the home base). Row aligned.
+#define AV_L2_END (DMA_DOMAIN_HOME_BASE + DMA_DOMAIN_HOME_WRAP / DOMAINS)
+#define av_gated ((__fp16 *)(AV_L2_END - Q38_AV_L2_BYTES))
+#else
 #define av_gated ((__fp16 *)(L2_BASE + L2_SIZE - Q38_AV_L2_BYTES))
+#endif
 #define av_q (av_gated + Q38_R * Q38_QDIM)
 #define av_gate (av_q + Q38_AV_HEADS_ELEMS)
 _Static_assert(Q38_R *Q38_QDIM * 2u % 16384u == 0u &&
@@ -82,13 +90,29 @@ _Static_assert(Q38_R *Q38_QDIM * 2u % 16384u == 0u &&
 #define Q38_AV_OUT_LAG 1u
 #endif
 #define AV_GK (Q38_QDIM / Q38_AV_OUT_SLICES)
-// Head h's columns of token's gated row.
+// Head h's columns of token's gated row; AV_GPITCH(h): its row pitch.
 #if Q38_AV_OUT_SLICES == 1
 #define AV_GATED(token, h) (av_gated + (token)*Q38_QDIM + (h)*Q38_HD)
+#define AV_GPITCH(h) Q38_QDIM
+#elif Q38_L2_TILED
+// Two slices, the first of whole 8 KiB L2 rows (AV_GK0 columns, as F2_KC),
+// the second the rest (f2.k_last): gated rows stay inside L2 rows.
+#define AV_GK0 4096u
+_Static_assert(
+    Q38_AV_OUT_SLICES == 2u && Q38_QDIM > AV_GK0 && AV_GK0 % Q38_HD == 0u &&
+        8192u % ((Q38_QDIM - AV_GK0) * 2u) == 0u,
+    "Tiled gated context: [4096 | rest] columns, rest divides a row");
+#define AV_GPITCH(h) ((h)*Q38_HD < AV_GK0 ? AV_GK0 : Q38_QDIM - AV_GK0)
+#define AV_GATED(token, h)                                                     \
+  ((h)*Q38_HD < AV_GK0                                                         \
+       ? av_gated + (token)*AV_GK0 + (h)*Q38_HD                                \
+       : av_gated + Q38_R * AV_GK0 + (token) * (Q38_QDIM - AV_GK0) +           \
+             (h)*Q38_HD - AV_GK0)
 #else
 #define AV_GATED(token, h)                                                     \
   (av_gated + ((h)*Q38_HD / AV_GK * Q38_R + (token)) * AV_GK +                 \
    (h)*Q38_HD % AV_GK)
+#define AV_GPITCH(h) AV_GK
 #endif
 _Static_assert(AV_GK *Q38_AV_OUT_SLICES == Q38_QDIM && AV_GK % Q38_HD == 0u,
                "A head's gated columns lie in one out-projection slice");
@@ -133,6 +157,18 @@ _Static_assert(Q38_AV_OUT_F2 ? Q38_FFN_L2 != 0 : Q38_AV_OUT_SLICES == 1u,
 #define AV_PSTRIDE                                                             \
   ((AV_PCOLS / 256u + (Q38_AV_QKV_F2_PAD && AV_PCOLS / 256u % 2u == 0u)) * 256u)
 #define AV_P_L2 (av_gated - Q38_R * AV_PSTRIDE)
+// K/V cache ([R / BK][K | V][KVH] blocks) and mixer output of this path.
+#if DOMAINS > 1 && DOMAIN_L2_HOME && Q38_L2_TILED
+#define AV_CACHE (AV_P_L2 - 2u * Q38_R * Q38_KVH * Q38_HD)
+#define AV_MIXER (AV_CACHE - Q38_R * Q38_D)
+_Static_assert(Q38_R *AV_PSTRIDE * 2u % 8192u == 0u &&
+                   Q38_R * Q38_KVH * Q38_HD * 4u % 8192u == 0u &&
+                   Q38_R * Q38_D * 2u % 8192u == 0u,
+               "Home attention scratch: whole 8 KiB L2 rows");
+#else
+#define AV_CACHE result_cache
+#define AV_MIXER result_mixer
+#endif
 // Q and gates stay in P (head-major): the slabs of head h are 2h and 2h + 1,
 // so the epilogue rotates Q in place and leaves the gates alone.
 #ifndef Q38_AV_QKV_F2_DIRECT
@@ -155,6 +191,31 @@ _Static_assert(!Q38_AV_QKV_F2_DIRECT ||
 _Static_assert(!Q38_AV_QKV_F2 || (Q38_FFN_L2 != 0 && AV_PCOLS % 256u == 0u &&
                                   Q38_KVH * Q38_HD % AV_FNT == 0u),
                "QKV f2: P rows are whole L2 granules and whole panels");
+
+// n bursts of len bytes, dest and src stepping d2 and s2 (dma 2-D). With
+// Q38_L2_TILED, as planes of k bursts (k * the L2 pitch = one 8 KiB L2 row)
+// stepping d2 and s2 from a plane's last burst: the same bytes, each plane in
+// one L2 row once the L2 side starts row aligned. A short last plane goes as
+// its own 2-D walk.
+static inline __attribute__((always_inline)) dma_id_t
+av_dma_rows(void *dst, const void *src, uint32_t len, uint32_t d2, uint32_t s2,
+            uint32_t n, uint32_t k) {
+#if Q38_L2_TILED
+  if (n > k) {
+    const uint32_t full = n / k * k;
+    dma_id_t id = dma_local_memcpy_3d_nonblocking(0u, dst, src, len, d2, s2, k,
+                                                  d2, s2, n / k);
+    if (full == n)
+      return id;
+    return dma_local_memcpy_2d_nonblocking(0u, (char *)dst + full * d2,
+                                           (const char *)src + full * s2, len,
+                                           d2, s2, n - full);
+  }
+#else
+  (void)k;
+#endif
+  return dma_local_memcpy_2d_nonblocking(0u, dst, src, len, d2, s2, n);
+}
 
 // A projection phase: kind 0 is Q/gate/K/V, kind 1 the output projection.
 static struct {
@@ -488,7 +549,7 @@ static dma_id_t av_ship(uint32_t e, uint32_t unit) {
       Q38_MIXER_EXEC_START + b * av.rows + r * Q38_PROJECTION_ROWS;
   const char *const src = av_stage_at(e, unit & 1u, 0u);
   const uint32_t heads = 2u * Q38_QH, half = Q38_KVH * Q38_HD * BK;
-  __fp16 *const block = result_cache + token / BK * 2u * half;
+  __fp16 *const block = AV_CACHE + token / BK * 2u * half;
   if (u >= heads && u < heads + Q38_KVH) {
     // K transposed: Q38_HD runs of Q38_PROJECTION_ROWS keys, BK apart.
     const uint32_t run = Q38_PROJECTION_ROWS * 2u;
@@ -1368,23 +1429,36 @@ static dma_id_t avq_ship(uint32_t e, uint32_t j) {
   const uint32_t u = avq_unit(j), slot = j % AVQ_SLOTS * AVQ_SLOT_BYTES;
   const uint32_t token = Q38_MIXER_EXEC_START + e * Q38_PROJECTION_ROWS;
   const uint32_t heads = 2u * Q38_QH, half = Q38_KVH * Q38_HD * BK;
-  __fp16 *const block = result_cache + token / BK * 2u * half;
+  __fp16 *const block = AV_CACHE + token / BK * 2u * half;
   if (u >= heads && u < heads + Q38_KVH) {
     const uint32_t run = Q38_PROJECTION_ROWS * 2u;
     const uint32_t per = VC_ROW_BYTES / run;
+#if Q38_L2_TILED
+    // One 2-D walk per staging row: its `per` key runs, BK * 2 apart, stay in
+    // one L2 row; the staging rows' 1 KiB plane step is no whole L2 row.
+    dma_id_t id = 0u;
+    for (uint32_t i = 0u; i < Q38_AV_UNIT_BYTES / VC_ROW_BYTES; ++i)
+      id = dma_local_memcpy_2d_nonblocking(
+          0u, block + (u - heads) * Q38_HD * BK + token % BK + i * per * BK,
+          (const char *)avq_at(e, slot + Q38_AV_UNIT_BYTES) +
+              i * VC_GLOBAL_ROW_BYTES,
+          run, BK * 2u, run, per);
+    return id;
+#else
     return dma_local_memcpy_3d_nonblocking(
         0u, block + (u - heads) * Q38_HD * BK + token % BK,
         avq_at(e, slot + Q38_AV_UNIT_BYTES), run, BK * 2u, run, per, BK * 2u,
         VC_GLOBAL_ROW_BYTES - (per - 1u) * run,
         Q38_AV_UNIT_BYTES / VC_ROW_BYTES);
+#endif
   }
   __fp16 *const dst =
       u < heads
           ? (u & 1u ? av_gate : av_q) + ((u / 2u) * AV_QG_ROWS + token) * Q38_HD
           : block + half + ((u - heads - Q38_KVH) * BK + token % BK) * Q38_HD;
-  return dma_local_memcpy_2d_nonblocking(0u, dst, avq_at(e, slot), Q38_HD * 2u,
-                                         Q38_HD * 2u, VC_GLOBAL_ROW_BYTES,
-                                         Q38_PROJECTION_ROWS);
+  return av_dma_rows(dst, avq_at(e, slot), Q38_HD * 2u, Q38_HD * 2u,
+                     VC_GLOBAL_ROW_BYTES, Q38_PROJECTION_ROWS,
+                     8192u / (Q38_HD * 2u));
 }
 
 static void avq_wait(dma_id_t id) {
@@ -1424,10 +1498,10 @@ static NOSTACK __attribute__((noinline)) void avq_coordinator(void) {
       while (loaded[t] < AVQ_UNITS && loaded[t] < shipped[t] + AVQ_SLOTS) {
         const uint32_t j = loaded[t]++;
 #if Q38_AV_QKV_F2_HEADS
-        id = dma_local_memcpy_2d_nonblocking(
-            0u, avq_at(e, j % AVQ_SLOTS * AVQ_SLOT_BYTES),
-            AV_P_L2 + (avq_unit(j) * Q38_R + token) * Q38_HD, Q38_HD * 2u,
-            VC_GLOBAL_ROW_BYTES, Q38_HD * 2u, Q38_PROJECTION_ROWS);
+        id = av_dma_rows(avq_at(e, j % AVQ_SLOTS * AVQ_SLOT_BYTES),
+                         AV_P_L2 + (avq_unit(j) * Q38_R + token) * Q38_HD,
+                         Q38_HD * 2u, VC_GLOBAL_ROW_BYTES, Q38_HD * 2u,
+                         Q38_PROJECTION_ROWS, 8192u / (Q38_HD * 2u));
 #else
         id = dma_local_memcpy_2d_nonblocking(
             0u, avq_at(e, j % AVQ_SLOTS * AVQ_SLOT_BYTES),
@@ -1536,6 +1610,9 @@ static NOSTACK void av_qkv(void) {
 #else
     f2.g_out = AV_P_L2, f2.g_kc = AV_PSTRIDE, f2.g_rows = Q38_R;
 #endif
+#if Q38_L2_TILED
+    f2.g_main = ~0u; // one pitch
+#endif
   }
   if (tnc_is_tile_agent())
     f2_progress[mempool_get_redmule_id()].step_done = 0u;
@@ -1597,7 +1674,7 @@ static NOSTACK void av_qkv(void) {
 
 #if Q38_AV_OUT_F2
 // Out-projection with the residual on the f2 down pass, K-sliced (see
-// gdn2_output): mixer = x + gated W_out, to result_mixer. Nothing ran f2
+// gdn2_output): mixer = x + gated W_out, to AV_MIXER. Nothing ran f2
 // before it in this layer, so its queue counters start here (as in ffn).
 static NOSTACK void av_out(void) {
   const uint32_t core = mempool_get_core_id();
@@ -1606,10 +1683,16 @@ static NOSTACK void av_out(void) {
   if (core == 0u) {
     f2.k_dn = AV_GK, f2.k_full = Q38_QDIM, f2.n_dn = Q38_D;
     f2.rows_dn = Q38_FFN_DN_ROWS, f2.slices = Q38_AV_OUT_SLICES;
+#if Q38_L2_TILED && Q38_AV_OUT_SLICES > 1
+    // The gated context's slices (AV_GATED): whole L2 rows, then the rest.
+    f2.k_dn = AV_GK0, f2.k_last = Q38_QDIM - AV_GK0;
+#elif Q38_L2_TILED
+    f2.k_last = 0u;
+#endif
     f2.dn_lag = Q38_AV_OUT_LAG;
     f2.end = Q38_MIXER_EXEC_END;
     f2.w_dn = w_out, f2.dn_in = av_gated, f2.dn_rows = Q38_R;
-    f2.res_src = input_init, f2.dn_out = result_mixer;
+    f2.res_src = input_init, f2.dn_out = AV_MIXER;
     f2.q_base = 0u, f2.peak = 0u;
 #if Q38_FFN_STAMPS
     f2_nst = 0u; // .l1 powers up undefined
@@ -1665,7 +1748,7 @@ static NOSTACK void av_out(void) {
     transfer(av.x, av_gated + base * Q38_QDIM, av.rows * Q38_QDIM * 2);
     sync_all();
     av_block(b);
-    transfer(result_mixer + base * Q38_D, av.res, av.rows * Q38_D * 2);
+    transfer(AV_MIXER + base * Q38_D, av.res, av.rows * Q38_D * 2);
   }
 }
 #endif
@@ -1760,15 +1843,16 @@ static NOSTACK void av_query_finish(uint32_t base) {
       if (Q38_HD * 2u <= VC_ROW_BYTES)
         // `per` rows per window row.
         id = dma_local_memcpy_3d_nonblocking(
-            0u, dst, src, Q38_HD * 2u, AV_GK * 2u, Q38_HD * 2u, per, AV_GK * 2u,
-            VC_GLOBAL_ROW_BYTES - (per - 1u) * Q38_HD * 2u,
+            0u, dst, src, Q38_HD * 2u, AV_GPITCH(h) * 2u, Q38_HD * 2u, per,
+            AV_GPITCH(h) * 2u, VC_GLOBAL_ROW_BYTES - (per - 1u) * Q38_HD * 2u,
             Q38_PROJECTION_ROWS / per);
       else
         // A row over several window rows.
         id = dma_local_memcpy_3d_nonblocking(
             0u, dst, src, VC_ROW_BYTES, VC_ROW_BYTES, VC_GLOBAL_ROW_BYTES,
             Q38_HD * 2u / VC_ROW_BYTES,
-            AV_GK * 2u - (Q38_HD * 2u / VC_ROW_BYTES - 1u) * VC_ROW_BYTES,
+            AV_GPITCH(h) * 2u -
+                (Q38_HD * 2u / VC_ROW_BYTES - 1u) * VC_ROW_BYTES,
             VC_GLOBAL_ROW_BYTES, Q38_PROJECTION_ROWS);
     }
     while (id && !dma_local_done_id(0u, id))
