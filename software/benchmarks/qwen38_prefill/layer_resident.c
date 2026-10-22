@@ -2130,6 +2130,16 @@ int main(void) {
     q38_wait_sidecar();
 #endif
   mempool_barrier_init(core);
+#if DMA_DOMAIN_CHECK_SPLIT
+  // The declared below-base write targets: the layer's result buffers.
+  if (core == 0u) {
+    dma_check_wr_window(0u, result_output, sizeof(result_output));
+    dma_check_wr_window(1u, result_mixer, sizeof(result_mixer));
+#if Q38_KIND == 0
+    dma_check_wr_window(2u, result_cache, sizeof(result_cache));
+#endif
+  }
+#endif
 #if Q38_ATTN_VC && Q38_AV_PROFILE && Q38_KIND == 0
   av_profile_init();
 #if Q38_ATTN_VC_SWEEP

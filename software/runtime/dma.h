@@ -173,6 +173,34 @@ static __attribute__((noinline)) void dma_check_ro(uint32_t c, uint32_t a2,
 // the program image, whichever ends higher: a home walk that wraps onto the
 // image overwrites code (window C hang, fold carry errors; 10-19).
 extern uint32_t volatile dma_check_wr_hits;
+#if defined(DMA_DOMAIN_CHECK_SPLIT) && DMA_DOMAIN_CHECK_SPLIT
+// DMA_DOMAIN_CHECK_SPLIT: such a write whose whole extent lies inside a window
+// the program declared (dma_check_wr_window) counts in dma_check_wr_inside
+// instead; dma_check_wr_hits then counts the rest, and the gate is 0.
+#define DMA_CHECK_WR_WINDOWS 4u
+extern uint32_t volatile dma_check_wr_inside;
+extern uint32_t dma_check_wr_win[DMA_CHECK_WR_WINDOWS][2];
+static inline uint32_t dma_check_wr_declared(uint32_t c, uint32_t a2,
+                                             uint32_t a3, uint32_t len) {
+  uint32_t lo = c, hi = c;
+  const uint32_t x[3] = {c + a2, c + a3, c + a2 + a3};
+  for (uint32_t i = 0u; i < 3u; ++i) {
+    lo = x[i] < lo ? x[i] : lo;
+    hi = x[i] > hi ? x[i] : hi;
+  }
+  for (uint32_t w = 0u; w < DMA_CHECK_WR_WINDOWS; ++w)
+    if (lo >= dma_check_wr_win[w][0] && hi + len <= dma_check_wr_win[w][1])
+      return 1u;
+  return 0u;
+}
+// Declare window w as [base, base + bytes): each domain's core 0, after
+// mempool_barrier_init and before any DMA.
+static inline void dma_check_wr_window(uint32_t w, const void *base,
+                                       uint32_t bytes) {
+  dma_check_wr_win[w][0] = (uint32_t)base;
+  dma_check_wr_win[w][1] = (uint32_t)base + bytes;
+}
+#endif
 static __attribute__((noinline)) void dma_check_wr(uint32_t c, uint32_t a2,
                                                    uint32_t a3, uint32_t len) {
   extern char __l2_bss_end[];
@@ -181,6 +209,12 @@ static __attribute__((noinline)) void dma_check_wr(uint32_t c, uint32_t a2,
       img > DMA_DOMAIN_HOME_BASE ? img : (uint32_t)DMA_DOMAIN_HOME_BASE;
   if (!dma_l2_low_overlap(c, a2, a3, len, end))
     return;
+#if defined(DMA_DOMAIN_CHECK_SPLIT) && DMA_DOMAIN_CHECK_SPLIT
+  if (dma_check_wr_declared(c, a2, a3, len)) {
+    __atomic_fetch_add(&dma_check_wr_inside, 1u, __ATOMIC_RELAXED);
+    return;
+  }
+#endif
   if (__atomic_fetch_add(&dma_check_wr_hits, 1u, __ATOMIC_RELAXED) < 8u) {
     dma_check_word('W', c);
     dma_check_word('M', mempool_get_domain_id());
@@ -415,6 +449,14 @@ dma_domain_home_walk(uint32_t stream, dma_home_walk_t *w, uint32_t r3) {
 #endif
 #if DMA_RO_PROBE && !DMA_DOMAIN_CHECK
 #error "DMA_RO_PROBE is a control for DMA_DOMAIN_CHECK: set it"
+#endif
+// DMA_DOMAIN_CHECK_SPLIT (CHECK builds): split the below-base write hits into
+// inside the program's declared windows and outside them (dma_check_wr).
+#ifndef DMA_DOMAIN_CHECK_SPLIT
+#define DMA_DOMAIN_CHECK_SPLIT 0
+#endif
+#if DMA_DOMAIN_CHECK_SPLIT && !DMA_DOMAIN_CHECK
+#error "DMA_DOMAIN_CHECK_SPLIT splits DMA_DOMAIN_CHECK's hits: set it"
 #endif
 // DMA_FOLD_PROFILE (debug, needs it): per call site (the hook's pc), calls,
 // pieces (sum, min, max) and fold cycles, per domain; domain 0 prints every

@@ -47,6 +47,14 @@ static uint32_t volatile domain_ro_hits[DOMAINS]
 uint32_t volatile dma_check_wr_hits __attribute__((section(".l1")));
 static uint32_t volatile domain_wr_hits[DOMAINS]
     __attribute__((section(".l1")));
+#if DMA_DOMAIN_CHECK_SPLIT
+// Those inside the program's declared windows (dma.h), likewise; the windows.
+uint32_t volatile dma_check_wr_inside __attribute__((section(".l1")));
+static uint32_t volatile domain_wr_inside[DOMAINS]
+    __attribute__((section(".l1")));
+uint32_t dma_check_wr_win[DMA_CHECK_WR_WINDOWS][2]
+    __attribute__((section(".l1")));
+#endif
 #endif
 #if DOMAIN_L2_EXACT
 // Descriptors the exact fold added by splitting (dma_fold_exact.h), per
@@ -106,6 +114,9 @@ int domain_exit(int ret) {
 #if DMA_DOMAIN_CHECK
   *domain0_alias(&domain_ro_hits[me]) = dma_check_ro_hits;
   *domain0_alias(&domain_wr_hits[me]) = dma_check_wr_hits;
+#if DMA_DOMAIN_CHECK_SPLIT
+  *domain0_alias(&domain_wr_inside[me]) = dma_check_wr_inside;
+#endif
 #endif
 #if DMA_FOLD_PROFILE
   for (uint32_t i = 0; i < DMA_FOLD_PROF_SITES; ++i) {
@@ -139,6 +150,13 @@ int domain_exit(int ret) {
   for (uint32_t d = 0; d < DOMAINS; ++d)
     printf("[domain] below-base writes: domain %u hits %u\n", d,
            domain_wr_hits[d]);
+#if DMA_DOMAIN_CHECK_SPLIT
+  // With the split, hits above are the writes outside the declared windows.
+  for (uint32_t d = 0; d < DOMAINS; ++d)
+    printf("[domain] below-base writes inside declared windows: domain %u "
+           "hits %u\n",
+           d, domain_wr_inside[d]);
+#endif
 #endif
 #if DMA_FOLD_PROFILE
   for (uint32_t d = 0; d < DOMAINS; ++d) {
@@ -165,6 +183,11 @@ void mempool_barrier_init(uint32_t core_id) {
     dma_check_hits = 0u;
     dma_check_ro_hits = 0u;
     dma_check_wr_hits = 0u;
+#if DMA_DOMAIN_CHECK_SPLIT
+    dma_check_wr_inside = 0u;
+    for (uint32_t w = 0u; w < DMA_CHECK_WR_WINDOWS; ++w)
+      dma_check_wr_win[w][0] = dma_check_wr_win[w][1] = 0u;
+#endif
 #if DOMAIN_L2_EXACT
     {
       // The fold slot stacks must be 16-B aligned: Snitch traps on a
