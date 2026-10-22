@@ -50,6 +50,13 @@ _Static_assert(Q38_NK == NUM_GROUPS && Q38_NV == 3u * Q38_NK &&
 #define Q38_GDN2_OUT_SLICES 2u
 #endif
 #define G2_OK (Q38_GDIM / Q38_GDN2_OUT_SLICES)
+// Q38_G2_O_PAD (layer_resident.c): O rows at one 8 KiB L2 row each.
+#if G2_O_PADDED
+#define G2_OPITCH (8192u / sizeof(__fp16))
+#else
+#define G2_OPITCH G2_OK
+#endif
+#define G2_O_BYTES (Q38_GDN2_OUT_SLICES * Q38_R * G2_OPITCH * 2u)
 // Out-projection: three weight slots (engines meet one step behind).
 #ifndef Q38_GDN2_OUT_LAG
 #define Q38_GDN2_OUT_LAG 1u
@@ -110,8 +117,13 @@ _Static_assert(G2_OK *Q38_GDN2_OUT_SLICES == Q38_GDIM &&
 #define G2_L2_TOP (Q38_L2_TOP - Q38_GDN2_L2_GAP)
 #endif
 #define G2_P_L2 ((__fp16 *)(G2_L2_TOP - Q38_R * G2_PSTRIDE * 2u))
-#define G2_O_L2 ((__fp16 *)((uint32_t)G2_P_L2 - Q38_R * Q38_GDIM * 2u))
-#define G2_CTX_L2 ((__fp16 *)((uint32_t)G2_O_L2 - Q38_NV * Q38_R * Q38_VD * 2u))
+#if G2_O_PADDED && Q38_L2_HOME_SLOTS && !Q38_GDN2_DEBUG_CTX
+#define G2_CTX_BYTES 0u
+#else
+#define G2_CTX_BYTES (Q38_NV * Q38_R * Q38_VD * 2u)
+#endif
+#define G2_O_L2 ((__fp16 *)((uint32_t)G2_P_L2 - G2_O_BYTES))
+#define G2_CTX_L2 ((__fp16 *)((uint32_t)G2_O_L2 - G2_CTX_BYTES))
 // Debug (numeric, chunk core only): gdn-design/mkpload.py writes P's first
 // rows over w_out, which a Q38_GDN2_DEBUG_TOKENS run never reads.
 #ifndef Q38_GDN2_DEBUG_PLOAD
@@ -151,6 +163,9 @@ _Static_assert((G2_OK * 2u & (0u - G2_OK * 2u)) < 8192u &&
                    G2_C / 4u % G2_OSTEP == 0u,
                "O row classes divide a tile's rows");
 #endif
+_Static_assert(!G2_O_PADDED || (Q38_L2_TILED && G2_OK <= G2_OPITCH &&
+                                (G2_OK * 2u) % VC_TILE_ROW_BYTES == 0u),
+               "Padded O: tiled layouts, a slice's row inside one L2 row");
 
 // Group-window arena: one instance per group (vc_group_window). RedMulE uses
 // these pointers; Spatz, scalar code and the DMA use the global alias, row by
@@ -218,12 +233,15 @@ typedef struct {
   __fp16 w[G2_H][G2_C][Q38_KD] G2_ROW;         // W
   float tmp[12][G2_C] G2_ROW;                  // per compute core
   uint32_t ntask[2][VC_ROW_BYTES / 8u] G2_ROW; // [b][0]: next task of pre[b]
-#if Q38_SAMPLED_CHECKS && !Q38_GDN2_DEBUG_CTX
+#if Q38_SAMPLED_CHECKS && !Q38_GDN2_DEBUG_CTX &&                               \
+    !(Q38_G2_ITEM_KEEP && Q38_X8_BATCH)
   uint32_t runs[Q38_RUNS_CONTEXT] G2_ROW; // run_start_context, in L1
 #endif
   float lt[3][4][32] G2_ROW; // per compute core, in its own tile: [core][tile]
+#if !(Q38_G2_ITEM_KEEP && Q38_X8_BATCH)
   __fp16 conv[4][G2_CH] G2_ROW; // conv taps of this group
   __fp16 gamma[Q38_VD] G2_ROW;  // gated-norm scale
+#endif
   // Window rows whose 128-byte tile stripes hold each tile's g2_tile_t.
   uint8_t tile_rows[G2_TILE_ROWS][VC_ROW_BYTES] G2_ROW;
 } g2_group_t;
@@ -264,6 +282,52 @@ static inline void *g2_glob(const void *window) {
                   g2_hart() / NUM_CORES_PER_GROUP * VC_ROW_BYTES);
 }
 #define G2G(ptr) ((__typeof__(ptr))g2_glob(ptr))
+
+#if Q38_G2_ITEM_KEEP && Q38_X8_BATCH
+// A separate group-window tail, above every f2 and GDN scratch allocation.
+// The parameters leave the scratch struct so its tile rows also fit below
+// this tail. All scratch pointers still derive from that struct's members.
+typedef struct {
+  __fp16 conv[4][G2_CH] G2_ROW;
+  __fp16 gamma[Q38_VD] G2_ROW;
+#if Q38_SAMPLED_CHECKS && !Q38_GDN2_DEBUG_CTX
+  uint32_t runs[Q38_RUNS_CONTEXT]; // shares gamma's row (256 + 256 B)
+#endif
+} g2_item_t;
+_Static_assert(sizeof(g2_item_t) % VC_ROW_BYTES == 0u,
+               "Resident parameters occupy whole group-window rows");
+#if Q38_SAMPLED_CHECKS && !Q38_GDN2_DEBUG_CTX
+_Static_assert(offsetof(g2_item_t, runs) % VC_ROW_BYTES +
+                       sizeof(((g2_item_t *)0)->runs) <=
+                   VC_ROW_BYTES,
+               "The context-run DMA stays inside its group stripe");
+#endif
+static uint32_t g2_item_limit(void) {
+  return (uint32_t)&__heap_end - sizeof(g2_item_t) * NUM_GROUPS;
+}
+static g2_item_t *g2_item(void) {
+  return (g2_item_t *)vc_group_window(g2_item_limit());
+}
+#define G2P (g2_item())
+// One word of existing owner-group control padding, in the coordinator's
+// tile. f2 resets only named fields; no f2 phase reads or writes this padding.
+static volatile uint32_t *g2_item_ready(void) {
+  return &f2_down[mempool_get_group_id()].pad[0];
+}
+// All cores call at the layer boundary; only the owner coordinator writes.
+// L1 is not zero-initialized. Reset even when a snapshot starts mid-layer.
+static NOSTACK void g2_item_begin(void) {
+  if (mempool_is_group_coordinator()) {
+    volatile uint32_t *const ready = g2_item_ready();
+    *ready = 0u;
+    // Order this write before the same core later re-reads the flag.
+    __sync_synchronize();
+  }
+}
+#else
+#define G2P G2
+#endif
+
 // The tile-window alias of whole group-window rows: the requester's own
 // 128-byte stripe of each row, contiguous in the tile window (vc.h).
 static inline void *g2_tw(const void *window) {
@@ -401,28 +465,38 @@ static void g2_job_wait(uint8_t target) {
 
 // One-time: this group's conv taps and the gated-norm scale.
 static NOSTACK void g2_load_params(void) {
+#if Q38_G2_ITEM_KEEP && Q38_X8_BATCH
+  volatile uint32_t *const ready = g2_item_ready();
+  if (*ready)
+    return;
+#else
   G2_SELF;
+#endif
   const uint32_t g = mempool_get_group_id(), stride = Q38_QKVDIM * 2u;
   dma_id_t id = 0u;
   for (uint32_t tap = 0; tap < 4u; ++tap) {
-    id = g2_dma(&G2->conv[tap][0], Q38_KD * 2u,
+    id = g2_dma(&G2P->conv[tap][0], Q38_KD * 2u,
                 w_conv + tap * Q38_QKVDIM + G2_COL_Q(g), Q38_KD * 2u, stride,
                 1u, 0u);
-    id = g2_dma(&G2->conv[tap][Q38_KD], Q38_KD * 2u,
+    id = g2_dma(&G2P->conv[tap][Q38_KD], Q38_KD * 2u,
                 w_conv + tap * Q38_QKVDIM + G2_COL_K(g), Q38_KD * 2u, stride,
                 1u, 0u);
     for (uint32_t h = 0u; h < G2_H; ++h)
-      id = g2_dma(&G2->conv[tap][2u * Q38_KD + h * Q38_VD], Q38_VD * 2u,
+      id = g2_dma(&G2P->conv[tap][2u * Q38_KD + h * Q38_VD], Q38_VD * 2u,
                   w_conv + tap * Q38_QKVDIM + G2_COL_V(g) + h * Q38_VD,
                   Q38_VD * 2u, stride, 1u, 0u);
   }
-  id = g2_dma(&G2->gamma[0], Q38_VD * 2u, w_gated_norm, Q38_VD * 2u,
+  id = g2_dma(&G2P->gamma[0], Q38_VD * 2u, w_gated_norm, Q38_VD * 2u,
               Q38_VD * 2u, 1u, 0u);
 #if Q38_SAMPLED_CHECKS && !Q38_GDN2_DEBUG_CTX
-  id = dma_local_memcpy_nonblocking(0u, G2G(&G2->runs[0]), run_start_context,
-                                    sizeof(G2->runs));
+  id = dma_local_memcpy_nonblocking(0u, G2G(&G2P->runs[0]), run_start_context,
+                                    sizeof(G2P->runs));
 #endif
   g2_dma_wait(id);
+#if Q38_G2_ITEM_KEEP && Q38_X8_BATCH
+  *ready = 1u;
+  __sync_synchronize(); // completed DMA and flag precede the first g2_sync
+#endif
 }
 
 // The raw projected rows of the chunk at t0 into raw, with 3 history rows
@@ -436,12 +510,29 @@ _Static_assert(G2_C % G2_AB_ROWS == 0u &&
                            (G2_AB_ROWS * sizeof(((g2_raw_t *)0)->ab[0])) ==
                        0u,
                "a|b blocks are whole L2 rows inside window rows");
+// Blocks one window row apart (G2_AB_PAIR rows) pair up as the two planes of
+// one descriptor: both sides then step whole rows.
+#define G2_AB_PAIR (VC_ROW_BYTES / (8u * sizeof(__fp16)))
+_Static_assert(G2_C % (2u * G2_AB_PAIR) == 0u &&
+                   G2_AB_PAIR % G2_AB_ROWS == 0u &&
+                   G2_AB_PAIR * G2_PTAIL * 2u % 8192u == 0u,
+               "a|b block pairs: whole window rows and whole L2 rows");
 static dma_id_t g2_load_ab(__fp16 *win, uint32_t t0, uint32_t col) {
   dma_id_t id = 0u;
-  for (uint32_t r = 0u; r < G2_C; r += G2_AB_ROWS)
-    id = dma_local_memcpy_2d_nonblocking(
-        0u, G2G(win + r * 8u), G2_PAT(t0 + r, col), 6u, 8u * sizeof(__fp16),
-        G2_PTAIL * 2u, G2_AB_ROWS);
+  const uint32_t l1_rows = (G2_AB_ROWS - 1u) * 8u * sizeof(__fp16);
+  const uint32_t l2_rows = (G2_AB_ROWS - 1u) * G2_PTAIL * 2u;
+  for (uint32_t p = 0u; p < G2_C; p += 2u * G2_AB_PAIR)
+    for (uint32_t r = p; r < p + G2_AB_PAIR; r += G2_AB_ROWS) {
+      char *const l1 = (char *)G2G(win + r * 8u);
+      const char *const l2 = (const char *)G2_PAT(t0 + r, col);
+      const uint32_t l1_step =
+          (uint32_t)G2G(win + (r + G2_AB_PAIR) * 8u) - (uint32_t)l1;
+      const uint32_t l2_step =
+          (uint32_t)G2_PAT(t0 + r + G2_AB_PAIR, col) - (uint32_t)l2;
+      id = dma_local_memcpy_3d_nonblocking(
+          0u, l1, l2, 6u, 8u * sizeof(__fp16), G2_PTAIL * 2u, G2_AB_ROWS,
+          l1_step - l1_rows, l2_step - l2_rows, 2u);
+    }
   return id;
 }
 
@@ -550,6 +641,7 @@ static NOSTACK dma_id_t g2_load_z(uint32_t t0) {
   const uint32_t n1 = Q38_MIN(G2_ZPIECES, (G2_PSLICE - col % G2_PSLICE) * 2u /
                                               VC_TILE_ROW_BYTES);
   dma_id_t id = 0u;
+#pragma clang loop unroll(disable)
   for (uint32_t q = 0u; q < NUM_TILES_PER_GROUP; ++q) {
     const uint32_t row = t0 + q * (G2_C / 4u);
     id = g2_dma_gzp((char *)G2_PAT(row, col), G2_PSLICE * 2u, 1u, b, q, 0u, 0u,
@@ -584,7 +676,17 @@ static NOSTACK dma_id_t g2_store(uint32_t t0) {
   G2_SELF;
   const uint32_t g = mempool_get_group_id(), b = t0 / G2_C & 1u;
   dma_id_t id = 0u;
-#if Q38_L2_TILED
+#if G2_O_PADDED
+// One L2 row per O row: a tile's 16 rows, whole-row planes.
+#pragma clang loop unroll(disable)
+  for (uint32_t q = 0u; q < NUM_TILES_PER_GROUP; ++q)
+    id = g2_dma_gzp(
+        (char *)(G2_O_L2 +
+                 (g * G2_H * Q38_VD / G2_OK * Q38_R + t0 + q * (G2_C / 4u)) *
+                     G2_OPITCH +
+                 g * G2_H * Q38_VD % G2_OK),
+        G2_OPITCH * 2u, 1u, b, q, 1u, 0u, G2_C / 4u, 0u, G2_ZPIECES);
+#elif Q38_L2_TILED
   // O rows repeat their place in an 8 KiB L2 row every G2_OSTEP rows: one
   // class of rows per descriptor (two where its rows cross an L2 row).
   for (uint32_t q = 0u; q < NUM_TILES_PER_GROUP; ++q) {
@@ -617,7 +719,7 @@ static NOSTACK dma_id_t g2_store(uint32_t t0) {
   }
 #elif Q38_SAMPLED_CHECKS
   // Runs over [head][row][VD], split at quarter (tile) and row boundaries.
-  const uint32_t *const runs = G2G(&G2->runs[0]);
+  const uint32_t *const runs = G2G(&G2P->runs[0]);
   for (uint32_t i = 0u; i < Q38_RUNS_CONTEXT; ++i)
     for (uint32_t p = runs[i]; p < runs[i] + Q38_RUNLEN_CONTEXT;) {
       const uint32_t head = p / (Q38_R * Q38_VD), row = p / Q38_VD % Q38_R;
@@ -666,7 +768,7 @@ _Static_assert(G2_SC_BYTES % VC_TILE_ROW_BYTES == 0u &&
 _Static_assert(Q38_GDN2_L2_GAP == 0u, "The pipeline spans start at G");
 #define X8_DOM_TOP(dom)                                                        \
   (Q38_L2_TOP - (dom)*Q38_X8_SPAN - Q38_R * Q38_I * 2u -                       \
-   Q38_R * (G2_PSTRIDE + Q38_GDIM + Q38_NV * Q38_VD) * 2u -                    \
+   Q38_R * G2_PSTRIDE * 2u - G2_O_BYTES - G2_CTX_BYTES -                       \
    NUM_GROUPS * NUM_TILES_PER_GROUP * G2_SC_BYTES)
 #define X8_MIX_L2(dom) ((__fp16 *)(X8_DOM_TOP(dom) - Q38_R * Q38_D * 2u))
 #define X8_ACT_L2(dom) ((__fp16 *)(X8_DOM_TOP(dom) - 2u * Q38_R * Q38_D * 2u))
@@ -1011,7 +1113,9 @@ static const __fp16 *g2_raw(const g2_raw_t *raw, uint32_t c, uint32_t r) {
 // sums of exact FP16 products, rounded to FP16. Each raw row is loaded once.
 G2_INL void g2_conv_block(g2_pre_t *pre, const g2_raw_t *raw, uint32_t blk,
                           uint32_t r0, uint32_t n, __fp16 *local) {
+#if !(Q38_G2_ITEM_KEEP && Q38_X8_BATCH)
   G2_SELF;
+#endif
   const float zh = llm_f16box(0.0f), one = 1.0f;
   const float one16 = llm_f16box(1.0f), two16 = llm_f16box(2.0f);
   (void)one;
@@ -1019,10 +1123,10 @@ G2_INL void g2_conv_block(g2_pre_t *pre, const g2_raw_t *raw, uint32_t blk,
   (void)two16;
   const uint32_t c = 64u * blk;
   asm volatile("vsetvli zero, %0, e16, m2, ta, ma" : : "r"(64));
-  asm volatile("vle16.v v24, (%0)" : : "r"(G2G(&G2->conv[0][c])) : "memory");
-  asm volatile("vle16.v v26, (%0)" : : "r"(G2G(&G2->conv[1][c])) : "memory");
-  asm volatile("vle16.v v28, (%0)" : : "r"(G2G(&G2->conv[2][c])) : "memory");
-  asm volatile("vle16.v v30, (%0)" : : "r"(G2G(&G2->conv[3][c])) : "memory");
+  asm volatile("vle16.v v24, (%0)" : : "r"(G2G(&G2P->conv[0][c])) : "memory");
+  asm volatile("vle16.v v26, (%0)" : : "r"(G2G(&G2P->conv[1][c])) : "memory");
+  asm volatile("vle16.v v28, (%0)" : : "r"(G2G(&G2P->conv[2][c])) : "memory");
+  asm volatile("vle16.v v30, (%0)" : : "r"(G2G(&G2P->conv[3][c])) : "memory");
   asm volatile("vle16.v v0, (%0)" : : "r"(G2G(g2_raw(raw, c, r0))) : "memory");
   asm volatile("vle16.v v2, (%0)"
                :
@@ -1625,6 +1729,7 @@ static NOSTACK void g2_rm_wu(g2_pre_t *pre) {
   G2_SELF;
   const uint32_t q = g2_tile();
   uint8_t last = 0u;
+#pragma clang loop unroll(disable)
   for (uint32_t h = 0u; h < G2_H; ++h)
     last = g2_job(G2->tb[h], pre->vq[h][q], G2L->u[h], G2_C, G2_C, G2_QW, 0u);
   if (q < G2_H)
@@ -1636,6 +1741,7 @@ static NOSTACK void g2_rm_wu(g2_pre_t *pre) {
 static NOSTACK void g2_rm_uo(void) {
   G2_SELF;
   uint8_t last = 0u;
+#pragma clang loop unroll(disable)
   for (uint32_t h = 0u; h < G2_H; ++h) {
     g2_job(G2->w[h], G2L->s[h], G2L->u[h], G2_C, Q38_KD, G2_QW, 1u);
     g2_job(G2->lq[h], G2L->s[h], G2L->o[h], G2_C, Q38_KD, G2_QW, 0u);
@@ -1649,6 +1755,7 @@ static NOSTACK void g2_rm_uo(void) {
 static NOSTACK uint8_t g2_rm_state(g2_pre_t *pre) {
   G2_SELF;
   uint8_t last = 0u;
+#pragma clang loop unroll(disable)
   for (uint32_t h = 0u; h < G2_H; ++h)
     last = g2_job(pre->kt, G2L->u[h], G2L->s[h], Q38_KD, G2_C, G2_QW, 1u);
   return last;
@@ -1665,8 +1772,13 @@ static NOSTACK void gdn2_layout(void) {
       f2_align(Q38_MIN((uint32_t)&stage, (uint32_t)&weights[0][0]));
   const uint32_t rows = (sizeof(g2_group_t) + VC_ROW_BYTES - 1u) / VC_ROW_BYTES;
   const uint32_t end = p + rows * VC_GLOBAL_ROW_BYTES;
+#if Q38_G2_ITEM_KEEP && Q38_X8_BATCH
+  if (end > g2_item_limit())
+    q38_fatal("[qwen38_fatal] gdn2 over params=", end - g2_item_limit());
+#else
   if (end > (uint32_t)&__heap_end)
     q38_fatal("[qwen38_fatal] gdn2 over L1=", end - (uint32_t)&__heap_end);
+#endif
 #if Q38_X8_PIPE && Q38_SAMPLED_CHECKS && !DOMAIN_L2_HOME
   // The lowest scratch row must clear the fixture (gold_sample_recurrent is
   // its last tensor). Not with DOMAIN_L2_HOME: its folded DMA aliases the
@@ -1738,6 +1850,9 @@ static NOSTACK void gdn2_output(G2_WIN_VOID) {
     f2.dn_lag = Q38_GDN2_OUT_LAG;
     f2.end = w1;
     f2.w_dn = w_out, f2.dn_in = G2_O_L2, f2.dn_rows = Q38_R;
+#if G2_O_PADDED
+    f2.dn_pitch = G2_OPITCH;
+#endif
     f2.res_src = X8_IN, f2.dn_out = X8_MIX;
 #if Q38_FFN_STAMPS
     f2_nst = 0u; // .l1 powers up undefined
@@ -1793,12 +1908,23 @@ static G2_CTRL void g2_sched_loop(uint32_t coord G2_WIN_PARAMS) {
   dma_id_t load = 0u, zload = 0u, store = 0u;
   if (coord) {
     g2_load_params();
+#if Q38_G2_ITEM_KEEP && Q38_X8_BATCH
+    g2_load(w0, &G2->raw[0]);
+    const dma_id_t raw = g2_load_z(w0);
+    if (w0)
+      load = g2_state_dma(0u);
+    // Publish raw/z without waiting for the later state import. Convolution,
+    // Gram and solve do not read S. The load wait before barrier 3 covers S
+    // (also when a later chunk-1 raw ticket replaces this one).
+    g2_dma_wait(raw);
+#else
 #if Q38_X8_BATCH
     if (w0) // the state the previous batch left (no zeroing then)
       g2_state_dma(0u);
 #endif
     g2_load(w0, &G2->raw[0]);
     g2_dma_wait(g2_load_z(w0));
+#endif
   }
   g2_sync(); // 0 raw rows of chunk 0
   g2_sync(); // convolution and gates of chunk 0
@@ -1831,7 +1957,8 @@ static G2_CTRL void g2_sched_loop(uint32_t coord G2_WIN_PARAMS) {
       g2_dma_wait(store);
       if (c + 1u < G2_CHUNKS)
         zload = g2_load_z(w0 + (c + 1u) * G2_C);
-      g2_dma_wait(load); // chunk c+1's raw rows, for its convolution
+      // Next raw rows; ITEM_KEEP also covers the state import.
+      g2_dma_wait(load);
     }
     if (lq_job)
       g2_job_wait(lq_job);
@@ -1856,6 +1983,14 @@ static G2_CTRL void g2_sched_loop(uint32_t coord G2_WIN_PARAMS) {
     g2_job_wait(state_job);
   g2_sync();
   if (coord) {
+#if Q38_G2_ITEM_KEEP && Q38_X8_BATCH
+    store = g2_store(w0 + (G2_CHUNKS - 1u) * G2_C);
+    if (w1 != Q38_R)
+      store = g2_state_dma(1u); // queue behind O/contexts, no intermediate wait
+    else if (!Q38_GDN2_DEBUG_TOKENS)
+      g2_store_conv(&G2->raw[(G2_CHUNKS - 1u) & 1u]);
+    g2_dma_wait(store); // monotone DONE_ID covers both exports before reuse
+#else
     g2_dma_wait(g2_store(w0 + (G2_CHUNKS - 1u) * G2_C));
     if (!Q38_GDN2_DEBUG_TOKENS && w1 == Q38_R)
       g2_store_conv(&G2->raw[(G2_CHUNKS - 1u) & 1u]);
@@ -1863,12 +1998,14 @@ static G2_CTRL void g2_sched_loop(uint32_t coord G2_WIN_PARAMS) {
     if (w1 != Q38_R) // the next batch's initial state
       g2_dma_wait(g2_state_dma(1u));
 #endif
+#endif
   }
   g2_sync(); // the raw rows are free
   g2_sync(); // the FP32 state, staged over them
   if (coord && w1 == G2_TOKENS) {
     const float(*const fs)[Q38_VD] = (const float(*)[Q38_VD]) & G2->raw[0];
     dma_id_t id = 0u;
+#pragma clang loop unroll(disable)
     for (uint32_t h = 0u; h < G2_H; ++h) {
       const uint32_t head = mempool_get_group_id() * G2_H + h;
 #if Q38_L2_TILED
@@ -2021,7 +2158,7 @@ static NOSTACK void g2_compute_loop(uint32_t cid G2_WIN_PARAMS) {
   if (cid % 3u == 0u) { // one core per tile fills its tile's copy
     const float zh = llm_f16box(0.0f);
     asm volatile("vsetvli zero, %0, e16, m4, ta, ma" : : "r"(Q38_VD));
-    asm volatile("vle16.v v0, (%0)" : : "r"(G2G(&G2->gamma[0])) : "memory");
+    asm volatile("vle16.v v0, (%0)" : : "r"(G2G(&G2P->gamma[0])) : "memory");
     asm volatile("vfwadd.vf v8, v0, %0" : : "f"(zh));
     asm volatile("vsetvli zero, %0, e32, m8, ta, ma" : : "r"(Q38_VD));
     asm volatile("vse32.v v8, (%0)" : : "r"(&G2L->gamma32[0]) : "memory");

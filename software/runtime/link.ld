@@ -19,8 +19,13 @@ SECTIONS {
   /* Interleaved region on L1 */
   .l1 (NOLOAD): {
     *(.l1_prio)
+    *(.l1_rows)
     *(.l1)
     *(.bss)
+    /* Attention-only tile scratch. f2 aligns this marker to its global row
+       before reclaiming the scratch for FFN. Persistent profiles stay above. */
+    __l1_attn_reclaim = .;
+    *(.l1_attn)
     /* Phase scratch last: a phase may overlay it and the heap above it. */
     *(.l1_tail)
     __l1_alloc_base = ALIGN(0x10);

@@ -261,17 +261,18 @@ static dma_id_t dma_collective_issue_piece(uint32_t stream, uint32_t dest,
     return 0;
   }
 
+  // Advance both sides together so the original bases and l1_start need not
+  // stay live across the inlined fold-slot setup and stack switch.
+  uint32_t external_addr = (dest_in_l1 ? src : dest) + (l1_piece - l1_start);
   while (len != 0) {
-    const uint32_t delta = l1_piece - l1_start;
-    const uint32_t external_addr = dest_in_l1 ? src + delta : dest + delta;
     const uint32_t bytes_to_l2_boundary =
         DMA_COLLECTIVE_L2_STRIPE_BYTES -
         external_addr % DMA_COLLECTIVE_L2_STRIPE_BYTES;
     const uint32_t chunk =
         len < bytes_to_l2_boundary ? len : bytes_to_l2_boundary;
-    void *const piece_dest = (void *)(dest_in_l1 ? l1_piece : dest + delta);
+    void *const piece_dest = (void *)(dest_in_l1 ? l1_piece : external_addr);
     const void *const piece_src =
-        (const void *)(dest_in_l1 ? src + delta : l1_piece);
+        (const void *)(dest_in_l1 ? external_addr : l1_piece);
 
     if (reps == 1)
       last_id =
@@ -286,6 +287,7 @@ static dma_id_t dma_collective_issue_piece(uint32_t stream, uint32_t dest,
       return 0;
     }
     l1_piece += chunk;
+    external_addr += chunk;
     len -= chunk;
   }
   return last_id;

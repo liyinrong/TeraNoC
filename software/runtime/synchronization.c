@@ -29,7 +29,7 @@ uint32_t volatile partial_barrier[NUM_CORES * 4]
 
 #if FSYNC_TPG_SIDE != 0
 fsync_tile_counter_t fsync_tile_counters[NUM_CORES / NUM_CORES_PER_TILE]
-    __attribute__((aligned(FSYNC_TILE_COUNTER_ALIGNMENT), section(".l1")));
+    __attribute__((aligned(FSYNC_TILE_COUNTER_ALIGNMENT), section(".l1_rows")));
 #endif
 
 #if DOMAINS > 1
@@ -57,7 +57,7 @@ static uint32_t volatile domain_counts[DOMAINS][2]
 // Per-core stacks of the exact fold's call path (dma.h), whole global rows:
 // each core uses them through the VC tile window (dma_fold_slot).
 dma_fold_slot_t dma_fold_slots[NUM_CORES]
-    __attribute__((section(".l1"), aligned(NUM_BANKS * 4)));
+    __attribute__((section(".l1_rows"), aligned(NUM_BANKS * 4)));
 #if DMA_FOLD_PROFILE
 // The fold's per-site profile (dma.h), per domain, and every domain's copy as
 // reported to domain 0.

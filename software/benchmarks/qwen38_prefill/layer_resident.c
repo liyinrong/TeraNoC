@@ -86,6 +86,12 @@
 #ifndef Q38_X8_BATCH
 #define Q38_X8_BATCH 0
 #endif
+// Batch-major GDN: keep layer parameters outside the shared phase arena,
+// overlap the state import with chunk-0 preparation, and queue the tail DMAs.
+// Whole-sequence (S1) builds already load parameters once and are unchanged.
+#ifndef Q38_G2_ITEM_KEEP
+#define Q38_G2_ITEM_KEEP 0
+#endif
 #if Q38_X8_BATCH &&                                                            \
     !(Q38_GDN_V2 && !Q38_SCHEDULE_PROBE && Q38_PROBE_PHASE == 0 &&             \
       Q38_FFN_ROWS % 128u == 0u && Q38_R % Q38_FFN_ROWS == 0u)
@@ -115,6 +121,11 @@
 // 2 chunk core, 3 out-proj, 4 FFN).
 #ifndef Q38_X8_STOP_PHASE
 #define Q38_X8_STOP_PHASE 0
+#endif
+// Debug (timing, with SNAP and STOP_PHASE 3): also time the next batch's
+// chunk core (q38_x8_pipe.c), a warm item of the same layer.
+#ifndef Q38_X8_WARM_CHUNKS
+#define Q38_X8_WARM_CHUNKS 0
 #endif
 // Debug (timing, with SNAP): the first item starts at its FFN (in-proj,
 // chunk core and out-projection skipped; their inputs are garbage anyway).
@@ -147,6 +158,16 @@
 #ifndef Q38_L2_TILED
 #define Q38_L2_TILED 0
 #endif
+// Tiled layouts: GDN O rows padded to one 8 KiB L2 row each, so a tile's
+// gated rows go out as one descriptor and the out-projection gathers its X
+// rows back (f2_x_gather). P2 home builds drop the context buffer, which
+// only Q38_GDN2_DEBUG_CTX writes, to make room.
+#ifndef Q38_G2_O_PAD
+#define Q38_G2_O_PAD 0
+#endif
+// Batch-major path only (P2 and its S1 twins): S1's whole-sequence layer
+// keeps the unpadded O.
+#define G2_O_PADDED (Q38_G2_O_PAD && Q38_X8_BATCH)
 // P2 home builds: the written L2 scratch sits in home segment 0 (below the
 // wrap), and the GDN end state and last layer's output stay in the domain's
 // home instead of the shared result_* buffers below the home base.
@@ -1674,6 +1695,10 @@ static void project_rows(const __fp16 *in, const __fp16 *packed_weight,
 
 // The VC helpers come first: both phases build on them.
 #include "q38_vc.c"
+#if Q38_G2_ITEM_KEEP && Q38_X8_BATCH
+// Defined with the resident parameter layout in q38_gdn2.c; f2 must stop here.
+static uint32_t g2_item_limit(void);
+#endif
 // Then the projection machinery and the phases.
 #if Q38_PROBE_PHASE != 1
 #include "q38_ffn.c"
@@ -1897,9 +1922,14 @@ static NOSTACK void probe_report(void) {
 // their own tile instead: contiguous and local. Simulation only: the stack
 // limit CSR is left as crt0 set it (the model does not check it), and no DMA
 // may target a stack variable (the tile window is compute-only).
-#define Q38_AGENT_STACK_ROWS 8u
+// Five rows give 640 B per tile at this geometry, above the 512 B gate
+// plus the 16 B top guard. The stack still uses its owner's tile window.
+#define Q38_AGENT_STACK_ROWS                                                   \
+  ((STACK_SIZE + 16u + VC_TILE_ROW_BYTES - 1u) / VC_TILE_ROW_BYTES)
+_Static_assert(Q38_AGENT_STACK_ROWS *VC_TILE_ROW_BYTES >= STACK_SIZE + 16u,
+               "The agent stack includes the gate budget and top guard");
 static uint8_t q38_agent_stack[Q38_AGENT_STACK_ROWS * VC_GLOBAL_ROW_BYTES]
-    __attribute__((section(".l1"), aligned(VC_GLOBAL_ROW_BYTES)));
+    __attribute__((section(".l1_rows"), aligned(VC_GLOBAL_ROW_BYTES)));
 int q38_call_on_stack(int (*fn)(void), uint32_t top);
 __asm__(".globl q38_call_on_stack\n"
         "q38_call_on_stack:\n"
@@ -1935,6 +1965,9 @@ _Static_assert(Q38_FFN_ROWS % Q38_X8_CHUNK_ROWS == 0u &&
 static uint32_t x8_stamp[X8_BATCHES][4] Q38_VC_SMALL;
 static NOSTACK void x8_gdn_layer(void) {
   const uint32_t core = mempool_get_core_id();
+#if Q38_G2_ITEM_KEEP
+  g2_item_begin();
+#endif
   uint32_t t0 = mempool_get_timer();
   gdn2_project(0u, Q38_FFN_ROWS);
 #pragma clang loop unroll(disable)
@@ -2043,10 +2076,20 @@ int main(void) {
   avs_profile_init();
 #endif
 #endif
+#if !(Q38_G2_ITEM_KEEP && Q38_X8_BATCH) &&                                     \
+    !(Q38_KIND == 0 && Q38_FFN_L2 && Q38_ATTN_VC && Q38_AV_QKV_F2 &&           \
+      Q38_AV_OUT_F2)
+  // The f2-only attention path and the batch-major GDN-v2 path uses f2's DMA
+  // state, never these legacy buffers. Omitting their only live references
+  // frees L1 for layer params.
   prefetch[core].valid = 0;
   prefetch[core].slot = 0;
+#endif
   export_cycles[core] = 0;
-#if Q38_COORDINATOR_DMA && Q38_GATEUP_PIPELINE && Q38_ASYNC
+#if Q38_COORDINATOR_DMA && Q38_GATEUP_PIPELINE && Q38_ASYNC &&                 \
+    !(Q38_G2_ITEM_KEEP && Q38_X8_BATCH) &&                                     \
+    !(Q38_KIND == 0 && Q38_FFN_L2 && Q38_ATTN_VC && Q38_AV_QKV_F2 &&           \
+      Q38_AV_OUT_F2)
   gateup_dma_next[core] = 1u;
   q38_dma_stage_init(&gateup_dma_queue);
 #endif
@@ -2092,6 +2135,9 @@ int main(void) {
     probe_mixer_end = 0u;
     probe_ffn_end = 0u;
   }
+#endif
+#if Q38_KIND != 0 && Q38_FFN_L2 && Q38_GDN_ENTRY_INIT
+  f2_init_records();
 #endif
   q38_edge_barrier();
 #if Q38_SCHEDULE_PROBE

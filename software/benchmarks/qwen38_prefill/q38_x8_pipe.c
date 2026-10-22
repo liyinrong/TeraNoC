@@ -67,6 +67,10 @@ static NOSTACK void x8_chip_sync(void) {
 #define X8_ITEMS(d)                                                            \
   ((Q38_X8_LAYERS + DOMAINS - 1u - (d)) / DOMAINS * X8_BATCHES)
 #define X8_STEPS (X8_ITEMS(0u) + DOMAINS - 1u)
+// Layer l + 1 batch b runs one step after layer l batch b only if a domain's
+// batches cover the other domains' steps: fewer batches read unwritten rows.
+_Static_assert(X8_BATCHES >= DOMAINS,
+               "Lock-step P2 needs X8_BATCHES >= DOMAINS (use flags mode)");
 #endif
 
 // Domain reports. Only domain 0 prints (serial.c), so every domain's core 0
@@ -125,6 +129,11 @@ static uint32_t x8p_last Q38_VC_SMALL;
 static uint32_t x8p_t0 Q38_VC_SMALL, x8p_t1 Q38_VC_SMALL;
 
 static void x8p_set_io(uint32_t l) {
+#if Q38_G2_ITEM_KEEP
+  // Every group's coordinator resets once per layer, including a snapshot
+  // whose first item has w0 != 0. The following input barrier publishes it.
+  g2_item_begin();
+#endif
   if (mempool_get_core_id() != 0u)
     return;
   const uint32_t dom = mempool_get_domain_id();
@@ -176,6 +185,23 @@ static NOSTACK void x8_pipe_layer(uint32_t l, uint32_t b0) {
     if (mixer)
       gdn2_output(w0, w1);
     X8P_STAMP(b, 3, t);
+#if Q38_X8_WARM_CHUNKS
+    // Debug (timing only): the next batch's chunk core right after this
+    // out-projection, its in-projection and this FFN skipped, so a warm item
+    // (resident data, imported state) is timed. Its stamps: chunks only.
+    _Static_assert(Q38_X8_PIPE_SNAP && Q38_X8_STOP_PHASE == 3,
+                   "Warm chunks: an A+B snapshot window");
+    if (w1 < Q38_R) {
+      if (core == 0u)
+        for (uint32_t i = 0u; i < 6u; ++i)
+          x8p_stamp[b + 1u][i] = 0u;
+      gdn2_chunks(w1, w1 + Q38_FFN_ROWS);
+      X8P_STAMP(b + 1u, 2, t);
+    }
+    if (core == 0u)
+      x8p_last = w1 < Q38_R ? b + 1u : b;
+    return;
+#endif
     X8P_STOP(3, b);
     ffn_rows(w0, w1);
     X8P_STAMP(b, 4, t);

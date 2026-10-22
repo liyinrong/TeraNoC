@@ -15,7 +15,7 @@
 #define Q38_VC_SMALL __attribute__((section(".l1"), aligned(8)))
 // One record per tile, aligned so its bank stripe belongs to that tile.
 #define Q38_VC_TILE_LOCAL                                                      \
-  __attribute__((section(".l1"), aligned(NUM_BANKS * sizeof(uint32_t))))
+  __attribute__((section(".l1_rows"), aligned(NUM_BANKS * sizeof(uint32_t))))
 _Static_assert(NUM_BANKS_PER_TILE >= 6u &&
                    NUM_BANKS == NUM_REDMULE_TILES * NUM_BANKS_PER_TILE &&
                    VC_ROW_BYTES % (NT * sizeof(__fp16)) == 0u,

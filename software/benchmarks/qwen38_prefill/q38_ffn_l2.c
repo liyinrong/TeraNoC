@@ -37,6 +37,12 @@
 #ifndef Q38_FFN_QUEUE
 #define Q38_FFN_QUEUE 0
 #endif
+// Zero every f2 record once at program start (.l1 is not zeroed: X in RTL).
+// A GDN layer's first f2 user (gdn2_project) reads f2.q_base and step_done,
+// which only the FFN and attention entries reset.
+#ifndef Q38_GDN_ENTRY_INIT
+#define Q38_GDN_ENTRY_INIT 1
+#endif
 // Debug (with Q38_FFN_QUEUE): each agent samples its weight panel in the slot
 // before triggering a step and after it ends, against the L2 source.
 #ifndef Q38_FFN_W_CHECK
@@ -181,6 +187,24 @@ _Static_assert((Q38_PROBE_PHASE == 2 || Q38_GDN_V2 || Q38_ATTN_L2_LAYER) &&
                    Q38_KC * NT * 2u % Q38_VC_ROW == 0,
                "L2 FFN requires independent aligned VC batches and K slices");
 
+// The tiled attention out pass keeps its original 4096+2048 reductions.
+// At its large slice's tail, slot 2 has retired and holds the last four Z
+// steps. The small slice uses only each slot's lower half. Its X and residual
+// occupy slot 1's upper half, after the large slice has completely drained.
+#if Q38_KIND == 0 && Q38_ATTN_VC && Q38_L2_TILED && Q38_FFN_QUEUE &&           \
+    Q38_FFN_X_PREFETCH &&                                                      \
+    (!defined(Q38_F2_W_PLACE) || (Q38_F2_W_PLACE == 1 && !Q38_F2_Z_PLACE &&    \
+                                  !Q38_F2_X_PLACE && !Q38_F2_C1))
+#define F2_AV_PACK 1
+#else
+#define F2_AV_PACK 0
+#endif
+#if F2_AV_PACK
+#define F2_PACKED_OUT (f2.packed_out)
+#else
+#define F2_PACKED_OUT 0u
+#endif
+
 // act/res: per worker, so a worker behind is never covered by one ahead.
 typedef struct {
   uint32_t pair_done, down_done, act[F2_LANES], res[F2_LANES];
@@ -195,6 +219,11 @@ static f2_progress_t f2_progress[NUM_REDMULE_TILES] Q38_VC_TILE_LOCAL;
 // Load each counter once: Q38_MIN evaluates its arguments twice, and a second
 // load of a counter that moved on since the compare returns more than the
 // minimum already found.
+// Out of line, like f2_wake, f2_panels and f2_q_idle: inlined into f2_agent_q
+// they cost its frame 32 B of the lock-step driver's 512-byte stack.
+#if Q38_KIND != 0
+static NOSTACK uint32_t f2_min_act(uint32_t e);
+#endif
 static uint32_t f2_min_act(uint32_t e) {
   uint32_t m = ~0u;
   for (uint32_t w = 0u; w < Q38_FFN_WORKERS; ++w) {
@@ -216,6 +245,9 @@ static uint32_t f2_min_res(uint32_t e) {
 }
 
 // The agent published a RedMulE completion: wake the tile's workers.
+#if Q38_KIND != 0
+static NOSTACK void f2_wake(void);
+#endif
 static void f2_wake(void) {
 #if Q38_FFN_EVT
   asm volatile("fence" ::: "memory");
@@ -247,6 +279,10 @@ static struct {
   uint32_t down, rows, tile_rows, pv, steps, slot_bytes, w_offset, slots;
   uint32_t ship_rows, ship_columns, ship_elems, peak, first, slice, arena_base;
   uint32_t weight_epoch, early;
+#if F2_AV_PACK
+  __fp16 *z_tail;
+  uint32_t packed_out;
+#endif
   uint32_t q_base; // Q38_FFN_QUEUE: step_done at this pass's start
   // Up pass: X width, output columns; gate/up pairs (pair) or single-matrix
   // segments; shipped to g_out[slice][g_rows][g_kc].
@@ -263,6 +299,9 @@ static struct {
   // Uneven K slices: the last is k_last wide (0: as the others); g_out's
   // columns from g_main on take pitch g_kc_last.
   uint32_t k_last, g_main, g_kc_last;
+#endif
+#if G2_O_PADDED
+  uint32_t dn_pitch; // dn_in's row pitch in elements (0: packed, F2_K)
 #endif
 }
 #if Q38_F2_REP
@@ -418,6 +457,9 @@ _Static_assert(sizeof(f2_ship_t) == VC_ROW_BYTES &&
                    sizeof(f2_down_t) == VC_ROW_BYTES,
                "Group control records must occupy one owner-group stripe");
 extern uint32_t __heap_end;
+#if Q38_KIND == 0 && Q38_ATTN_VC
+extern uint32_t __l1_attn_reclaim;
+#endif
 
 static uint32_t f2_align(uint32_t bytes) {
   return (bytes + VC_GLOBAL_ROW_BYTES - 1u) / VC_GLOBAL_ROW_BYTES *
@@ -438,6 +480,13 @@ static NOSTACK void f2_layout(uint32_t down) {
   f2.steps = (columns + f2.pv * Q38_VC_COUNT - 1u) / (f2.pv * Q38_VC_COUNT) *
              (down || !f2.pair ? 1u : 2u);
   uint32_t p = Q38_MIN((uint32_t)&stage, (uint32_t)&weights[0][0]);
+#if Q38_KIND == 0 && Q38_ATTN_VC
+  // Attention out follows the sweep's final join; FFN follows attention.
+  // Their handshakes/constants are dead in either down pass and in FFN up
+  // (pair=1). Profiles remain live outside this area. QKV up keeps stage.
+  if (down || f2.pair)
+    p = Q38_MIN(p, (uint32_t)&__l1_attn_reclaim);
+#endif
   p = f2_align(p);
   f2.arena_base = p;
   f2.residual = (__fp16 *)p;
@@ -510,6 +559,28 @@ static NOSTACK void f2_layout(uint32_t down) {
   if (!down)
     f2h.res_row = VC_GLOBAL_ROW(f2.residual);
 #endif
+#if F2_AV_PACK
+  // Exact shape guard: no other caller or experimental placement is packed.
+  f2.packed_out = down && f2.dn_lag && f2.slots == 3u && f2.k_dn == 4096u &&
+                  f2.k_last == 2048u && f2.slices == 2u && f2.rows == 256u &&
+                  f2.tile_rows == 32u && NT == 64u && f2.pv == 2u &&
+                  f2.steps == 10u && NUM_TILES_PER_GROUP == 4u &&
+                  Q38_VC_COUNT == 4u && NUM_GROUPS == 16u;
+  if (f2.packed_out) {
+    const uint32_t slot = f2.slot_bytes / Q38_VC_ROW * VC_GLOBAL_ROW_BYTES;
+    const uint32_t w = f2.arena_base + input_bytes;
+    f2.input = f2.x_buf[0] = (__fp16 *)f2.arena_base;
+    f2.w_offset = VC_GLOBAL_ROW(w) * Q38_VC_ROW;
+    f2.z = vc_group_window(w + 3u * slot);
+    // Slot 2: step 5 is its last large-K tenant. Steps 6..9 use slots 0/1.
+    f2.z_tail = vc_group_window(w + 2u * slot + 3u * slot / 4u);
+    // Slot 1: the small-K weights end at half the slot; X then residual.
+    f2.x_buf[1] = (__fp16 *)(w + slot + slot / 2u);
+    f2.residual = vc_group_window(w + slot + 3u * slot / 4u);
+    p = w + 3u * slot +
+        6u * NUM_TILES_PER_GROUP * f2.tile_rows * NT * 2u * NUM_GROUPS;
+  }
+#endif
 #ifdef Q38_F2_LAYOUT_PRINT
   printf("[f2_layout] down=%u arena=%x residual=%x input=%x z=%x ship=%x "
          "slot=%x slots=%u p=%x\n",
@@ -517,8 +588,13 @@ static NOSTACK void f2_layout(uint32_t down) {
          (uint32_t)f2.z, (uint32_t)f2.ship, f2.slot_bytes, f2.slots, p);
 #endif
   f2.peak = Q38_MAX(f2.peak, p);
+#if Q38_G2_ITEM_KEEP && Q38_X8_BATCH
+  if (p > g2_item_limit())
+    q38_fatal("[qwen38_fatal] l2 ffn over GDN params=", p - g2_item_limit());
+#else
   if (p > (uint32_t)&__heap_end)
     q38_fatal("[qwen38_fatal] l2 ffn over L1=", p - (uint32_t)&__heap_end);
+#endif
 #if Q38_SCHEDULE_PROBE
   if (down) {
     ++probe_ffn_blocks;
@@ -531,6 +607,62 @@ static NOSTACK void f2_layout(uint32_t down) {
 
 // Every record is reset by its owning tile/group, before the phase barrier.
 // Weight-cache ownership spans Down chunks and batches; reset it at FFN entry.
+#if Q38_GDN_ENTRY_INIT
+static void f2_zero(volatile uint32_t *p, uint32_t bytes) {
+  for (uint32_t i = 0u; i < bytes / sizeof(uint32_t); ++i)
+    p[i] = 0u;
+}
+
+// Every core, before the first edge barrier (which fences): nothing is in
+// flight yet. Each record is zeroed by the core that owns it.
+static void f2_init_records(void) {
+  // f2 field by field: f2check follows named field stores, not a pointer.
+#if Q38_F2_REP
+  if (mempool_is_group_coordinator()) {
+#else
+  if (mempool_get_core_id() == 0u) {
+#endif
+    f2.residual = f2.input = f2.z = f2.ship = 0;
+    f2.x_buf[0] = f2.x_buf[1] = 0;
+    f2.down = f2.rows = f2.tile_rows = f2.pv = f2.steps = 0u;
+    f2.slot_bytes = f2.w_offset = f2.slots = 0u;
+    f2.ship_rows = f2.ship_columns = f2.ship_elems = f2.peak = 0u;
+    f2.first = f2.slice = f2.arena_base = f2.weight_epoch = f2.early = 0u;
+    f2.q_base = 0u;
+    f2.pair = f2.k_up = f2.n_up = f2.rows_up = f2.nseg = 0u;
+    f2.seg_panels[0] = f2.seg_panels[1] = f2.seg_panels[2] = 0u;
+    f2.seg_w[0] = f2.seg_w[1] = f2.seg_w[2] = 0;
+    f2.g_out = 0;
+    f2.g_kc = f2.g_rows = 0u;
+    f2.k_dn = f2.k_full = f2.n_dn = f2.rows_dn = f2.slices = 0u;
+    f2.end = f2.dn_rows = f2.dn_lag = 0u;
+    f2.w_dn = f2.dn_in = f2.res_src = 0;
+    f2.dn_out = 0;
+#if Q38_L2_TILED
+    f2.k_last = f2.g_main = f2.g_kc_last = 0u;
+#endif
+#if G2_O_PADDED
+    f2.dn_pitch = 0u;
+#endif
+  }
+#if Q38_F2_C1
+  if (mempool_get_core_id() == 0u)
+    f2_zero((volatile uint32_t *)&f2c1, sizeof(f2c1));
+#endif
+  if (tnc_is_tile_agent())
+    f2_zero((volatile uint32_t *)&f2_progress[mempool_get_redmule_id()],
+            sizeof(f2_progress[0]));
+  if (mempool_is_group_coordinator()) {
+    const uint32_t g = mempool_get_group_id();
+    f2_zero((volatile uint32_t *)&f2_ship[g], sizeof(f2_ship[0]));
+    f2_zero((volatile uint32_t *)&f2_down[g], sizeof(f2_down[0]));
+#if Q38_F2_NORM_HOME
+    f2_zero((volatile uint32_t *)&f2_home[g], sizeof(f2_home[0]));
+#endif
+  }
+}
+#endif
+
 static void f2_reset_progress(void) {
   if (tnc_is_tile_agent()) {
     const uint32_t e = mempool_get_redmule_id();
@@ -569,9 +701,32 @@ static void f2_sync_all(void) { sync_all(); }
 #endif
 
 static uint32_t f2_weight_slot(uint32_t t) {
+#if F2_AV_PACK
+  if (f2.packed_out)
+    return f2.slice == 0u && t >= 6u ? t & 1u : t % 3u;
+#endif
   return ((f2.down ? f2.weight_epoch * f2.steps : 0u) + t) % f2.slots;
 }
 
+#ifndef F2_ZN
+#define F2_ZN NUM_TILES_PER_GROUP
+#define F2_ZE(e) ((e) % NUM_TILES_PER_GROUP)
+#endif
+// The same step/engine tiles, with only the packed out pass's tail relocated.
+static __fp16 *f2_down_z(uint32_t n, uint32_t engine) {
+  __fp16 *z = f2.z;
+#if F2_AV_PACK
+  if (f2.packed_out && n >= 6u) {
+    z = f2.z_tail;
+    n -= 6u;
+  }
+#endif
+  return z + (n * F2_ZN + F2_ZE(engine)) * f2.tile_rows * NT;
+}
+
+#if Q38_KIND != 0
+static NOSTACK uint32_t f2_panels(uint32_t v, uint32_t t);
+#endif
 static uint32_t f2_panels(uint32_t v, uint32_t t) {
   const uint32_t first = f2_n(t) * f2.pv * Q38_VC_COUNT + v * f2.pv;
   const uint32_t columns = (f2.down ? f2.n_dn : f2.n_up) / NT;
@@ -669,7 +824,8 @@ static NOSTACK void f2_prefetch_weight(uint32_t v) {
     slice = 0u;
   }
   const uint32_t g = mempool_get_group_id();
-  const uint32_t slot = (f2_weight_slot(f2.steps - 1u) + 1u) % f2.slots;
+  const uint32_t slot =
+      F2_PACKED_OUT ? 0u : (f2_weight_slot(f2.steps - 1u) + 1u) % f2.slots;
   f2_down[g].weight_pending = f2_load_at(v, 0u, slice, slot);
   f2_down[g].weight_epoch = f2.weight_epoch + 1u;
   f2_down[g].weight_slot = slot;
@@ -677,6 +833,50 @@ static NOSTACK void f2_prefetch_weight(uint32_t v) {
 }
 
 // The next epoch's X slice (this batch's next slice or the next batch's
+#if G2_O_PADDED
+// The down X of rows [first, first + f2.rows) of a slice, in L2.
+static const __fp16 *f2_x_src(uint32_t slice, uint32_t first) {
+  if (f2.dn_pitch)
+    return f2.dn_in + (slice * f2.dn_rows + first) * f2.dn_pitch;
+  return f2.dn_in + slice * f2.dn_rows * f2.k_dn + first * F2_K(slice);
+}
+
+// The group coordinator: rows of k_bytes, pitch_bytes apart in L2 (on 8 KiB
+// L2 rows), packed at dst (on an 8 KiB L1 row); this group's 512-byte L1
+// stripes only. Stripes and rows realign every lcm(k_bytes, 8 KiB) of dst:
+// one 2-D descriptor per row-local piece of a stripe in that period, the
+// periods as its repetitions.
+static NOSTACK dma_id_t f2_x_gather(__fp16 *dst, const __fp16 *src,
+                                    uint32_t rows, uint32_t k_bytes,
+                                    uint32_t pitch_bytes) {
+  const uint32_t stripe = VC_GLOBAL_ROW_BYTES / NUM_GROUPS;
+  const uint32_t d = dma_l1_alias((uint32_t)dst);
+  uint32_t a = k_bytes, b = VC_GLOBAL_ROW_BYTES;
+  while (b) {
+    const uint32_t t = a % b;
+    a = b, b = t;
+  }
+  const uint32_t period = k_bytes / a * VC_GLOBAL_ROW_BYTES;
+  const uint32_t n = period / k_bytes;
+  if (d % VC_GLOBAL_ROW_BYTES || (uint32_t)src % VC_GLOBAL_ROW_BYTES ||
+      pitch_bytes % VC_GLOBAL_ROW_BYTES || k_bytes > pitch_bytes || rows % n)
+    q38_fatal("[qwen38_fatal] x gather shape=", rows);
+  dma_id_t id = 0u;
+  for (uint32_t s = mempool_get_group_id() * stripe; s < period;
+       s += VC_GLOBAL_ROW_BYTES)
+    for (uint32_t o = s; o < s + stripe;) {
+      const uint32_t c = o % k_bytes,
+                     len = Q38_MIN(s + stripe - o, k_bytes - c);
+      id = dma_local_memcpy_2d_nonblocking(
+          0u, (void *)(d + o),
+          (const char *)src + o / k_bytes * pitch_bytes + c, len, period,
+          n * pitch_bytes, rows / n);
+      o += len;
+    }
+  return id;
+}
+#endif
+
 // first) into the other buffer; this group's rows only, waited at the end of
 // f2_agent, before the slice barrier.
 static NOSTACK void f2_prefetch_x(void) {
@@ -689,6 +889,14 @@ static NOSTACK void f2_prefetch_x(void) {
       return;
     slice = 0u, first += f2.rows;
   }
+#if G2_O_PADDED
+  if (f2.dn_pitch) {
+    f2_down[mempool_get_group_id()].x_pending = f2_x_gather(
+        f2.x_buf[(f2.weight_epoch + 1u) & 1u], f2_x_src(slice, first), f2.rows,
+        F2_K(slice) * sizeof(__fp16), f2.dn_pitch * sizeof(__fp16));
+    return;
+  }
+#endif
 #if Q38_L2_TILED
   const dma_coordinator_op_t op = dma_coordinator_submit_linear(
       0u, f2.x_buf[(f2.weight_epoch + 1u) & 1u],
@@ -832,8 +1040,13 @@ static uint8_t f2_configure(uint32_t t, uint32_t engine) {
   __fp16 *z =
       f2.z + F2_ZE(engine) * 4u * F2_Z_ELEMS +
       ((f2.down || !f2.pair ? 0u : 2u * (t & 1u)) + (n & 1u)) * F2_Z_ELEMS;
+#if F2_AV_PACK
+  if (f2.down)
+    z = f2_down_z(n, engine);
+#else
   if (f2.down)
     z = f2.z + (n * F2_ZN + F2_ZE(engine)) * f2.tile_rows * NT;
+#endif
   const uint8_t target = (uint8_t)tnc_redmule_acquire_target();
 #if Q38_F2_X_PLACE == 2
   const uint32_t x = f2c1.x_win + r * f2.tile_rows * k * sizeof(__fp16);
@@ -850,25 +1063,82 @@ static uint8_t f2_configure(uint32_t t, uint32_t engine) {
 // Each tile has one small residual slot. Partial outputs live until the
 // final slice, so output DMA never blocks the next RedMulE output address.
 static NOSTACK dma_id_t f2_down_transfer(uint32_t n, uint32_t output) {
+#if F2_AV_PACK
   const uint32_t g = mempool_get_group_id(), v = g / Q38_VC_GROUPS;
   const uint32_t inner = VC_ROW_BYTES / (NT * sizeof(__fp16));
+#else
+  const uint32_t g = mempool_get_group_id();
+  const uint32_t inner = VC_ROW_BYTES / (NT * sizeof(__fp16));
+  // Per-call bases, so that n and the VC index do not stay live in the loop
+  // (the lock-step driver's 512-byte stack has no room for one more spill).
+  const uint32_t panel0 = (n * Q38_VC_COUNT + g / Q38_VC_GROUPS) * f2.pv;
+#if F2_AV_PACK
+  __fp16 *const local0 = output ? f2_down_z(n, 0u) : f2.residual;
+#else
+  __fp16 *const local0 =
+      output ? f2.z + n * NUM_TILES_PER_GROUP * f2.tile_rows * NT : f2.residual;
+#endif
+  __fp16 *const remote0 = output ? f2.dn_out : (__fp16 *)f2.res_src;
+#endif
   dma_id_t pending = 0u;
   for (uint32_t t = 0u; t < NUM_TILES_PER_GROUP; ++t) {
     const uint32_t e = g * NUM_TILES_PER_GROUP + t;
     const uint32_t r = (e % Q38_VC_ENGINES) / f2.pv;
+#if F2_AV_PACK
     const uint32_t q = e % f2.pv;
     const uint32_t panel = (n * Q38_VC_COUNT + v) * f2.pv + q;
+#else
+    const uint32_t panel = panel0 + e % f2.pv;
+#endif
     if (panel * NT >= f2.n_dn)
       continue;
+#if F2_AV_PACK
     __fp16 *local =
-        output ? f2.z + (n * NUM_TILES_PER_GROUP + t) * f2.tile_rows * NT
-               : f2.residual + t * f2.tile_rows * NT;
+        output ? f2_down_z(n, e) : f2.residual + t * f2.tile_rows * NT;
     __fp16 *remote = (output ? f2.dn_out : (__fp16 *)f2.res_src) +
                      (f2.first + r * f2.tile_rows) * f2.n_dn + panel * NT;
+#else
+    __fp16 *local = local0 + t * f2.tile_rows * NT;
+    __fp16 *remote =
+        remote0 + (f2.first + r * f2.tile_rows) * f2.n_dn + panel * NT;
+#endif
     const uint32_t packed = NT * sizeof(__fp16);
 #if Q38_L2_TILED
+#if !F2_AV_PACK
+    // A stripe's rows as at most two runs that stay inside their L2 rows (cut
+    // where a row wraps to the next L2 row's start), planes over the stripes
+    // when a stripe's rows span whole L2 rows.
+    const uint32_t row_pitch = f2.n_dn * 2u;
+    if (inner * row_pitch % VC_GLOBAL_ROW_BYTES == 0u) {
+      const uint32_t q = (uint32_t)remote % VC_GLOBAL_ROW_BYTES;
+      const uint32_t b = row_pitch % VC_GLOBAL_ROW_BYTES;
+      uint32_t k = 1u;
+      while (k < inner && q + k * b + packed <= VC_GLOBAL_ROW_BYTES)
+        ++k;
+      const uint32_t q2 = (q + k * b) % VC_GLOBAL_ROW_BYTES;
+      if (k == inner ||
+          q2 + (inner - k - 1u) * b + packed <= VC_GLOBAL_ROW_BYTES) {
+        char *const l1 = (char *)Q38_VC_GLOBAL(local);
+        for (uint32_t j = 0u; j < inner; j += k, k = inner - k) {
+          char *const a = (char *)remote + j * row_pitch;
+          char *const c = l1 + j * packed;
+          const uint32_t l2_plane = inner * row_pitch - (k - 1u) * row_pitch;
+          const uint32_t l1_plane = VC_GLOBAL_ROW_BYTES - (k - 1u) * packed;
+          pending = dma_local_memcpy_3d_nonblocking(
+              0u, output ? a : c, output ? c : a, packed,
+              output ? row_pitch : packed, output ? packed : row_pitch, k,
+              output ? l2_plane : l1_plane, output ? l1_plane : l2_plane,
+              f2.tile_rows / inner);
+        }
+        continue;
+      }
+    }
+    // Otherwise: L2 rows repeat their offset in an 8 KiB L2 row every `step`
+    // rows: one descriptor per class of a stripe's rows.
+#else
     // L2 rows repeat their offset in an 8 KiB L2 row every `step` rows: one
     // descriptor per class of a stripe's rows, planes over the stripes.
+#endif
     const uint32_t pitch = f2.n_dn * 2u, low = pitch & (0u - pitch);
     const uint32_t step =
         low < VC_GLOBAL_ROW_BYTES ? VC_GLOBAL_ROW_BYTES / low : 1u;
@@ -962,6 +1232,9 @@ static NOSTACK void f2_watchdog(uint32_t *n, uint32_t where) {
 #define F2_WATCHDOG(n, where) ((void)(n))
 #endif
 
+#if F2_AV_PACK
+static uint32_t f2_vc_step_done(uint32_t v);
+#endif
 static NOSTACK void f2_agent_tail(uint32_t issuer);
 
 static NOSTACK void f2_agent(void) {
@@ -1046,6 +1319,16 @@ static NOSTACK void f2_agent(void) {
 
 // The issuer drains the pass's ships, outputs and prefetches.
 static NOSTACK void f2_agent_tail(uint32_t issuer) {
+#if F2_AV_PACK
+  if (f2.packed_out && f2.slice == 0u && issuer) {
+    // X1 aliases the upper half of slot 1, including its step-9 large-K
+    // weights. Every engine of this VC must finish before X may overwrite it.
+    const uint32_t v = mempool_get_redmule_id() / Q38_VC_ENGINES;
+    while (f2_vc_step_done(v) < f2.q_base + f2.steps)
+      mempool_wait(32u);
+    f2_prefetch_x();
+  }
+#endif
   if (issuer && !f2.down) {
     const uint32_t g = mempool_get_group_id();
     while (__atomic_load_n(&f2_ship[g].released, __ATOMIC_ACQUIRE) <
@@ -1087,6 +1370,9 @@ static NOSTACK void f2_agent_tail(uint32_t issuer) {
 // Steps every engine of VC v has finished.
 static __attribute__((noinline)) uint32_t f2_vc_step_done(uint32_t v) {
   uint32_t m = ~0u;
+#if Q38_KIND != 0
+#pragma clang loop unroll(disable)
+#endif
   for (uint32_t i = 0u; i < Q38_VC_ENGINES; ++i) {
     const uint32_t x = __atomic_load_n(
         &f2_progress[v * Q38_VC_ENGINES + i].step_done, __ATOMIC_ACQUIRE);
@@ -1120,8 +1406,20 @@ static NOSTACK uint32_t f2_q_service(f2_q_t *s, uint32_t v) {
         (s->next_epoch || !f2.down || !Q38_FFN_NEXT_WEIGHT_PREFETCH))
       return 0u;
     if (k >= f2.slots) {
+      uint32_t required = k - f2.slots + 1u;
+#if F2_AV_PACK
+      if (f2.packed_out) {
+        // Each epoch starts in slot 0. The large-K tail reuses 0/1 at
+        // distance two. Next epoch's slot 0 last held step 8 (large K) or
+        // step 9 (small K); do not evict it until every reader has finished.
+        if (k == f2.steps)
+          required = f2.slice == 0u ? 9u : 10u;
+        else if (f2.slice == 0u && k >= 8u)
+          required = k - 1u;
+      }
+#endif
       const uint32_t done = f2_vc_step_done(v);
-      if (done < s->base + k - f2.slots + 1u)
+      if (done < s->base + required)
         return 1u;
     }
     if (k == f2.steps) { // the next K slice's first weights
@@ -1131,7 +1429,8 @@ static NOSTACK uint32_t f2_q_service(f2_q_t *s, uint32_t v) {
     }
     s->pend[k % f2.slots] = f2_load(v, k);
     s->issued = k + 1u;
-    if (Q38_FFN_X_PREFETCH && f2.down && s->issued == Q38_MIN(2u, f2.steps))
+    if (Q38_FFN_X_PREFETCH && f2.down && s->issued == Q38_MIN(2u, f2.steps) &&
+        !(F2_PACKED_OUT && f2.slice == 0u))
       f2_prefetch_x();
   }
 }
@@ -1190,6 +1489,10 @@ static uint32_t f2_q_busy(void) {
   return f2.slice + 1u == f2.slices && f2_down[g].out_issued < f2.steps;
 }
 
+#if Q38_KIND != 0
+static NOSTACK void f2_q_idle(f2_q_t *s, uint32_t v, uint32_t issuer,
+                              uint32_t tag, uint32_t step);
+#endif
 static void f2_q_idle(f2_q_t *s, uint32_t v, uint32_t issuer, uint32_t tag,
                       uint32_t step) {
   if (issuer && (f2_q_service(s, v) | f2_q_busy()))
@@ -1211,6 +1514,11 @@ static NOSTACK void f2_q_phase(f2_q_t *s, uint32_t v, uint32_t issuer,
     f2_q_idle(s, v, issuer, 4u, k);
     F2_WATCHDOG(wd, 6u);
   }
+#if F2_AV_PACK
+  if (f2.packed_out && f2.slice == 0u && k == 6u && issuer)
+    while (f2_vc_step_done(v) < s->base + 6u)
+      mempool_wait(32u);
+#endif
   vc_barrier_arrive();
   while (fsync_status() & FSYNC_STATUS_BUSY_MASK)
     vc_sleep(2u, k);
@@ -1276,6 +1584,19 @@ static NOSTACK void f2_agent_q(void) {
     const uint32_t k = t + 2u;
     if (k >= f2.steps)
       continue;
+#if F2_AV_PACK
+    if (f2.packed_out && f2.slice == 0u) {
+      if (k == 6u)
+        continue; // retire step 5 before the slot-2 reuse rendezvous
+      if (k == 7u) {
+        f2_q_phase(&s, v, issuer, 6u);
+        if (q < f2_panels(v, 6u)) {
+          target[0] = f2_configure(6u, engine);
+          tnc_redmule_trigger();
+        }
+      }
+    }
+#endif
     // Step k's Z tile held step k - 2's (same pair slot): activated yet?
     const uint32_t nk = f2_n(k);
     while (!f2.down && nk >= 2u && f2_min_act(engine) < nk - 1u) {
@@ -1344,9 +1665,13 @@ static NOSTACK void f2_worker(void) {
         mempool_wait(32u);
         F2_WATCHDOG(wd, 3u);
       }
+#if F2_AV_PACK
+      __fp16 *tile = f2_down_z(n, e);
+#else
       __fp16 *tile =
           f2.z + (n * NUM_TILES_PER_GROUP + e % NUM_TILES_PER_GROUP) *
                      f2.tile_rows * NT;
+#endif
       const __fp16 *res =
           f2.residual + e % NUM_TILES_PER_GROUP * f2.tile_rows * NT;
       for (uint32_t i = w; i < f2.tile_rows; i += Q38_FFN_WORKERS)
@@ -1498,6 +1823,22 @@ static NOSTACK void f2_down_input(void) {
       f2.dn_in + (f2.slice * f2.dn_rows + f2.first) * f2.k_dn;
 #endif
   F2_STAMP(4u);
+#if G2_O_PADDED
+  _Static_assert(!Q38_FFN_X_CHECK, "The X check assumes packed rows");
+  if (f2.dn_pitch) {
+    if (!Q38_FFN_X_PREFETCH || !f2.weight_epoch) {
+      if (mempool_is_group_coordinator()) {
+        const dma_id_t id = f2_x_gather(
+            f2.input, f2_x_src(f2.slice, f2.first), f2.rows,
+            F2_K(f2.slice) * sizeof(__fp16), f2.dn_pitch * sizeof(__fp16));
+        while (id && !dma_local_done_id(0u, id))
+          ;
+      }
+      f2_sync_all(); // every group's stripes have landed
+    }
+    return;
+  }
+#endif
   if (!Q38_FFN_X_PREFETCH || !f2.weight_epoch)
     f2_transfer(f2.input, src, f2.rows * F2_K(f2.slice) * sizeof(__fp16));
 #if Q38_FFN_X_CHECK
@@ -1531,6 +1872,9 @@ static NOSTACK void ffn(void) {
 #endif
     f2.dn_lag = 0u;
     f2.end = w1, f2.w_dn = w_down, f2.dn_in = F2_G_L2;
+#if G2_O_PADDED
+    f2.dn_pitch = 0u;
+#endif
     f2.dn_rows = Q38_R, f2.res_src = X8_MIX, f2.dn_out = X8_OUT;
     f2.q_base = 0u;
     // f2 sits in remote L1 and f2_layout reloads it at once on this core:
@@ -1616,6 +1960,9 @@ static NOSTACK void f2_c1(void) {
     f2.rows_dn = Q38_FFN_DN_ROWS, f2.slices = Q38_FFN_DOWN_SLICES;
     f2.slice = 1u, f2.weight_epoch = 1u, f2.dn_lag = 0u;
     f2.end = Q38_FFN_DN_ROWS, f2.w_dn = w_down, f2.dn_in = F2_G_L2;
+#if G2_O_PADDED
+    f2.dn_pitch = 0u;
+#endif
     f2.dn_rows = Q38_R, f2.res_src = result_mixer, f2.dn_out = result_output;
   }
   if (tnc_is_tile_agent())
