@@ -615,13 +615,10 @@ static q38_local_sweep_t *q38_loc LOCAL;
 // The query-norm weight, loaded once per layer rather than once per window.
 static __fp16 q38_q_gamma[Q38_HD] LOCAL;
 
-// Global alias of a level-0 window address for this core's group.
-static void *q38_la(const void *window) {
-  const uint32_t o = (uint32_t)window - VC_WINDOW_BASE_0;
-  return (void *)((o % VC_ROW_BYTES) + mempool_get_group_id() * VC_ROW_BYTES +
-                  o / VC_ROW_BYTES * VC_GLOBAL_ROW_BYTES);
-}
-#define Q38_LA(ptr) ((__typeof__(ptr))q38_la(ptr))
+// Global alias of a level-0 window address for this core's group: the one
+// helper (q38_vc.c), which adds VC_GLOBAL_BASE for domain builds.
+#define q38_la(window) vc_group_global(window)
+#define Q38_LA(ptr) Q38_VC_GLOBAL(ptr)
 
 static NOSTACK void q38_local_init(void) {
   vc_init();
@@ -637,8 +634,10 @@ static NOSTACK void q38_local_init(void) {
   if (loc == 0)
     q38_fatal("[qwen38_fatal] vc_malloc bytes=", bytes);
   const vc_rect_t rect = vc_rect(0);
+  // vc_global_addr is the base-less DMA form; core pointers add the base.
   if ((uint32_t)q38_la(&loc->slot) !=
-      vc_global_addr(&rect, (uint32_t)&loc->slot - VC_WINDOW_BASE_0))
+      VC_GLOBAL_BASE +
+          vc_global_addr(&rect, (uint32_t)&loc->slot - VC_WINDOW_BASE_0))
     q38_fatal("[qwen38_fatal] vc alias slot=", (uint32_t)&loc->slot);
   if (mempool_get_core_id() == 0u)
     q38_loc = loc;

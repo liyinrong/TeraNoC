@@ -134,7 +134,7 @@ typedef struct {
   uint32_t padding[NUM_BANKS_PER_TILE - 2u];
 #endif
 } q38_avs_tile_sync_t;
-static q38_avs_tile_sync_t avs_sync[NUM_REDMULE_TILES] Q38_VC_TILE_LOCAL;
+static q38_avs_tile_sync_t avs_sync[NUM_REDMULE_TILES] Q38_AV_STATE;
 #if Q38_AV_SWEEP_ASYNC
 // Blocks each core of a tile has completed (softmax, rescale), one word per
 // core. PV(n) reads the probabilities of every core's rows, so it waits for
@@ -143,7 +143,7 @@ typedef struct {
   uint32_t done[NUM_CORES_PER_TILE];
   uint32_t padding[NUM_BANKS_PER_TILE - NUM_CORES_PER_TILE];
 } q38_avs_lanes_t;
-static q38_avs_lanes_t avs_lanes[NUM_REDMULE_TILES] Q38_VC_TILE_LOCAL;
+static q38_avs_lanes_t avs_lanes[NUM_REDMULE_TILES] Q38_AV_STATE;
 #endif
 static q38_avs_local_t *avs_local Q38_VC_SMALL;
 static __fp16 *avs_kv Q38_VC_SMALL;
@@ -154,7 +154,7 @@ typedef struct {
   avs_fast_k_t k;
   uint32_t padding[NUM_BANKS_PER_TILE - sizeof(avs_fast_k_t) / 4u];
 } avs_fast_kc_t;
-static avs_fast_kc_t avs_fast_kc[NUM_REDMULE_TILES] Q38_VC_TILE_LOCAL;
+static avs_fast_kc_t avs_fast_kc[NUM_REDMULE_TILES] Q38_AV_STATE;
 // 1: blocks with causally masked rows also take the fast rows (mode 4).
 #ifndef Q38_AV_SWEEP_FAST_MASK
 #define Q38_AV_SWEEP_FAST_MASK 0
@@ -166,7 +166,7 @@ static avs_fast_kc_t avs_fast_kc[NUM_REDMULE_TILES] Q38_VC_TILE_LOCAL;
 typedef struct {
   int16_t idx[NUM_BANKS_PER_TILE * 2u];
 } avs_mask_idx_t;
-static avs_mask_idx_t avs_mask_idx[NUM_REDMULE_TILES] Q38_VC_TILE_LOCAL;
+static avs_mask_idx_t avs_mask_idx[NUM_REDMULE_TILES] Q38_AV_STATE;
 _Static_assert(AVS_FAST_PIECE <= NUM_BANKS_PER_TILE * 2u,
                "One index row covers a fast-row piece");
 #endif
@@ -694,7 +694,7 @@ typedef struct {
   uint32_t gates0; // LATE_GATE0: window 0's gates landed
   uint32_t padding[NUM_BANKS_PER_TILE - 2u - AVS_QBANKS];
 } q38_avs_group_sync_t;
-static q38_avs_group_sync_t avs_gsync[NUM_REDMULE_TILES] Q38_VC_TILE_LOCAL;
+static q38_avs_group_sync_t avs_gsync[NUM_REDMULE_TILES] Q38_AV_STATE;
 
 static q38_avs_group_sync_t *avs_group_rec(void) {
   return avs_gsync + mempool_get_group_id() * NUM_TILES_PER_GROUP;
@@ -741,7 +741,7 @@ static union {
   avs_agent_t a;
   uint32_t row[(sizeof(avs_agent_t) + NUM_BANKS_PER_TILE * 4u - 1u) /
                (NUM_BANKS_PER_TILE * 4u) * NUM_BANKS_PER_TILE];
-} avs_agents[NUM_REDMULE_TILES] Q38_VC_TILE_LOCAL;
+} avs_agents[NUM_REDMULE_TILES] Q38_AV_STATE;
 #else
 // The tile agent's scheduler state for one window; block indices are local
 // to the window, `g` is the window's first global block.
@@ -1129,6 +1129,8 @@ static NOSTACK void avs_fast_rows(__fp16 *row, uint32_t i0, uint32_t i1,
                  :
                  : "r"(row + 3u * AVS_FAST_PIECE)
                  : "memory");
+    // The sum is an FP32 element: extract it at SEW 32 (vfmv.f.s reads SEW).
+    asm volatile("vsetvli zero, %0, e32, m1, ta, ma" : : "r"(1u));
     asm volatile("vfmv.f.s %0, v0" : "=f"(sum));
     st->denominator = correction * st->denominator + sum;
     *Q38_LA(avs_local->alpha + avs_scalar_index(i, AVS_ALPHA_SLOTS)) =

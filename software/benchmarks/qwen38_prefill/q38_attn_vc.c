@@ -55,6 +55,12 @@ _Static_assert(VIRTUAL_CLUSTER &&FSYNC_TPG_SIDE != 0 &&
                    Q38_REDMULE_MATMUL && !Q38_DELAY_SEED,
                "Phased attention: whole VCs, head units, aligned row blocks");
 
+// Attention-only handshakes, reclaimed by FFN after the final attention join.
+// Persistent timing records use Q38_VC_TILE_LOCAL and remain outside this area.
+// Global alignment and the tile/group window mappings are unchanged.
+#define Q38_AV_STATE                                                           \
+  __attribute__((section(".l1_attn"), aligned(NUM_BANKS * sizeof(uint32_t))))
+
 // Projected Q and gates (head-major, [head][row][Q38_HD]) and the gated context
 // ([row][Q38_QDIM]) between the phases. They are too large for the program's
 // L2 image, which ends below the data sidecar, so they take the top of L2,
@@ -255,7 +261,7 @@ typedef struct {
 } q38_av_work_t;
 _Static_assert(sizeof(q38_av_progress_t) == NUM_BANKS_PER_TILE * 4u,
                "Attention progress must occupy one owner-tile bank stripe");
-static q38_av_progress_t av_progress[NUM_REDMULE_TILES] Q38_VC_TILE_LOCAL;
+static q38_av_progress_t av_progress[NUM_REDMULE_TILES] Q38_AV_STATE;
 
 static uint32_t av_copy_unit(uint32_t u) {
   return u < 2u * Q38_QH ? u & 1u : u >= 2u * Q38_QH + Q38_KVH;
@@ -1140,7 +1146,7 @@ typedef struct {
   uint32_t landed;            // units in their slots (coordinator)
   uint32_t done[AVQ_WORKERS]; // units each vector core finished
 } avq_progress_t;
-static avq_progress_t avq_progress[NUM_REDMULE_TILES] Q38_VC_TILE_LOCAL;
+static avq_progress_t avq_progress[NUM_REDMULE_TILES] Q38_AV_STATE;
 static uint32_t avq_row Q38_VC_SMALL;
 #if Q38_AV_QKV_F2_PROF
 // Per engine: worker Q busy, K busy, wait; coordinator (first engine of its
@@ -1289,8 +1295,8 @@ static char *avq_at_b(uint32_t base, uint32_t e, uint32_t o) {
 
 // avq_epi_row, bit for bit, on resolved addresses (the compiler re-derives
 // avq_row from an L1 flag on every avq_at). The sum of squares starts with a
-// product (x * x is exact in FP32) instead of a cleared accumulator. A Q row
-// is stored as 32-bit elements (the same bytes; neutral, stores pack words).
+// product (x * x is exact in FP32) instead of a cleared accumulator, and a Q
+// row is stored as 32-bit elements: a vector store costs per element.
 static void avq_epi_row_fast(__fp16 *x, uint32_t key, const __fp16 *cos,
                              const __fp16 *sin, char *kt) {
   const float zero = 0.0f, zh = llm_f16box(0.0f);
@@ -1903,11 +1909,26 @@ static NOSTACK void attention_phased(void) {
   if (mempool_get_core_id() == 0u)
     av_bounds[1] = mempool_get_timer();
 #endif
+#if Q38_AV_STOP_PHASE
+  if (q38_av_stop == 1u) {
+    sync_all();
+    if (mempool_get_core_id() == 0u)
+      av_bounds[2] = av_bounds[3] = av_bounds[1];
+    return;
+  }
+#endif
   av_sweep();
 #if Q38_AV_PROFILE
   sync_all();
   if (mempool_get_core_id() == 0u)
     av_bounds[2] = mempool_get_timer();
+#endif
+#if Q38_AV_STOP_PHASE
+  if (q38_av_stop == 2u) {
+    if (mempool_get_core_id() == 0u)
+      av_bounds[3] = av_bounds[2];
+    return;
+  }
 #endif
   av_out();
 #if Q38_AV_PROFILE

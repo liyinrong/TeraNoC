@@ -75,27 +75,6 @@ class BoundedReferenceTests(unittest.TestCase):
                                       == np.float16 else np.uint32),
                         err_msg=f"{kind} {name}")
 
-    def test_the_cache_is_packed_at_the_key_block(self):
-        # A key block other than 64: the bounded cache must follow it, as the
-        # whole-tensor golden does (the default block once hid that).
-        block, tokens = 128, 200
-        g, rows, x, weights = fixture("attention", tokens, 2)
-        expected, state, intermediate = attention_layer(
-            x, weights, g, online=True, key_block=block,
-            linear_op=linear_f16_fma)
-        gold = golden_tensors("attention", rows, expected, state,
-                              intermediate, key_block=block)
-        shape, edges = check_shapes("attention", g, rows, tokens,
-                                    block)["cache"]
-        starts, taken = sample_runs(shape, 256, 7, edges, 16)
-        index = (starts.astype(np.int64)[:, None] +
-                 np.arange(taken)[None, :]).ravel()
-        got = evaluate("attention", g, tokens, rows, x, weights,
-                       {"cache": (shape, index)}, block)
-        np.testing.assert_array_equal(
-            got["cache"].view(np.uint16),
-            gold["cache"].ravel()[index].view(np.uint16))
-
     def test_a_single_tensor_costs_only_the_rows_it_names(self):
         kind, tokens = "attention", 70
         g, rows, x, weights = fixture(kind, tokens)

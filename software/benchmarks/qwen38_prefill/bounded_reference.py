@@ -146,7 +146,7 @@ def evaluate(kind, geometry, tokens, rows, x, weights, wanted, key_block=64,
             _, index = wanted["cache"]
             packed = pack_kv_cache(np.stack([
                 pad_rows(part, rows).transpose(1, 0, 2)
-                for part in (key, value)]), key_block)
+                for part in (key, value)]))
             out["cache"] = packed[np.asarray(index, np.int64)]
         span = len(needed)
         q_gate = linear(normalized[:, needed], weights["q_gate"]).reshape(

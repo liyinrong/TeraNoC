@@ -127,6 +127,19 @@
 #ifndef Q38_X8_WARM_CHUNKS
 #define Q38_X8_WARM_CHUNKS 0
 #endif
+// Debug (timing window): stop the attention layer after QKV (1) or after the
+// sweep (2); out-proj and FFN are skipped, values are incomplete.
+#ifndef Q38_AV_STOP_PHASE
+#define Q38_AV_STOP_PHASE 0
+#endif
+#if Q38_AV_STOP_PHASE && !(Q38_KIND == 0 && Q38_ATTN_VC)
+#error "Q38_AV_STOP_PHASE stops the VC attention layer"
+#endif
+#if Q38_AV_STOP_PHASE
+// Read at run time: out-proj and FFN stay compiled and referenced, so the
+// code up to the stop is generated as in the full layer (no re-inlining).
+static volatile uint32_t q38_av_stop = Q38_AV_STOP_PHASE;
+#endif
 // Debug (timing, with SNAP): the first item starts at its FFN (in-proj,
 // chunk core and out-projection skipped; their inputs are garbage anyway).
 #ifndef Q38_X8_START_FFN
@@ -2008,6 +2021,44 @@ static void x8_report(void) {
 #include "q38_x8_pipe.c"
 #endif
 #endif
+#ifndef Q38_AV_DOMAIN_REPORT
+#define Q38_AV_DOMAIN_REPORT 0
+#endif
+#if Q38_AV_DOMAIN_REPORT
+#if !(DOMAINS > 1 && Q38_ATTN_VC && Q38_AV_PROFILE && Q38_KIND == 0)
+#error "Q38_AV_DOMAIN_REPORT reports the attention bounds of a domain build"
+#endif
+// Only domain 0 prints (serial.c), so every domain's core 0 posts its
+// attention bounds and layer span here (shared L2 image), after a done word,
+// and domain 0's core 0 prints them all.
+#define AV_DOM_NOT_READY 0x5a5a5a5au
+#define AV_DOM_DONE(d) (0x6a000000u | (d))
+static volatile uint32_t av_dom_rep[DOMAINS][7] = {
+    [0 ... DOMAINS - 1] = {[0 ... 6] = AV_DOM_NOT_READY}};
+
+static NOSTACK void av_domain_report(uint32_t start, uint32_t end) {
+  const uint32_t d = mempool_get_domain_id();
+  for (uint32_t i = 0u; i < 4u; ++i)
+    av_dom_rep[d][1u + i] = av_bounds[i];
+  av_dom_rep[d][5] = start;
+  av_dom_rep[d][6] = end;
+  __sync_synchronize();
+  av_dom_rep[d][0] = AV_DOM_DONE(d);
+  __sync_synchronize();
+  if (d != 0u)
+    return;
+  for (uint32_t k = 0u; k < DOMAINS; ++k) {
+    const volatile uint32_t *const r = av_dom_rep[k];
+    while (r[0] != AV_DOM_DONE(k))
+      mempool_wait(256u);
+    __sync_synchronize();
+    printf("[qwen38_av_domain] domain=%u qkv=%u sweep=%u out=%u start=%u "
+           "qkv_end=%u sweep_end=%u end=%u layer_start=%u layer_end=%u\n",
+           k, r[2] - r[1], r[3] - r[2], r[4] - r[3], r[1], r[2], r[3], r[4],
+           r[5], r[6]);
+  }
+}
+#endif
 // GVSoC sends a trapping core (e.g. an FP or vector instruction on a scalar
 // agent) back through the boot ROM into main, silently: it then waits in a
 // barrier the others never reach. Initialized data, so loaded with the ELF.
@@ -2193,7 +2244,10 @@ for (uint32_t base = 0u; base < Q38_R; base += Q38_FFN_ROWS) {
 #if Q38_F2_C1
   f2_c1();
 #elif Q38_PROBE_PHASE != 1 && !Q38_X8_BATCH
-  ffn();
+#if Q38_AV_STOP_PHASE
+  if (!q38_av_stop)
+#endif
+    ffn();
 #endif
 #if Q38_SCHEDULE_PROBE
   sync_all();
@@ -2214,7 +2268,8 @@ for (uint32_t base = 0u; base < Q38_R; base += Q38_FFN_ROWS) {
   const uint32_t cycles = end - start;
 #if Q38_SCHEDULE_PROBE ||                                                      \
     (Q38_X8_PIPE && (!Q38_X8_PIPE_RELAY || DOMAINS > 1 || Q38_X8_PIPE_SNAP ||  \
-                     Q38_X8_STOP_PHASE || Q38_X8_PIPE_TEST))
+                     Q38_X8_STOP_PHASE || Q38_X8_PIPE_TEST)) ||                \
+    Q38_AV_STOP_PHASE
   // Numerical tensors are deliberately incomplete in this scheduling run (or
   // in a layer pipeline other than the one-domain relay chain).
 #else
@@ -2321,6 +2376,9 @@ for (uint32_t base = 0u; base < Q38_R; base += Q38_FFN_ROWS) {
     printf("[qwen38_layer] kind=%u tokens=%u rows=%u cores=%u schedule=%u "
            "start=%u end=%u cycles=%u\n",
            Q38_KIND, Q38_S, Q38_R, NUM_CORES, Q38_ASYNC, start, end, cycles);
+#if Q38_AV_DOMAIN_REPORT
+    av_domain_report(start, end);
+#endif
     // Diagnostic context export is inside the measured interval because the
     // window buffer is reused; subtract it for a layer-only comparison.
     printf("[qwen38_bounds] mixer_rows=%u ffn_rows=%u weight_panels=%u "
