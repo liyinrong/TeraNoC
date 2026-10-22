@@ -171,6 +171,9 @@ _Static_assert(Q38_R *AV_PSTRIDE * 2u % 8192u == 0u &&
                    Q38_R * Q38_KVH * Q38_HD * 4u % 8192u == 0u &&
                    Q38_R * Q38_D * 2u % 8192u == 0u,
                "Home attention scratch: whole 8 KiB L2 rows");
+#if !Q38_X8_PIPE
+static inline __fp16 *av_mixer_home(void) { return AV_MIXER; }
+#endif
 #else
 #define AV_CACHE result_cache
 #define AV_MIXER result_mixer

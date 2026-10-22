@@ -225,7 +225,14 @@ static struct {
 #define X8_OUT x8_io.out
 #else
 #define X8_IN input_init
+#if Q38_KIND == 0 && DOMAINS > 1 && DOMAIN_L2_HOME && Q38_L2_TILED
+// The FFN residual is the mixer that out-proj wrote to its home scratch
+// (AV_MIXER, q38_attn_vc.c), which is defined after the FFN is included.
+static inline __fp16 *av_mixer_home(void);
+#define X8_MIX av_mixer_home()
+#else
 #define X8_MIX result_mixer
+#endif
 #define X8_OUT result_output
 #endif
 #ifndef Q38_VC_PROFILE
