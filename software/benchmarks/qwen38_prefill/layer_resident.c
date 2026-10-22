@@ -2194,7 +2194,7 @@ int main(void) {
     probe_ffn_end = 0u;
   }
 #endif
-#if Q38_KIND != 0 && Q38_FFN_L2 && Q38_GDN_ENTRY_INIT
+#if Q38_FFN_L2 && Q38_GDN_ENTRY_INIT
   f2_init_records();
 #endif
   q38_edge_barrier();

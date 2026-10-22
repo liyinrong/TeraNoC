@@ -38,8 +38,8 @@
 #define Q38_FFN_QUEUE 0
 #endif
 // Zero every f2 record once at program start (.l1 is not zeroed: X in RTL).
-// A GDN layer's first f2 user (gdn2_project) reads f2.q_base and step_done,
-// which only the FFN and attention entries reset.
+// The first f2 user only resets the records it reads (as source-x10y, which
+// named the switch for the GDN layer; one switch for both layer kinds).
 #ifndef Q38_GDN_ENTRY_INIT
 #define Q38_GDN_ENTRY_INIT 1
 #endif
@@ -628,6 +628,10 @@ static void f2_init_records(void) {
     f2.slot_bytes = f2.w_offset = f2.slots = 0u;
     f2.ship_rows = f2.ship_columns = f2.ship_elems = f2.peak = 0u;
     f2.first = f2.slice = f2.arena_base = f2.weight_epoch = f2.early = 0u;
+#if F2_AV_PACK
+    f2.z_tail = 0;
+    f2.packed_out = 0u;
+#endif
     f2.q_base = 0u;
     f2.pair = f2.k_up = f2.n_up = f2.rows_up = f2.nseg = 0u;
     f2.seg_panels[0] = f2.seg_panels[1] = f2.seg_panels[2] = 0u;
