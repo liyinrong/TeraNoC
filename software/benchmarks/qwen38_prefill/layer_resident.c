@@ -1197,7 +1197,9 @@ static void schedule_delay(uint32_t tag) {
 // illegal on the rv32ima core 0 of the 1 + 3 tile, the core that records.
 static void q38_dpi(uint32_t type, const void *result, const void *golden,
                     uint32_t count, uint32_t tolerance_bits, uint32_t verbose) {
-  if (mempool_get_core_id() != 0u)
+  // Domain builds: core ids are domain-local, so only domain 0 records (its EOC
+  // waits for every domain); otherwise four domains race for the 4 slots.
+  if (mempool_get_core_id() != 0u || mempool_get_domain_id() != 0u)
     return;
   const uint32_t id = mempool_dpi_check_count;
   if (id >= MEMPOOL_DPI_CHECK_MAX)
