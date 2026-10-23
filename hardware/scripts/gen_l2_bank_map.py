@@ -61,6 +61,7 @@ BIG = 10 ** 6
 DIR_CODE = {'N': 0, 'E': 1, 'S': 2, 'W': 3}
 DIR_NAME = {'N': 'North', 'E': 'East', 'S': 'South', 'W': 'West'}
 
+
 def hungarian(cost):
     """Minimum-cost perfect matching, O(n^3) (Jonker-Volgenant style)."""
     n = len(cost)
@@ -186,8 +187,9 @@ def best(n, nb_banks, fold):
 def placement(n, nb_banks=None, fold=None):
     """The map to emit, solved for Morton ids at every mesh size.
 
-    The 4x4 map was once pinned to the one solved for raster ids (8 hops then,
-    28 under Morton); the stable branch, which keeps raster ids, still ships it.
+    The 4x4 map was once pinned to the one solved for raster ids (8 hops
+    then, 28 under Morton); the stable branch, which keeps raster ids, still
+    ships it.
     """
     nb_banks = nb_banks or 4 * n
     fold = fold or (n * n // nb_banks)
