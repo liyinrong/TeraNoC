@@ -1967,6 +1967,10 @@ __asm__(".globl q38_call_on_stack\n"
         "  addi sp, sp, 16\n"
         "  ret\n");
 static int q38_main(void);
+#if !DOMAIN_L2_HOME && Q38_GDN_V2 && Q38_X8_PIPE
+static NOSTACK int q38_x8_linear_report(uint32_t core, uint32_t start,
+                                        uint32_t end, uint32_t cycles);
+#endif
 #endif
 #if Q38_GDN_V2 && Q38_X8_BATCH
 // The batch-major GDN layer: in-projection of batch b+1 after the FFN of
@@ -2368,6 +2372,14 @@ for (uint32_t base = 0u; base < Q38_R; base += Q38_FFN_ROWS) {
 #endif
   __sync_synchronize();
   q38_edge_barrier();
+#if DOMAINS > 1 && !DOMAIN_L2_HOME && Q38_GDN_V2 && Q38_X8_PIPE
+  // Report-only spills must not stay on the 512 B stack during linear DMA.
+  return q38_x8_linear_report(core, start, end, cycles);
+}
+
+static NOSTACK int q38_x8_linear_report(uint32_t core, uint32_t start,
+                                        uint32_t end, uint32_t cycles) {
+#endif
   if (core == 0) {
 #if Q38_SCHEDULE_PROBE
     probe_report();
