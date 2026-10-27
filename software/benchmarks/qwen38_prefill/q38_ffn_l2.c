@@ -199,6 +199,26 @@ _Static_assert((Q38_PROBE_PHASE == 2 || Q38_GDN_V2 || Q38_ATTN_L2_LAYER) &&
 #else
 #define F2_AV_PACK 0
 #endif
+#if Q38_AV_OUT_BALANCED_K
+#if Q38_KIND == 0 && Q38_ATTN_VC
+#undef F2_AV_PACK
+#define F2_AV_PACK 0
+_Static_assert(Q38_QDIM == 6144u && Q38_HD == 256u && Q38_FFN_DN_ROWS == 256u &&
+                   Q38_FFN_DN_TILE == 32u && NT == 64u &&
+                   Q38_VC_ENGINES == 16u && NUM_TILES_PER_GROUP == 4u &&
+                   Q38_VC_COUNT == 4u && NUM_GROUPS == 16u && Q38_FFN_LAG &&
+                   Q38_FFN_X_PREFETCH,
+               "Balanced attention out uses the unpacked three-slot layout");
+_Static_assert(64u * 32u * NT * 2u +
+                       2u * Q38_FFN_DN_ROWS * (Q38_QDIM / 2u) * 2u +
+                       3u * 2u * (Q38_QDIM / 2u) * NT * 2u / Q38_VC_ROW *
+                           VC_GLOBAL_ROW_BYTES +
+                       4u * 10u * 32u * NT * 2u * NUM_GROUPS <=
+                   NUM_GROUPS * NUM_TILES_PER_GROUP * NUM_BANKS_PER_TILE *
+                       L1_BANK_SIZE,
+               "Balanced out arena fits L1; f2check verifies its linked base");
+#endif
+#endif
 #if F2_AV_PACK
 #define F2_PACKED_OUT (f2.packed_out)
 #else

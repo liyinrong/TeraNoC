@@ -85,19 +85,25 @@ _Static_assert(Q38_R *Q38_QDIM * 2u % 16384u == 0u &&
 // projection: the gated context is then [slices][R][QDIM / slices]. RedMulE
 // reads X at a row stride of its K, and K = QDIM (12 KiB) puts the 32 rows of
 // a job on only two offsets of the 8 KiB global L1 row.
-#ifndef Q38_AV_OUT_F2
-#define Q38_AV_OUT_F2 0
-#endif
-#ifndef Q38_AV_OUT_SLICES
-#define Q38_AV_OUT_SLICES (Q38_AV_OUT_F2 ? 2u : 1u)
-#endif
+// L2-tiled attention defaults to equal K slices (layer_resident.c).
 // Out-projection: three weight slots (engines meet one step behind).
 #ifndef Q38_AV_OUT_LAG
 #define Q38_AV_OUT_LAG 1u
 #endif
 #define AV_GK (Q38_QDIM / Q38_AV_OUT_SLICES)
 // Head h's columns of token's gated row; AV_GPITCH(h): its row pitch.
-#if Q38_AV_OUT_SLICES == 1
+#if Q38_AV_OUT_BALANCED_K
+_Static_assert(Q38_AV_OUT_F2 &&Q38_AV_OUT_SLICES == 2u &&
+                   AV_GK == Q38_QDIM / 2u && AV_GK % Q38_HD == 0u &&
+                   Q38_AV_OUT_LAG == 1u,
+               "Balanced attention out has two equal head-aligned slices");
+_Static_assert(8192u % (Q38_HD * 2u) == 0u && AV_GK * 2u % (Q38_HD * 2u) == 0u,
+               "Each exported head stays inside one L2 row");
+#define AV_GATED(token, h)                                                     \
+  (av_gated + ((h)*Q38_HD / AV_GK * Q38_R + (token)) * AV_GK +                 \
+   (h)*Q38_HD % AV_GK)
+#define AV_GPITCH(h) AV_GK
+#elif Q38_AV_OUT_SLICES == 1
 #define AV_GATED(token, h) (av_gated + (token)*Q38_QDIM + (h)*Q38_HD)
 #define AV_GPITCH(h) Q38_QDIM
 #elif Q38_L2_TILED
@@ -1692,7 +1698,9 @@ static NOSTACK void av_out(void) {
   if (core == 0u) {
     f2.k_dn = AV_GK, f2.k_full = Q38_QDIM, f2.n_dn = Q38_D;
     f2.rows_dn = Q38_FFN_DN_ROWS, f2.slices = Q38_AV_OUT_SLICES;
-#if Q38_L2_TILED && Q38_AV_OUT_SLICES > 1
+#if Q38_AV_OUT_BALANCED_K
+    f2.k_last = 0u;
+#elif Q38_L2_TILED && Q38_AV_OUT_SLICES > 1
     // The gated context's slices (AV_GATED): whole L2 rows, then the rest.
     f2.k_dn = AV_GK0, f2.k_last = Q38_QDIM - AV_GK0;
 #elif Q38_L2_TILED

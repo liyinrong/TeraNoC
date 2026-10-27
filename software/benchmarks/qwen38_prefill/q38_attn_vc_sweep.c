@@ -561,10 +561,25 @@ static void avs_kv_ready(dma_id_t id, uint32_t *epoch) {
 static dma_id_t avs_export(uint32_t base, uint32_t batch, uint32_t bank) {
   dma_id_t id = 0u;
   const uint32_t lanes = VC_ROW_BYTES / (Q38_HD * 2u);
+#if Q38_AV_OUT_BALANCED_K
+  const uint32_t pitch = lanes * avs_row_step() * AV_GK * 2u;
+  const uint32_t step = 8192u / Q38_MIN(8192u, pitch & (0u - pitch));
+#endif
   for (uint32_t j = 0; j < AVS_OWNERS; ++j) {
     if (!avs_exists(base, batch, j))
       continue;
     const uint32_t h = avs_head(batch, j), rows = avs_owner_rows(base, j);
+#if Q38_AV_OUT_BALANCED_K
+    for (uint32_t lane = 0u; lane < lanes * step && lane < rows; ++lane) {
+      const uint32_t token = base + avs_row_at(j, lane);
+      const uint32_t d2 = lanes * step * avs_row_step() * AV_GPITCH(h) * 2u;
+      id = av_dma_rows(
+          AV_GATED(token, h),
+          q38_la(avs_gated_bank(bank) + (j * AVS_TILE + lane) * Q38_HD),
+          Q38_HD * 2u, d2, step * VC_GLOBAL_ROW_BYTES,
+          (rows - lane + lanes * step - 1u) / (lanes * step),
+          d2 < 8192u ? 8192u / d2 : rows);
+#else
     for (uint32_t lane = 0u; lane < lanes && lane < rows; ++lane) {
       const uint32_t token = base + avs_row_at(j, lane);
       const uint32_t d2 = lanes * avs_row_step() * AV_GPITCH(h) * 2u;
@@ -573,6 +588,7 @@ static dma_id_t avs_export(uint32_t base, uint32_t batch, uint32_t bank) {
           q38_la(avs_gated_bank(bank) + (j * AVS_TILE + lane) * Q38_HD),
           Q38_HD * 2u, d2, VC_GLOBAL_ROW_BYTES,
           (rows - lane + lanes - 1u) / lanes, d2 < 8192u ? 8192u / d2 : rows);
+#endif
     }
   }
   return id;

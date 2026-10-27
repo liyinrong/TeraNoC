@@ -317,6 +317,23 @@ static inline __fp16 *av_mixer_home(void);
 #ifndef Q38_ATTN_VC_SWEEP
 #define Q38_ATTN_VC_SWEEP 0
 #endif
+// Out-projection on the f2 down pass with a sliced gated context.
+#ifndef Q38_AV_OUT_F2
+#define Q38_AV_OUT_F2 0
+#endif
+#ifndef Q38_AV_OUT_SLICES
+#define Q38_AV_OUT_SLICES (Q38_AV_OUT_F2 ? 2u : 1u)
+#endif
+// Balance the K split by default only for L2-tiled attention.
+#ifndef Q38_AV_OUT_BALANCED_K
+#define Q38_AV_OUT_BALANCED_K                                                  \
+  (Q38_KIND == 0 && Q38_ATTN_VC && Q38_L2_TILED && Q38_AV_OUT_F2 &&            \
+   Q38_AV_OUT_SLICES == 2u)
+#endif
+#if Q38_AV_OUT_BALANCED_K && !(Q38_KIND == 0 && Q38_ATTN_VC && Q38_L2_TILED && \
+                               Q38_AV_OUT_F2 && Q38_AV_OUT_SLICES == 2u)
+#error "Q38_AV_OUT_BALANCED_K needs L2-tiled VC attention with two F2 slices"
+#endif
 // A full attention layer: phased VC attention, then the L2 FFN.
 #define Q38_ATTN_L2_LAYER (Q38_KIND == 0 && Q38_ATTN_VC && Q38_FFN_L2)
 #ifndef Q38_AV_PROFILE
